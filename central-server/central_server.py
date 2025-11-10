@@ -31,7 +31,7 @@ import uvicorn
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://choprahetarth:helloworld@demo-day.tjaxr2t.mongodb.net/?retryWrites=true&w=majority&appName=demo-day")
 SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT", 8000))
 
 # Health monitoring
@@ -70,13 +70,45 @@ applications: Dict[str, Application] = {} # [app_id: Application]
 jobs: Dict[str, JobInfo] = {} # [job_id: JobInfo]
 
 # ============================================================================
+# Helper Functions
+# ============================================================================
+
+async def register_node_to_mongodb(node_info: NodeInfo):
+    """
+    Register a new node to the MongoDB Collection of NodesCollection.
+    This should happen ONLY at the BOOTUP of all the machines, BEFORE the health monitor is up.
+    This can ALSO HAPPEN when a node is DEAD and is being re-registered.
+    This can ALSO HAPPEN when a node's IP Changes but is still AWAITING_STATUS/HEALTHY.
+    """
+    try:
+        node_dict = node_info.model_dump(mode="json")
+        # Convert datetime to ISO format string for MongoDB
+        if node_dict.get("registration_time"):
+            node_dict["registration_time"] = node_dict["registration_time"]
+        # Set document expiration after 30 hours (in seconds)
+        # MongoDB TTL works with a date, so we use a 'last_updated' field for TTL indexing.
+        node_dict["last_updated"] = datetime.utcnow()  # always add/update
+        nodes_collection.update_one(
+            {"node_id": node_info.node_id},
+            {"$set": node_dict},
+            upsert=True
+        )
+        # Ensure TTL index exists (will not duplicate after creation)
+        # This sets a TTL of 30 hours for a node if not updated
+        nodes_collection.create_index("last_updated", expireAfterSeconds=30*60*60)
+        logger.debug(f"Node {node_info.node_id} registered to MongoDB")
+    except Exception as e:
+        logger.error(f"Error registering node {node_info.node_id} to MongoDB: {e}")
+        raise e
+
+# ============================================================================
 # Central Server Functions
 # ============================================================================
 
 # One function to register a new node with the central server when the machine_runner starts
 # and the health monitor is NOT UP yet. This is just to initialize the Node Map.
 # This is for the time, when the health monitor is booting up 
-# (installling nvidia drivers, python packages and shit)
+# (installing nvidia drivers, python packages and shit)
 
 # One function to update the node status when the health monitor is up. The idea is to 
 # take the node map, and update the status of each of them as the health monitor says on each of the nodes.
@@ -87,6 +119,52 @@ jobs: Dict[str, JobInfo] = {} # [job_id: JobInfo]
 # - Called by machine_runner when it first starts up
 # - Registers node in the node map before health monitor is ready
 # - Use case: Node is provisioning (installing drivers, dependencies, etc.)
+
+@app.post("/nodes/register")
+async def register_node(request: NodeInfo, background_tasks: BackgroundTasks):
+    try:
+        node_id = request.node_id # get the node id from machine_runner
+        ip_address = request.ip_address # get the ip address of the node from machine_runner
+        machine_runner_url = request.machine_runner_url # get the machine runner url from machine_runner
+
+        if node_id in nodes:
+            logger.warning(f"Node {node_id} is already registered. Updating the Node Info")
+            if nodes[node_id].status == NodeStatus.DEAD:
+                # re - register a DEAD NODE
+                nodes[node_id].status = NodeStatus.AWAITING_STATUS
+                nodes[node_id].ip_address = ip_address
+                nodes[node_id].registration_time = datetime.now() # re-registration time
+            elif nodes[node_id].ip_address != ip_address:
+                # in case the IP Changed but node isnt dead
+                nodes[node_id].ip_address = ip_address
+            else:
+                pass # node is already registered and healthy (do not do anything)
+        else:
+            # new node registration
+            registration_time = datetime.now() # get the current time
+
+            node_info = NodeInfo(
+                node_id=node_id, 
+                ip_address=ip_address,
+                machine_runner_url=machine_runner_url,
+                status=NodeStatus.AWAITING_STATUS,
+                registration_time=registration_time,
+                # rest everything is None and Optional as Health Montior is not up yet.
+            )
+            nodes[node_id] = node_info # add it to node directory
+            # add it to the MongoDB database asynchronously
+            background_tasks.add_task(register_node_to_mongodb, node_info)
+            logger.info(f"Registering node {node_id} with IP {ip_address} and Machine Runner URL {machine_runner_url}")
+            return {
+                "status": "registered",
+                "node_id": node_id,
+                "ip_address": ip_address,
+                "registration_time": registration_time,
+                "message": f"Node {node_id} registered successfully"
+            }
+    except Exception as e:
+        logger.error(f"Error registering node {node_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error registering node {node_id}: {e}")
 
 # Function: update_node_status()
 # - Called periodically by node's health monitor once it's operational
@@ -160,8 +238,8 @@ jobs: Dict[str, JobInfo] = {} # [job_id: JobInfo]
 @app.on_event("startup")
 async def startup():
     # Start background tasks
-    asyncio.create_task(health_monitor_loop())
-    asyncio.create_task(global_queue_polling_loop())
+    # asyncio.create_task(health_monitor_loop())
+    # asyncio.create_task(global_queue_polling_loop())
     logger.info("Tandemn Central Orchestrator Server Started")
 
 if __name__ == "__main__":

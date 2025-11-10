@@ -18,7 +18,9 @@ class NodeInfo(BaseModel):
     """
     node_id: str # unique identifier for the node
     ip_address: str # ip address of the node
+    machine_runner_url: str # machine runner url of the node
     status: NodeStatus = NodeStatus.AWAITING_STATUS  # HEALTHY, DEAD, AWAITING_STATUS
+    registration_time: Optional[datetime] = None # when the node was registered
     # the below ones are populated and updated when the health monitor is up
     gpus: Optional[dict[int, str]] = None  # GPU Info of the node (index, name)
     total_vram_gb: Optional[dict[int, float]] = None  # total vram of the node (index, total vram in GB)
