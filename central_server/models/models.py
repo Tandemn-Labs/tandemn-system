@@ -41,6 +41,28 @@ class JobStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
+
+class JobInfo(BaseModel):
+    """This is for each JOB provided to it by SLURM.
+    This is the config that the USER provides. 
+    in the future - Tandemn CLI Will accept these configurations.
+    Which model? Which task mode? which dataset? which backend etc.
+    If the model is NOT DEPLOYED, it will be deployed on the fly and
+    an APPLICATION will be created,  specific to that model, backend, quantization, task mode etc."""
+    job_id:str # unique identifier for the job
+    app_id: str # where is this job going to run?
+    status: JobStatus # QUEUED, DOCKER_LOADING, MODEL_LOADING, RUNNING, COMPLETED, FAILED
+    user: str # username of the user who submitted the job
+    submit_time: datetime # when the job was submitted
+    task_mode: str # batched_inference, streaming_inference etc.
+    model_name: str # llama-70b-hf
+    backend: Optional[str] = None # vllm, sglang
+    quantization: Optional[str] = None #awq, int4, int8, etc.
+    dataset_path: Optional[str] = None # path to the dataset
+    column_names: Optional[List[str]] = None # column names of the dataset
+    generation_kwargs: Optional[dict] = None # generation kwargs
+
+
 class ApplicationKey(BaseModel):
     """Unique identifier for an application instance
     The user has to select a model_name, 
@@ -69,25 +91,3 @@ class Application(BaseModel):
     status: str # Loading, Ready, Running, Stopping, Stopped, Failed
     created_at: datetime
     running_jobs: List[str] # list of job ids
-
-
-class JobInfo(BaseModel):
-    """This is for each JOB provided to it by SLURM.
-    This is the config that the USER provides. 
-    in the future - Tandemn CLI Will accept these configurations.
-    Which model? Which task mode? which dataset? which backend etc.
-    If the model is NOT DEPLOYED, it will be deployed on the fly and
-    an APPLICATION will be created,  specific to that model, backend, quantization, task mode etc."""
-    job_id:str # unique identifier for the job
-    app_id: str # where is this job going to run?
-    status: JobStatus # QUEUED, DOCKER_LOADING, MODEL_LOADING, RUNNING, COMPLETED, FAILED
-    user: str # username of the user who submitted the job
-    submit_time: datetime # when the job was submitted
-    task_mode: str # batched_inference, streaming_inference etc.
-    model_name: str # llama-70b-hf
-    backend: Optional[str] = None # vllm, sglang
-    quantization: Optional[str] = None #awq, int4, int8, etc.
-    dataset_path: Optional[str] = None # path to the dataset
-    column_names: Optional[List[str]] = None # column names of the dataset
-    generation_kwargs: Optional[dict] = None # generation kwargs
-
