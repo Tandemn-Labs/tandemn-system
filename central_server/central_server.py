@@ -45,7 +45,7 @@ GLOBAL_QUEUE_KEY = "tandemn:global_queue"
 # Data Models
 # ============================================================================
 
-from models.models import NodeInfo, Application, JobInfo, ApplicationKey, NodeStatus
+from models.models import NodeInfo, Application, JobInfo, ApplicationKey, NodeStatus, JobStatus
 
 # ============================================================================
 # API + LoggingConfiguration
@@ -57,6 +57,10 @@ logging.basicConfig(level=logging.INFO)
 
 # Connect to Redis (for global queue)
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+# check redis connection
+if not redis_client.ping():
+    logger.critical("Failed to connect to Redis")
+    os._exit(1)
 
 # Connect to MongoDB (for node info)
 mongo_client = MongoClient(MONGODB_URI)
@@ -117,6 +121,43 @@ async def update_node_in_mongodb(node: NodeInfo):
         logger.error(f"Error updating node {node.node_id} in MongoDB: {e}")
         raise e
     logger.info(f"Node {node.node_id} updated in MongoDB")
+
+async def push_job_to_global_queue(job:JobInfo):
+    """
+    Push a job to the global queue which is a Redis List.
+    This is called by the submit_job function.
+    Returns:
+        True if successful, False otherwise.
+    """
+    try:
+        job_dict = job.model_dump(mode="json")
+        job_json = json.dumps(job_dict)
+        redis_client.rpush(GLOBAL_QUEUE_KEY, job_json)
+        return True
+    except Exception as e:
+        logger.error(f"Error pushing job {job.job_id} to global queue: {e}")
+        raise e
+
+async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
+    """
+    Fetch the node map (all NodeInfo documents) from MongoDB, with their metrics and NodeInfo data.
+    Returns:
+        Dict[str, NodeInfo as dict] -- keyed by node_id.
+    """
+    try:
+        node_map = {}
+        # Fetch all NodeInfo docs from MongoDB (as dicts)
+        all_nodes = nodes_collection.find({})
+        for node_doc in all_nodes:
+            node_id = node_doc.get("node_id")
+            # Omit MongoDB's internal id for clarity in display
+            if "_id" in node_doc:
+                del node_doc["_id"]
+            node_map[node_id] = node_doc
+        return node_map
+    except Exception as e:
+        logger.error(f"Error fetching node map from MongoDB: {e}")
+        raise e
 
 # ============================================================================
 # Central Server Functions
@@ -253,6 +294,72 @@ async def update_node_status(request:NodeInfo, background_tasks: BackgroundTasks
 # - Pushes job to GLOBAL_QUEUE (Redis)
 # - Returns job_id to caller
 
+@app.post("/jobs/submit")
+async def submit_job(request:JobInfo):
+    """
+    This is either called by the TandemnCLI or SLURM when the user submits a job.
+    """
+    try:
+        job_id = request.job_id # unique identifier for the job
+        user = request.user# username of the user who submitted the job
+        submit_time = datetime.now() # when the job was submitted
+        task_mode = request.task_mode # batched_inference, streaming_inference etc.
+
+        if task_mode not in ["batched_inference", "online_inference", "image_generation"]: # a config file of all supported modes needs to be made for this. 
+            raise HTTPException(status_code=400, detail=f"Invalid task mode: {task_mode}")
+
+        model_name= request.model_name # llama-70b-hf
+
+        if request.backend is not None:
+            request.backend = request.backend.lower()
+            if request.backend not in ["vllm", "sglang"]: # a config file of all supported backends needs to be made. 
+                raise HTTPException(status_code=400, detail=f"Invalid backend: {request.backend}")
+        else:
+            backend = None
+        
+        if request.quantization is not None:
+            request.quantization = request.quantization.lower()
+            if request.quantization not in ["awq", "fp4", "GGMEMMFp8", "gptq", "marlin", "exl2", "bitsandbytes", "bitsandbytes-nf4", "bitsandbytes-fp4"]: # a config file of all supported quantizations needs to be made. 
+                raise HTTPException(status_code=400, detail=f"Invalid quantization: {request.quantization}")
+        else:
+            quantization = None
+
+        if request.dataset_path is not None and task_mode == "batched_inference":
+            dataset_path = request.dataset_path
+            column_names = request.column_names
+        else:
+            dataset_path = None
+            column_names = None
+
+        if request.generation_kwargs is not None:
+            generation_kwargs = request.generation_kwargs
+        else:
+            generation_kwargs = None # just use the default ones provide dby the library for the model
+        
+        job_info = JobInfo(
+            job_id=job_id,
+            user=user,
+            submit_time=submit_time,
+            task_mode=task_mode,
+            model_name=model_name,
+            backend=backend if backend is not None else None,
+            quantization=quantization if quantization is not None else None,
+            dataset_path=dataset_path if dataset_path is not None else None,
+            column_names=column_names if column_names is not None else None,
+            generation_kwargs=generation_kwargs if generation_kwargs is not None else None
+        )
+        jobs[job_id] = job_info # add it to the jobs dictionary
+        await push_job_to_global_queue(job_info)
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "message": f"Job {job_id} submitted successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error submitting job {request.job_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error submitting job {request.job_id}: {e}")
+
+
 # ============================================================================
 
 # One Function to keep on polling jobs from the Global Queue (Redis). This will, as soon as a job is queued: 
@@ -298,6 +405,17 @@ async def update_node_status(request:NodeInfo, background_tasks: BackgroundTasks
 
 # One Function to fetch the node map from the MongoDB database, with their metrics, and NodeInfos.
 
+@app.get("/nodes/map")
+async def get_node_map():
+    """
+    API endpoint: Returns full node map with all metrics & NodeInfo from MongoDB.
+    """
+    try:
+        node_map = await fetch_node_map_from_mongodb()
+        return {"nodes": node_map}
+    except Exception as e:
+        logger.error(f"Failed to return node map: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch node map")
 
 # One Function to check job status of each of the jobs. This is called by the SLURM by the user.
 # It goes through all APPLICATION QUEUES (mongodb database), and checks the status of each of the jobs.
