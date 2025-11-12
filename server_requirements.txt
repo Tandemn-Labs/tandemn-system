@@ -1,0 +1,6 @@
+fastapi
+pymongo
+redis
+uvicorn
+httpx
+psutil
