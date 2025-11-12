@@ -156,6 +156,45 @@ async def get_application_queue_key(app_key: ApplicationKey) -> str:
         logger.error(f"Error getting application queue key for {app_key_string}: {e}")
         raise e
 
+async def calculate_job_deadline(submit_time:datetime, slo:str) -> datetime:
+    """
+    This is per job that is submitted to the global_queue of the central server.
+    The idea is to create a deadline for the job that will be used to 
+    sort the jobs when they are pushed in the application queue.
+    """
+    try:
+        deadline = submit_time + timedelta(hours=int(slo.strip().lower().split("h")[0]))
+        return deadline
+    except Exception as e:
+        logger.error(f"Error calculating job deadline for {submit_time} and {slo}: {e}")
+        raise e
+
+async def add_job_to_application_queue(job:JobInfo):
+    """
+    Okay now its time to add the job to the application queue if we have the application deployed.
+    If it is not deployed, we dont call it "TILL" its deployed. We also calculate the deadline for the job
+    so as to sort them based on the priority
+    """
+    try:
+        job_id = job.job_id
+        if job.app_queue_key is None:
+            logger.error(f"Application queue key is not set for job {job.job_id}. Ignoring.")
+            raise HTTPException(status_code=400, detail=f"Application queue key is not set for job {job.job_id}")
+        else:
+            application_queue_key = job.app_queue_key # example : tandemn:app_queue:llama-70b-hf:batched_inference:vllm:awq
+
+        deadline = await calculate_job_deadline(job.submit_time, job.slo) # example : 2025-11-11 10:00:00
+
+        # add to redis sorted set 
+        # zadd adds members with a priority score, low score -> higher priority
+        redis_client.zadd(application_queue_key, {job_id: deadline.timestamp()})
+
+        logger.info(f"Job {job_id} added to application queue {application_queue_key} with deadline {deadline}")
+        return True
+    except Exception as e:
+        logger.error(f"Error adding job {job_id} to application queue {application_queue_key}: {e}")
+        raise e
+
 async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
     """
     Fetch the node map (all NodeInfo documents) from MongoDB, with their metrics and NodeInfo data.
@@ -349,10 +388,10 @@ async def submit_job(request:JobInfo):
         if request.slo is not None and task_mode == "batched_inference":
             slo = request.slo
             if isinstance(slo, str):
-                # Accept formats like "1h", "2h", "30m", "1d"
-                pattern = r'^\d+\s*[hmd]$'
+                # Accept formats like "1h", "2h", "3h", etc.
+                pattern = r'^\d+\s*[h]$'
                 if not re.match(pattern, slo.strip().lower()):
-                    raise HTTPException(status_code=400, detail="SLO must be like '1h', '2h', etc. (h=hours, m=minutes, d=days)")
+                    raise HTTPException(status_code=400, detail="SLO must be like '1h', '2h', '3h', etc. (h=hours)")
             else:
                 raise HTTPException(status_code=400, detail="SLO must be a string")
         else:
@@ -396,6 +435,8 @@ async def submit_job(request:JobInfo):
 
         jobs[job_id] = job_info # add it to the jobs dictionary
         await push_job_to_global_queue(job_info)
+        # this needs to be removed from here and added to the global_queue_polling_loop function.
+        # await add_job_to_application_queue(job_info)
 
         return {
             "status": "success",
