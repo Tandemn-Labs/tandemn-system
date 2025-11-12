@@ -23,6 +23,8 @@ import redis
 import httpx
 from pymongo import MongoClient
 import uvicorn
+import re
+
 
 
 # ============================================================================
@@ -39,7 +41,7 @@ HEALTH_CHECK_INTERVAL = 1  # seconds
 
 # Queue names
 GLOBAL_QUEUE_KEY = "tandemn:global_queue"
-# APPLICATION_QUEUE_PREFIX = "tandemn:app_queue:"
+APPLICATION_QUEUE_PREFIX = "tandemn:app_queue:" # something like tandemn:app_queue:{app_key}
 
 # ============================================================================
 # Data Models
@@ -55,11 +57,11 @@ app = FastAPI(title="Tandemn Central Orchestrator Server")
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Connect to Redis (for global queue)
+# Connect to Global Queue (Redis)
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 # check redis connection
 if not redis_client.ping():
-    logger.critical("Failed to connect to Redis")
+    logger.critical("Failed to connect to GLobal Queue")
     os._exit(1)
 
 # Connect to MongoDB (for node info)
@@ -136,6 +138,22 @@ async def push_job_to_global_queue(job:JobInfo):
         return True
     except Exception as e:
         logger.error(f"Error pushing job {job.job_id} to global queue: {e}")
+        raise e
+
+async def get_application_queue_key(app_key: ApplicationKey) -> str:
+    """
+    From a job that is JUST PUSHED to the Global Queue, 
+    this function will return the application queue key.
+    Example :
+    app_key = ApplicationKey(model_name="llama-70b-hf", task_mode="batched_inference", backend="vllm", quantization="awq")
+    returns "tandemn:app_queue:llama-70b-hf:batched_inference:vllm:awq"
+    """
+    try: 
+        app_key_string = app_key.to_string()
+        app_queue_key = f"{APPLICATION_QUEUE_PREFIX}{app_key_string}"
+        return app_queue_key
+    except Exception as e:
+        logger.error(f"Error getting application queue key for {app_key_string}: {e}")
         raise e
 
 async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
@@ -314,6 +332,8 @@ async def submit_job(request:JobInfo):
             request.backend = request.backend.lower()
             if request.backend not in ["vllm", "sglang"]: # a config file of all supported backends needs to be made. 
                 raise HTTPException(status_code=400, detail=f"Invalid backend: {request.backend}")
+            else:
+                backend = request.backend
         else:
             backend = None
         
@@ -321,8 +341,22 @@ async def submit_job(request:JobInfo):
             request.quantization = request.quantization.lower()
             if request.quantization not in ["awq", "fp4", "GGMEMMFp8", "gptq", "marlin", "exl2", "bitsandbytes", "bitsandbytes-nf4", "bitsandbytes-fp4"]: # a config file of all supported quantizations needs to be made. 
                 raise HTTPException(status_code=400, detail=f"Invalid quantization: {request.quantization}")
+            else:
+                quantization = request.quantization
         else:
             quantization = None
+
+        if request.slo is not None and task_mode == "batched_inference":
+            slo = request.slo
+            if isinstance(slo, str):
+                # Accept formats like "1h", "2h", "30m", "1d"
+                pattern = r'^\d+\s*[hmd]$'
+                if not re.match(pattern, slo.strip().lower()):
+                    raise HTTPException(status_code=400, detail="SLO must be like '1h', '2h', etc. (h=hours, m=minutes, d=days)")
+            else:
+                raise HTTPException(status_code=400, detail="SLO must be a string")
+        else:
+            slo = None
 
         if request.dataset_path is not None and task_mode == "batched_inference":
             dataset_path = request.dataset_path
@@ -336,25 +370,40 @@ async def submit_job(request:JobInfo):
         else:
             generation_kwargs = None # just use the default ones provide dby the library for the model
         
+        # make the application key from the job info
+        application_key = ApplicationKey(
+            model_name=model_name,
+            task_mode=task_mode,
+            backend=backend if backend is not None else None,
+            quantization=quantization if quantization is not None else None
+        )
+        application_queue_key = await get_application_queue_key(application_key)
+
         job_info = JobInfo(
             job_id=job_id,
             user=user,
             submit_time=submit_time,
             task_mode=task_mode,
             model_name=model_name,
+            app_queue_key = application_queue_key,
             backend=backend if backend is not None else None,
             quantization=quantization if quantization is not None else None,
             dataset_path=dataset_path if dataset_path is not None else None,
             column_names=column_names if column_names is not None else None,
+            slo=slo if slo is not None else None,
             generation_kwargs=generation_kwargs if generation_kwargs is not None else None
         )
+
         jobs[job_id] = job_info # add it to the jobs dictionary
         await push_job_to_global_queue(job_info)
+
         return {
             "status": "success",
             "job_id": job_id,
-            "message": f"Job {job_id} submitted successfully"
+            "message": f"Job {job_id} submitted successfully",
+            "application_queue_key": application_queue_key
         }
+
     except Exception as e:
         logger.error(f"Error submitting job {request.job_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error submitting job {request.job_id}: {e}")
