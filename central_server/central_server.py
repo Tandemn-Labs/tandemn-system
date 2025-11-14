@@ -14,7 +14,7 @@ import os
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -41,13 +41,13 @@ HEALTH_CHECK_INTERVAL = 1  # seconds
 
 # Queue names
 GLOBAL_QUEUE_KEY = "tandemn:global_queue"
-APPLICATION_QUEUE_PREFIX = "tandemn:app_queue:" # something like tandemn:app_queue:{app_key}
+APPLICATION_QUEUE_PREFIX = "tandemn:app_jobs:" # Redis HASH where jobs are stored as job_id -> job_json
 
 # ============================================================================
 # Data Models
 # ============================================================================
 
-from models.models import NodeInfo, Application, JobInfo, ApplicationKey, NodeStatus, JobStatus
+from models.models import NodeInfo, Application, JobInfo, ApplicationKey, NodeStatus, JobStatus, ApplicationStatus
 
 # ============================================================================
 # API + LoggingConfiguration
@@ -74,10 +74,13 @@ applications_collection = db["application_info"]
 nodes: Dict[str, NodeInfo] = {} # [node_id: NodeInfo{}]
 applications: Dict[str, Application] = {} # [app_id: Application]
 jobs: Dict[str, JobInfo] = {} # [job_id: JobInfo]
+# app_key_to_id: Dict[str, str] = {}  # ✅ NEW: app_key_string → app_id (reverse index)
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
+
+################################# MONGODB #####################################
 
 async def register_node_to_mongodb(node_info: NodeInfo):
     """
@@ -93,7 +96,7 @@ async def register_node_to_mongodb(node_info: NodeInfo):
             node_dict["registration_time"] = node_dict["registration_time"]
         # Set document expiration after 30 hours (in seconds)
         # MongoDB TTL works with a date, so we use a 'last_updated' field for TTL indexing.
-        node_dict["last_updated"] = datetime.utcnow()  # always add/update
+        node_dict["last_updated"] = str(datetime.utcnow())  # always add/update
         nodes_collection.update_one(
             {"node_id": node_info.node_id},
             {"$set": node_dict},
@@ -115,7 +118,7 @@ async def update_node_in_mongodb(node: NodeInfo):
     """
     try:
         node_dict = node.model_dump(mode="json")
-        node_dict["last_updated"] = datetime.utcnow()  # update TTL expiration
+        node_dict["last_updated"] = str(datetime.utcnow())  # update TTL expiration
         nodes_collection.update_one({"node_id": node.node_id}, {"$set": node_dict})
         # Optionally, ensure TTL index exists (no-op if already present)
         nodes_collection.create_index("last_updated", expireAfterSeconds=30*60*60)
@@ -124,76 +127,6 @@ async def update_node_in_mongodb(node: NodeInfo):
         raise e
     logger.info(f"Node {node.node_id} updated in MongoDB")
 
-async def push_job_to_global_queue(job:JobInfo):
-    """
-    Push a job to the global queue which is a Redis List.
-    This is called by the submit_job function.
-    Returns:
-        True if successful, False otherwise.
-    """
-    try:
-        job_dict = job.model_dump(mode="json")
-        job_json = json.dumps(job_dict)
-        redis_client.rpush(GLOBAL_QUEUE_KEY, job_json)
-        return True
-    except Exception as e:
-        logger.error(f"Error pushing job {job.job_id} to global queue: {e}")
-        raise e
-
-async def get_application_queue_key(app_key: ApplicationKey) -> str:
-    """
-    From a job that is JUST PUSHED to the Global Queue, 
-    this function will return the application queue key.
-    Example :
-    app_key = ApplicationKey(model_name="llama-70b-hf", task_mode="batched_inference", backend="vllm", quantization="awq")
-    returns "tandemn:app_queue:llama-70b-hf:batched_inference:vllm:awq"
-    """
-    try: 
-        app_key_string = app_key.to_string()
-        app_queue_key = f"{APPLICATION_QUEUE_PREFIX}{app_key_string}"
-        return app_queue_key
-    except Exception as e:
-        logger.error(f"Error getting application queue key for {app_key_string}: {e}")
-        raise e
-
-async def calculate_job_deadline(submit_time:datetime, slo:str) -> datetime:
-    """
-    This is per job that is submitted to the global_queue of the central server.
-    The idea is to create a deadline for the job that will be used to 
-    sort the jobs when they are pushed in the application queue.
-    """
-    try:
-        deadline = submit_time + timedelta(hours=int(slo.strip().lower().split("h")[0]))
-        return deadline
-    except Exception as e:
-        logger.error(f"Error calculating job deadline for {submit_time} and {slo}: {e}")
-        raise e
-
-async def add_job_to_application_queue(job:JobInfo):
-    """
-    Okay now its time to add the job to the application queue if we have the application deployed.
-    If it is not deployed, we dont call it "TILL" its deployed. We also calculate the deadline for the job
-    so as to sort them based on the priority
-    """
-    try:
-        job_id = job.job_id
-        if job.app_queue_key is None:
-            logger.error(f"Application queue key is not set for job {job.job_id}. Ignoring.")
-            raise HTTPException(status_code=400, detail=f"Application queue key is not set for job {job.job_id}")
-        else:
-            application_queue_key = job.app_queue_key # example : tandemn:app_queue:llama-70b-hf:batched_inference:vllm:awq
-
-        deadline = await calculate_job_deadline(job.submit_time, job.slo) # example : 2025-11-11 10:00:00
-
-        # add to redis sorted set 
-        # zadd adds members with a priority score, low score -> higher priority
-        redis_client.zadd(application_queue_key, {job_id: deadline.timestamp()})
-
-        logger.info(f"Job {job_id} added to application queue {application_queue_key} with deadline {deadline}")
-        return True
-    except Exception as e:
-        logger.error(f"Error adding job {job_id} to application queue {application_queue_key}: {e}")
-        raise e
 
 async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
     """
@@ -215,6 +148,84 @@ async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error fetching node map from MongoDB: {e}")
         raise e
+
+################################# REDIS #####################################
+
+async def push_job_to_global_queue(job:JobInfo):
+    """
+    Push a job to the global queue which is a Redis List.
+    This is called by the submit_job function.
+    Returns:
+        True if successful, False otherwise.
+    """
+    try:
+        job_dict = job.model_dump(mode="json")
+        job_json = json.dumps(job_dict)
+        redis_client.rpush(GLOBAL_QUEUE_KEY, job_json)
+        return True
+    except Exception as e:
+        logger.error(f"Error pushing job {job.job_id} to global queue: {e}")
+        raise e
+
+async def get_application_queue_key(app_key: ApplicationKey) -> str:
+    """
+    Return the per-application Redis HASH key for storing jobs tied to this application.
+    Example :
+    app_key = ApplicationKey(model_name="llama-70b-hf", task_mode="batched_inference", backend="vllm", quantization="awq")
+    returns "tandemn:app_jobs:llama-70b-hf:batched_inference:vllm:awq"
+    """
+    try: 
+        app_key_string = app_key.to_string()
+        app_queue_key = f"{APPLICATION_QUEUE_PREFIX}{app_key_string}"
+        return app_queue_key
+    except Exception as e:
+        logger.error(f"Error getting application queue key for application key: {app_key}: {e}")
+        raise e
+
+async def add_job_to_application_queue(job:JobInfo):
+    """
+    Store the job in the per-application Redis HASH keyed by job_id -> job_json.
+    If it is not deployed, we dont call it "TILL" its deployed.
+    """
+    application_queue_key = job.app_queue_key
+    if application_queue_key is None:
+        logger.error(f"Application queue key is not set for job {job.job_id}. Ignoring.")
+        raise HTTPException(status_code=400, detail=f"Application queue key is not set for job {job.job_id}")
+
+    try:
+        job_dict = job.model_dump(mode="json")
+        job_json = json.dumps(job_dict)
+        redis_client.hset(application_queue_key, job.job_id, job_json)
+
+        logger.info(f"Job {job.job_id} stored in application job map {application_queue_key}")
+        return True
+    except Exception as e:
+        logger.error(f"Error adding job {job.job_id} to application job map {application_queue_key}: {e}")
+        raise e
+############################# DEPLOYMENT FUNCTIONS #####################################
+
+class TandemnPlanner:
+
+    def __init__(self,job: JobInfo, node_map: Dict[str, Any]):
+        self.job = job
+        self.node_map = node_map
+        logging.info("TandemnPlanner initialized")
+    
+    async def get_optimal_nodes(self) -> str:
+        """
+        This function provide the best node for the job and return the assigned topology.
+        """
+        # for now it returns the entire node_map as is
+        # in the future, it will return the best nodes for the job 
+        # TODO - GANGMUK'S PLANNER TO BE CALLED HERE.
+        return self.node_map
+
+async def get_application_docker_image(application_key: ApplicationKey) -> str:
+    """
+    This function will return the docker image for the application.
+    """
+    # keep it a placeholder for now
+    return "vllm/llama-70b-hf:latest"
 
 # ============================================================================
 # Central Server Functions
@@ -342,11 +353,11 @@ async def update_node_status(request:NodeInfo, background_tasks: BackgroundTasks
 
 # ============================================================================
 
-# One Function to submit jobs to the GLobal Queue. This is called by TandemnCLI/SLURM by the user.
+# One Function to submit jobs to the GLobal Queue. This is called by TandemnCLI by the user.
 
 # PHASE 2: JOB SUBMISSION
 # Function: submit_job()
-# - Called by TandemnCLI/SLURM when user submits a job
+# - Called by TandemnCLI when user submits a job
 # - Validates job requirements
 # - Pushes job to GLOBAL_QUEUE (Redis)
 # - Returns job_id to caller
@@ -354,7 +365,7 @@ async def update_node_status(request:NodeInfo, background_tasks: BackgroundTasks
 @app.post("/jobs/submit")
 async def submit_job(request:JobInfo):
     """
-    This is either called by the TandemnCLI or SLURM when the user submits a job.
+    This is either called by the TandemnCLI when the user submits a job.
     """
     try:
         job_id = request.job_id # unique identifier for the job
@@ -416,7 +427,9 @@ async def submit_job(request:JobInfo):
             backend=backend if backend is not None else None,
             quantization=quantization if quantization is not None else None
         )
+        logging.info(f"Application key: {application_key}")
         application_queue_key = await get_application_queue_key(application_key)
+        logging.info(f"Application queue key: {application_queue_key}")
 
         job_info = JobInfo(
             job_id=job_id,
@@ -454,10 +467,10 @@ async def submit_job(request:JobInfo):
 
 # One Function to keep on polling jobs from the Global Queue (Redis). This will, as soon as a job is queued: 
 # 1 - Check which application needs to run (model+task_mode+backend+quantization)
-# 2 - Checks if application is already running on any node. If yes, pop the job from the Global Queue, and add it to the Application queue (mongodb database), and current_jobs in the NodeInfo of those nodes. 
+# 2 - Checks if application is already running on any node. If yes, pop the job from the Global Queue, and add it to the Application queue, and current_jobs in the NodeInfo of those nodes. 
 # 3 - If not, if batched - upload dataset + start the container with the application in parallel. 
 # 3.5 - For the launching  - query tandemn_planner with the node_map (above function), and allocate nodes for the job and start container on them. 
-# 4 - Pops job from Global Queue, adds it to the Application_queue (mongodb database), and current_jobs in the NodeInfo of those nodes. 
+# 4 - Pops job from Global Queue, adds it to the Application_queue, and current_jobs in the NodeInfo of those nodes. 
 # Split in multiple functions if needed. The main function should be non blocking and async. Everytime a job is queued, its applicationkey should be made. 
 
 # One function to get the docker-image from the docker/apptainer hub. This is called by the machine_runner 
@@ -474,12 +487,83 @@ async def submit_job(request:JobInfo):
 #     - NO:  Provision new application instance:
 #            a) Query tandemn_planner for optimal node allocation
 #            b) Send container start command to selected nodes
-#            c) For dataset-based jobs: Upload dataset in parallel
-#            d) Wait for application readiness
+#            c) Wait for application readiness
 #   Step 3: Pop job from GLOBAL_QUEUE
-#   Step 4: Add job to APPLICATION_QUEUE_{app_key} (MongoDB)
+#   Step 4: Add job to APPLICATION_QUEUE_{app_key} 
 #   Step 5: Update node's current_jobs list in NodeInfo
 # - Non-blocking: Process jobs asynchronously
+
+async def global_queue_polling_loop():
+    """
+    Continuously polls global queue and routes jobs to application queues.
+    - Checks if application already exists using app_key_string mapping
+    - Creates new application if needed
+    - Maintains applications dict keyed by app_key_string
+    """
+    logger.info("🔄 Starting global queue polling loop...")
+    
+    while True:
+        try:
+            # Blocking pop from global queue (1 second timeout)
+            current_job = redis_client.blpop(GLOBAL_QUEUE_KEY, timeout=1)
+            if not current_job:
+                logger.info("No jobs in the global queue")
+                await asyncio.sleep(0.1)
+                continue
+            # Parse job
+            _, job_json = current_job # Returns: ("tandemn:global_queue", "{"job_id":"job_001",...}") so we ignore "tandemn:global_queue"
+            job_data = json.loads(job_json)
+            current_job_info = JobInfo(**job_data) # Converts the job_data to a JobInfo object
+            logger.info(f"📥 Processing job {current_job_info.job_id} from global queue")
+            # Step 1: Extract ApplicationKey from job
+            application_key = ApplicationKey(
+                model_name=current_job_info.model_name,
+                task_mode=current_job_info.task_mode,
+                backend=current_job_info.backend,
+                quantization=current_job_info.quantization
+            )
+            app_key_string = await get_application_queue_key(application_key)
+            # Step 2: Check if application already exists (single-level, keyed by app_key_string)
+            if app_key_string in applications:
+                app = applications[app_key_string]
+                logger.info(f"Reusing existing application: {app_key_string}")
+                # Add job to application's running jobs
+                app.running_jobs.append(current_job_info.job_id)
+            else:
+                # Need to create new application
+                logger.info(f"🆕 Creating new application for {app_key_string}")
+                # Query tandemn_planner for node allocation
+                node_map = await fetch_node_map_from_mongodb()
+                tandemn_planner = TandemnPlanner(current_job_info, node_map)
+                assigned_topology = await tandemn_planner.get_optimal_nodes()
+                docker_image = await get_application_docker_image(application_key)
+                app_id = f"app_{uuid.uuid4().hex[:8]}"
+                application = Application(
+                    app_id=app_id,
+                    key=application_key,
+                    docker_image=docker_image,
+                    assigned_topology=json.dumps(assigned_topology),
+                    status=ApplicationStatus.LOADING.value,
+                    created_at=datetime.now(),
+                    running_jobs=[current_job_info.job_id]
+                )
+                applications[app_key_string] = application
+                logger.info(f"✅ Created application {app_key_string}")
+                # Trigger deployment to nodes
+                await deploy_application(assigned_topology, docker_image, application_key)
+            
+            # Step 3: Store job JSON in per-application Redis HASH (unsorted)
+            await add_job_to_application_queue(current_job_info)
+            
+            # Step 4: Update job status
+            current_job_info.status = JobStatus.QUEUED
+            jobs[current_job_info.job_id] = current_job_info
+            
+            logger.info(f"✅ Job {current_job_info.job_id} routed successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Error in global queue polling loop: {e}")
+            await asyncio.sleep(1)
 
 # PHASE 4: APPLICATION DEPLOYMENT
 # Function: deploy_application()
@@ -488,6 +572,35 @@ async def submit_job(request:JobInfo):
 # - Machine_runner pulls docker/apptainer image
 # - Machine_runner starts container and loads model onto GPUs
 # - Returns when application is ready to accept jobs
+
+async def deploy_application(assigned_topology: str, docker_image: str, application_key: ApplicationKey):
+    """
+    This function sends a signal to the machine_runners of the 
+    nodes in the assigned topology to deploy the application
+    """
+    for node_id, node_info in assigned_topology.items():
+        try:
+            machine_runner_url = node_info.get('machine_runner_url')
+            if not machine_runner_url:
+                logger.error(f"Missing machine_runner_url for node {node_id}, skipping deployment.")
+                continue
+            deploy_endpoint = f"{machine_runner_url}/deploy_application"
+
+            payload = {
+                "docker_image": docker_image,
+                "application_key": application_key.to_string() if hasattr(application_key, "to_string") else str(application_key),
+                "assigned_topology": assigned_topology,  # Pass full topology for context
+            }
+
+            # Use an httpx client for async POST
+            async with httpx.AsyncClient() as client:
+                response = await client.post(deploy_endpoint, json=payload, timeout=60)
+                if response.status_code != 200:
+                    logger.error(f"Deployment to node {node_id} failed: {response.status_code} - {response.text}")
+                else:
+                    logger.info(f"Deployment of application {application_key} to node {node_id} succeeded.")
+        except Exception as e:
+            logger.error(f"Exception deploying to node {node_id}: {e}")
 
 # ============================================================================
 # Monitoring Functions
@@ -507,8 +620,8 @@ async def get_node_map():
         logger.error(f"Failed to return node map: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch node map")
 
-# One Function to check job status of each of the jobs. This is called by the SLURM by the user.
-# It goes through all APPLICATION QUEUES (mongodb database), and checks the status of each of the jobs.
+# One Function to check job status of each of the jobs. This is called by TandemnCLI at the user level.
+# It goes through all APPLICATION JOB MAPS (Redis HASHES), and checks the status of each of the jobs.
 
 # ============================================================================
 # Startup Functions
@@ -517,8 +630,7 @@ async def get_node_map():
 @app.on_event("startup")
 async def startup():
     # Start background tasks
-    # asyncio.create_task(update_node_status())
-    # asyncio.create_task(global_queue_polling_loop())
+    asyncio.create_task(global_queue_polling_loop())
     logger.info("Tandemn Central Orchestrator Server Started")
 
 if __name__ == "__main__":
