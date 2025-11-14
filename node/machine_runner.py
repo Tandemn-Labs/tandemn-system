@@ -1,8 +1,14 @@
 """
-This is the machine runner and it is responsible for:
+Tandemn Node Machine Runner (Workload Orchestrator)
+
+This service is responsible for:
 - Registering the node with the central server (calls /nodes/register endpoint)
-- Starting the health monitor (docker/apptainer)
-- Taking signal from Central Server and starts container for specific application
+- Receiving deployment signals from Central Server
+- Starting/stopping containers for specific applications
+- Tracking current jobs and loaded applications on this node
+- Exposing node state to health agent via /node_state endpoint
+
+Health monitoring is handled by node_health_agent.py (separate service)
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import logging
 
+from dotenv import load_dotenv
 from pathlib import Path
 import sys
 # ✅ Add parent directory to Python path for imports
@@ -31,21 +38,35 @@ sys.path.insert(0, str(TANDEMN_ORCA_ROOT))
 
 
 from central_server.models.models import JobInfo, Application, NodeStatus, DeployApplicationRequest
-from node_utils.gpu_utils import get_gpu_info, get_total_free_vram, get_system_metrics
+
+# ============================================================================
+# Load Configuration from .env file (REQUIRED)
+# ============================================================================
+
+
+# Check if .env file exists
+env_path = Path(__file__).parent / ".env"
+if not env_path.exists():
+    print("=" * 70)
+    print("❌ ERROR: .env file not found!")
+    print("=" * 70)
+    sys.exit(1)
+
+# Load environment variables from .env
+load_dotenv(env_path)
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
-CENTRAL_SERVER_HOST = os.getenv("CENTRAL_SERVER_HOST", "localhost")  # this is the IP Address of Central Server
-CENTRAL_SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT", 8000))
+CENTRAL_SERVER_HOST = os.getenv("CENTRAL_SERVER_HOST")
+CENTRAL_SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT"))
 
+NODE_ID = os.getenv("NODE_ID")
+IP_ADDRESS = os.getenv("IP_ADDRESS")
 
-NODE_ID = f"{socket.gethostname()}-{uuid.uuid4()}"  # unique node id per process/terminal
-IP_ADDRESS = socket.gethostbyname(socket.gethostname())  # get the IP Address of the node
-
-MACHINE_RUNNER_PORT = int(os.getenv("MACHINE_RUNNER_PORT", 8001))
-MACHINE_RUNNER_URL = f"http://{IP_ADDRESS}:{MACHINE_RUNNER_PORT}"
+MACHINE_RUNNER_PORT = int(os.getenv("MACHINE_RUNNER_PORT"))
+MACHINE_RUNNER_URL = os.getenv("MACHINE_RUNNER_URL")
 
 # ============================================================================
 # FASTAPI API + Logging Configuration
@@ -84,64 +105,25 @@ async def _register_with_central() -> None:
         logger.warning("Registration failed (%s). Retrying...", exc)
         await asyncio.sleep(2)
 
-# One Function to start the Health Monitor Container
-# The logic is this - 
-# 1 - Check if the health monitor container is already running
-# 2 - If not, detect the gpu type and install the appropriate nvidia/amd drivers
-# 3 - Then install the necessary python packages and dependencies
-# 4 - Run a python script in that container that reads gpu specific metrics
-# 5 - This script will request those metrics from the container and send it to the central server
+# ============================================================================
+# Node State Endpoint (for Health Agent)
+# ============================================================================
 
-# We are making a simpler version here : The above is a placeholder for that time
-
-async def _start_health_monitor(interval_s: float = 2.0) -> None:
+@app.get("/node_state")
+async def get_node_state():
     """
-    Periodically collect node health metrics and send them to the central server.
-    Terminates the process if it cannot contact the server for a sustained period.
+    Returns current workload state of this node.
+    Called by node_health_agent to include job/application info in health reports.
     """
-    consecutive_failures = 0
-    max_failures = 30  # e.g., 1 minute tolerance if interval_s=2
-    server_url = f"http://{CENTRAL_SERVER_HOST}:{CENTRAL_SERVER_PORT}/nodes/update_status"
+    return {
+        "node_id": NODE_ID,
+        "current_jobs": list(current_jobs.keys()),
+        "loaded_applications": list(current_applications.keys())
+    }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        while True:
-            try:
-                system_metrics = await asyncio.to_thread(get_system_metrics)
-
-                # Build GPU info dicts as required by Node model:
-                gpus = {i: gpu.name for i, gpu in enumerate(system_metrics.gpu_info)}
-                total_vram_gb = {i: gpu.total_vram_gb for i, gpu in enumerate(system_metrics.gpu_info)}
-                available_vram_gb = {i: gpu.free_vram_gb for i, gpu in enumerate(system_metrics.gpu_info)}
-
-                payload = {
-                    "node_id": NODE_ID,
-                    "ip_address": IP_ADDRESS,
-                    "machine_runner_url": MACHINE_RUNNER_URL,
-                    "gpus": gpus,
-                    "total_vram_gb": total_vram_gb,
-                    "available_vram_gb": available_vram_gb,
-                    "current_jobs": list(current_jobs.keys()),
-                    "loaded_applications": list(current_applications.keys()),
-                    "status": NodeStatus.HEALTHY,
-                    "cpu_percent": system_metrics.cpu_percent,
-                    "ram_percent": system_metrics.ram_percent,
-                    # Additional fields (like last_seen) can be added by the server
-                }
-                response = await client.post(server_url, json=payload)
-                if response.status_code == 200:
-                    logger.info("Health update sent to central server")
-                    consecutive_failures = 0
-                else:
-                    consecutive_failures += 1
-                    logger.warning("Health update HTTP %d", response.status_code)
-            except Exception as e:
-                consecutive_failures += 1
-                logger.error(f"Health monitor error: {e}")
-
-            if consecutive_failures >= max_failures:
-                logger.error("Lost contact with central server, shutting down...")
-                os._exit(1)
-            await asyncio.sleep(interval_s)
+# ============================================================================
+# Application Deployment
+# ============================================================================
 
 @app.post("/deploy_application")
 async def deploy_application(request: DeployApplicationRequest):
@@ -173,9 +155,8 @@ async def deploy_image(docker_image: str, application_key: str, assigned_topolog
 async def startup_event():
     # register the node with the central server
     asyncio.create_task(_register_with_central())
-    # make the infinite loop for the health monitor
-    asyncio.create_task(_start_health_monitor())
     logger.info("Machine Runner Started")
+    logger.info("Note: Start node_health_agent.py separately for health monitoring")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=MACHINE_RUNNER_PORT)
