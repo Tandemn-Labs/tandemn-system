@@ -2,7 +2,7 @@ from enum import Enum
 from typing import Optional
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Any
 
 class NodeStatus(str, Enum):
     """This is identifier of each machine that has a GPU."""
@@ -41,6 +41,14 @@ class JobStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
+class ApplicationStatus(str, Enum):
+    """This is for each APPLICATION provided to it by the central server"""
+    LOADING = "LOADING"
+    READY = "READY"
+    RUNNING = "RUNNING"
+    STOPPING = "STOPPING"
+    STOPPED = "STOPPED"
+    FAILED = "FAILED"
 
 class JobInfo(BaseModel):
     """This is for each JOB provided to it by SLURM.
@@ -54,6 +62,7 @@ class JobInfo(BaseModel):
     submit_time: datetime # when the job was submitted
     task_mode: str # batched_inference, streaming_inference etc.
     model_name: str # llama-70b-hf
+    status: Optional[JobStatus] = JobStatus.QUEUED  # ✅ NEW: Job status tracking
     app_queue_key: Optional[str] = None # application queue key
     backend: Optional[str] = None # vllm, sglang
     quantization: Optional[str] = None #awq, int4, int8, etc.
@@ -91,3 +100,10 @@ class Application(BaseModel):
     status: str # Loading, Ready, Running, Stopping, Stopped, Failed
     created_at: datetime
     running_jobs: List[str] # list of job ids
+
+
+########### Request Models ###########
+class DeployApplicationRequest(BaseModel):
+    docker_image: str
+    application_key: str
+    assigned_topology: Dict[str, Any]
