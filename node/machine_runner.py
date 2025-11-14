@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import os
+import uuid
 import socket
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -29,7 +30,7 @@ TANDEMN_ORCA_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(TANDEMN_ORCA_ROOT))
 
 
-from central_server.models.models import JobInfo, Application, NodeStatus
+from central_server.models.models import JobInfo, Application, NodeStatus, DeployApplicationRequest
 from node_utils.gpu_utils import get_gpu_info, get_total_free_vram, get_system_metrics
 
 # ============================================================================
@@ -39,8 +40,9 @@ from node_utils.gpu_utils import get_gpu_info, get_total_free_vram, get_system_m
 CENTRAL_SERVER_HOST = os.getenv("CENTRAL_SERVER_HOST", "localhost")  # this is the IP Address of Central Server
 CENTRAL_SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT", 8000))
 
-NODE_ID = socket.gethostname() # get the hostname of the node
-IP_ADDRESS = socket.gethostbyname(NODE_ID) # get the IP Address of the node
+
+NODE_ID = f"{socket.gethostname()}-{uuid.uuid4()}"  # unique node id per process/terminal
+IP_ADDRESS = socket.gethostbyname(socket.gethostname())  # get the IP Address of the node
 
 MACHINE_RUNNER_PORT = int(os.getenv("MACHINE_RUNNER_PORT", 8001))
 MACHINE_RUNNER_URL = f"http://{IP_ADDRESS}:{MACHINE_RUNNER_PORT}"
@@ -141,10 +143,28 @@ async def _start_health_monitor(interval_s: float = 2.0) -> None:
                 os._exit(1)
             await asyncio.sleep(interval_s)
 
- 
- 
+@app.post("/deploy_application")
+async def deploy_application(request: DeployApplicationRequest):
+    """
+    This function will deploy the application in the nodes in the assigned topology
+    """
+    if NODE_ID not in request.assigned_topology:
+        return {"status": "skipped", "message": "This node is not part of the assigned topology."}
+    logger.info(f"Deploying application {request.application_key} on node {NODE_ID}")
+    # pull the docker image
+    # start the container
+    # give and set hyperparameters in the container based on the ApplicationKey
+    # return the endpoint that the central server can then use to route jobs to this particular application
+    await deploy_image(request.docker_image, request.application_key, request.assigned_topology)
+    return {"status": "success", "message": "Application deployed successfully."}
 
 
+async def deploy_image(docker_image: str, application_key: str, assigned_topology: dict):
+    """
+    This function will deploy the image on the nodes in the assigned topology
+    """
+    logging.info("Deployed!!!!!")
+    pass 
 # ============================================================================
 # Startup Function
 # ============================================================================
