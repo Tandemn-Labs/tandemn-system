@@ -51,7 +51,7 @@ class ApplicationStatus(str, Enum):
     FAILED = "FAILED"
 
 class JobInfo(BaseModel):
-    """This is for each JOB provided to it by SLURM.
+    """This is for each JOB provided to it by Tandemn CLI.
     This is the config that the USER provides. 
     in the future - Tandemn CLI Will accept these configurations.
     Which model? Which task mode? which dataset? which backend etc.
