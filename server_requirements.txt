@@ -4,3 +4,6 @@ redis
 uvicorn
 httpx
 psutil
+python-multipart
+pytest
+pytest-asyncio
