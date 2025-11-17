@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 load_dotenv()
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://choprahetarth:helloworld@demo-day.tjaxr2t.mongodb.net/?retryWrites=true&w=majority&appName=demo-day")
+MONGODB_URI = os.getenv("MONGODB_URI")
 SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT", 8000))
 
 # Health monitoring
