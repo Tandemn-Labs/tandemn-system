@@ -11,8 +11,7 @@ from botocore.exceptions import ClientError
 from .base import StorageBackend
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.addHandler(logging.StreamHandler()) #? Why is this needed?
+
 
 DEFAULT_MULTIPART_THRESHOLD_MB = 64
 DEFAULT_MULTIPART_CHUNK_MB = 64

@@ -14,6 +14,7 @@ SERVER_PORT = int(os.getenv("STORAGE_SERVER_PORT", 8002))
 CHUNK_SIZE_MB = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024 # 8MB chunks
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 app = FastAPI(title="Tandemn Storage Server")
 storage_backend = get_storage_backend()
 
