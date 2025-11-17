@@ -1,9 +1,9 @@
 # central_server/storage_factory.py
 import os
 import logging
-from backends.base import StorageBackend
-from backends.s3 import S3StorageBackend
-from backends.s3_big import S3BigStorageBackend
+from .backends.base import StorageBackend
+from .backends.s3 import S3StorageBackend
+from .backends.s3_big import S3BigStorageBackend
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +18,6 @@ def get_storage_backend() -> StorageBackend:
     if not bucket_name:
         raise ValueError("S3_BUCKET_NAME environment variable is required to initialize the storage backend")
 
-    # Ensure downstream boto3 calls see the resolved values
-    os.environ["S3_BUCKET_NAME"] = bucket_name
-    os.environ["AWS_REGION"] = aws_region
     
     if storage_type == "s3":
         logger.info("Initializing S3 storage backend")
