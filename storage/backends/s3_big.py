@@ -29,6 +29,8 @@ class S3BigStorageBackend(StorageBackend):
 
     def __init__(self):
         self.bucket_name = os.getenv("S3_BUCKET_NAME")
+        if self.bucket_name is None:
+            raise ValueError("S3_BUCKET_NAME environment variable is required to initialize the storage backend")
         self.aws_region = os.getenv("AWS_REGION", "us-east-1")
         boto_config = Config(signature_version="s3v4")
         print("running in region: ", self.aws_region)

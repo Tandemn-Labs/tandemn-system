@@ -36,6 +36,8 @@ load_dotenv()
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 MONGODB_URI = os.getenv("MONGODB_URI")
+if MONGODB_URI is None:
+    raise ValueError("MONGODB_URI is not set. Exiting.")
 SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT", 8000))
 
 # Health monitoring
