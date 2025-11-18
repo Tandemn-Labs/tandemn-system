@@ -96,11 +96,6 @@ async def download_file_from_storage(user: str, file_path: str):
     """
     try:
         logger.info(f"Downloading file {file_path} for user {user}")
-        
-        # Check if file exists first
-        if not await storage_backend.file_exists(file_path, user):
-            raise HTTPException(status_code=404, detail=f"File {file_path} not found")
-        
         # Get filename for the download
         filename = file_path.split("/")[-1] or "download"
         
