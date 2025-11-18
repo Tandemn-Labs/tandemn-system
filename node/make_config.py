@@ -51,7 +51,7 @@ def generate_config():
     )
     
     # Generate a unique but consistent NODE_ID
-    node_id = f"{hostname}-{str(uuid.uuid4())[:8]}"
+    node_id = f"{hostname}-{str(uuid.uuid4())}"
     
     # Health monitoring configuration
     print("\n Health Monitoring Configuration:")
