@@ -1,12 +1,14 @@
-# central_server/storage/s3_big.py
 import os
 import asyncio
 import logging
 from typing import AsyncIterator, List
+from unittest import async_case
 
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
+from botocore.config import Config
+
 
 from .base import StorageBackend
 
@@ -28,7 +30,9 @@ class S3BigStorageBackend(StorageBackend):
     def __init__(self):
         self.bucket_name = os.getenv("S3_BUCKET_NAME")
         self.aws_region = os.getenv("AWS_REGION", "us-east-1")
-        self.s3_client = boto3.client("s3", region_name=self.aws_region)
+        boto_config = Config(signature_version="s3v4")
+        print("running in region: ", self.aws_region)
+        self.s3_client = boto3.client("s3", region_name=self.aws_region, config=boto_config)
 
         multipart_threshold = int(
                 os.getenv("S3_MULTIPART_THRESHOLD_MB", DEFAULT_MULTIPART_THRESHOLD_MB)
@@ -187,6 +191,108 @@ class S3BigStorageBackend(StorageBackend):
             if e.response["Error"]["Code"] == "404":
                 return False
             raise
+
+# ============================== PreSigned Upload and Download Features ==============================
+# the first two are for the small and simple payloads when the files are in Kilobytes or Megabytes.
+    async def presigned_upload(self,remote_path:str, user:str, expires_seconds:int=600) -> dict:
+        key = self._get_key(remote_path, user)
+        params = {"Bucket": self.bucket_name, "Key": key}
+        try:
+            url = self.s3_client.generate_presigned_url(
+                "put_object",
+                Params=params,
+                ExpiresIn=expires_seconds,
+            )
+            return {
+                "type":"single",
+                "url":url,
+                "method":"put",
+                "headers":{"Content-Type":"application/octet-stream"},
+                "key":key
+            }
+        except ClientError as e:
+            logger.error(f"Error generating presigned upload URL: {e}")
+            raise
+    
+    async def presigned_download(self, remote_path:str, user:str, expires_seconds:int=600) -> dict:
+        """
+        This coroutine should spawn a new thread, that runs in the
+        thread pool background executor and just returns the URL when 
+        it is available.
+        """
+        key = self._get_key(remote_path, user)
+        params = {"Bucket": self.bucket_name, "Key": key}
+        try :
+            url = await asyncio.to_thread(
+                self.s3_client.generate_presigned_url,
+                "get_object",
+                Params=params,
+                ExpiresIn=expires_seconds,
+            )
+            return {
+                "url":url,
+                "method":"GET",
+                "headers":{"Accept":"application/octet-stream"},
+                "key":key
+            }
+        except ClientError as e:
+            logger.error(f"Error generating presigned download URL: {e}")
+            raise
+    
+
+# ===================== Multipart Upload and Download Features =====================
+    async def multipart_upload_start(self, remote_path:str, user:str) -> dict:
+        key = self._get_key(remote_path, user)
+        response = await asyncio.to_thread(
+            self.s3_client.create_multipart_upload,
+            Bucket=self.bucket_name,
+            Key=key)
+        return{
+            "upload_id":response["UploadId"],
+            "key":key,
+            "bucket":self.bucket_name
+        }
+
+    async def multipart_sign_part(self,upload_id:str,user:str,remote_path:str,part_number:int,expires_seconds:int=600) -> dict:
+        key = self._get_key(remote_path, user)
+        params = {
+            "Bucket": self.bucket_name,
+            "Key": key,
+            "UploadId": upload_id,
+            "PartNumber": part_number,
+        }
+        url = await asyncio.to_thread(
+            self.s3_client.generate_presigned_url,
+            "upload_part",
+            Params=params,
+            ExpiresIn=expires_seconds,
+        )
+        return {"url": url, "method":"PUT", "headers":{"Content-Type":"application/octet-stream"}, "key":key, "upload_id":upload_id, "part_number": part_number}
+
+    async def multipart_complete(self, remote_path:str, user:str, upload_id:str, parts: list[dict]) -> dict:
+        key = self._get_key(remote_path, user)
+        await asyncio.to_thread(
+            self.s3_client.complete_multipart_upload,
+            Bucket=self.bucket_name,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+        return {
+            "s3_uri": f"s3://{self.bucket_name}/{key}",
+            "key":key,
+            "bucket":self.bucket_name
+        }
+    #TODO(Hetarth): have to test it if it still works or not
+    async def multipart_abort(self, remote_path:str, user:str, upload_id:str) -> bool:
+        key = self._get_key(remote_path, user)
+        await asyncio.to_thread(
+            self.s3_client.abort_multipart_upload,
+            Bucket=self.bucket_name,
+            Key=key,
+            UploadId=upload_id,
+        )
+        return True 
 
 async def _paginate_async(page_iterator):
     """

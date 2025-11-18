@@ -1,10 +1,11 @@
 import uvicorn
 import os
 import logging
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.responses import StreamingResponse
 import tempfile
 from dotenv import load_dotenv
+import json
 
 
 from storage_factory import get_storage_backend
@@ -115,8 +116,6 @@ async def download_file_from_storage(user: str, file_path: str):
                 "Content-Disposition": f'attachment; filename="{filename}"',
             },
         )
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
@@ -129,11 +128,6 @@ async def delete_file_from_storage(user: str, file_path: str):
     """
     try:
         logger.info(f"Deleting file {file_path} for user {user}")
-        
-        # Check if file exists first
-        if not await storage_backend.file_exists(file_path, user):
-            raise HTTPException(status_code=404, detail=f"File {file_path} not found")
-        
         success = await storage_backend.delete_file(file_path, user)
         
         if success:
@@ -170,3 +164,44 @@ async def check_file_exists(user: str, file_path: str):
     except Exception as e:
         logger.error(f"Error checking file existence: {e}")
         raise HTTPException(status_code=500, detail=f"Error checking file: {str(e)}")
+
+# =========== PreSigned Upload and Download Features ========================
+
+@app.post("/storage/presign/upload")
+async def presign_upload(remote_path: str = Form(...), user: str = Form(...), expires: int = Form(600)):
+    payload = await storage_backend.presigned_upload(remote_path, user, expires)
+    return {"status": "success", **payload}
+
+@app.get("/storage/presign/download")
+async def presign_download(user: str, remote_path: str, expires: int = 600):
+    payload = await storage_backend.presigned_download(remote_path, user, expires)
+    return {"status": "success", **payload}
+
+# =========== Multipart Upload and Download Features ========================
+
+@app.post("/storage/multipart/start")
+async def multipart_start(remote_path: str = Form(...), user:str = Form(...), expires_in_seconds: int = Form(600)):
+    return await storage_backend.multipart_upload_start(remote_path, user)
+
+@app.post("/storage/multipart/sign-part")
+async def multipart_sign_part(upload_id: str = Form(...), user: str = Form(...), remote_path: str = Form(...), part_number: int = Form(...), expires: int = Form(600)):
+    return await storage_backend.multipart_sign_part(upload_id, user, remote_path, part_number, expires)
+
+@app.post("/storage/multipart/complete")
+async def multipart_complete(
+    user: str = Form(...),
+    remote_path: str = Form(...),
+    upload_id: str = Form(...),
+    parts: str = Form(...),
+):
+    parts_list = json.loads(parts)
+    if not isinstance(parts_list, list):
+            raise ValueError("parts is not a list")
+    return await storage_backend.multipart_complete(
+        remote_path, user, upload_id, parts_list
+    )
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=SERVER_PORT)
+
