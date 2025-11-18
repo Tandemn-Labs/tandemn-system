@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from typing import List, AsyncIterator
-from pathlib import Path
 
 
 class StorageBackend(ABC):
