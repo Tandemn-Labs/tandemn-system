@@ -1,8 +1,7 @@
-# central_server/storage_factory.py
 import os
 import logging
-from .backends.base import StorageBackend
-from .backends.s3_big import S3BigStorageBackend
+from backends.base import StorageBackend
+from backends.s3_big import S3BigStorageBackend
 
 logger = logging.getLogger(__name__)
 
