@@ -136,7 +136,7 @@ class StorageBackend(ABC):
         remote_path: str,
         user: str,
         upload_id: str,
-    ) -> None:
+    ) -> bool:
         """
         This just aborts the multipart upload.
         return True if successful
