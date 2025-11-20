@@ -175,7 +175,7 @@ async def presign_download(user: str, remote_path: str, expires: int = 600):
 # =========== Multipart Upload and Download Features ========================
 
 @app.post("/storage/multipart/start")
-async def multipart_start(remote_path: str = Form(...), user:str = Form(...), expires_in_seconds: int = Form(600)):
+async def multipart_start(remote_path: str = Form(...), user:str = Form(...)):
     return await storage_backend.multipart_upload_start(remote_path, user)
 
 @app.post("/storage/multipart/sign-part")

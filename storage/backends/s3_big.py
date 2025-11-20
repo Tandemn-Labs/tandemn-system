@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 from typing import AsyncIterator, List
-from unittest import async_case
 
 import boto3
 from boto3.s3.transfer import TransferConfig
