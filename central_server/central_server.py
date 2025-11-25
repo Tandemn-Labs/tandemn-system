@@ -17,6 +17,8 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
+
+import msgpack
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
 import redis
@@ -24,6 +26,7 @@ import httpx
 from pymongo import MongoClient
 import uvicorn
 import re
+import zmq.asyncio
 
 
 
@@ -39,6 +42,7 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 if MONGODB_URI is None:
     raise ValueError("MONGODB_URI is not set. Exiting.")
 SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT", 8000))
+COMPUTE_NODE_PORT = int(os.getenv("TD_LISTENING_PORT"))
 
 # Health monitoring
 HEALTH_CHECK_INTERVAL = 1  # seconds
@@ -568,6 +572,56 @@ async def global_queue_polling_loop():
         except Exception as e:
             logger.error(f"❌ Error in global queue polling loop: {e}")
             await asyncio.sleep(1)
+
+# CLI or API gateway or whatever inserts jobs into Redis. This coro processes them
+async def process_jobs():
+
+    # Read sth from Redis
+
+    # Pass the info on to the Tandemn Planner
+    # (actl would it better for jobs to go directly to orchestrator without coming through cs?)
+
+    pass
+
+# TODO: discuss orchestrator output type
+async def process_orchestrator_output(output):
+
+    node_addrs = output["node_addrs"]
+    ctx = zmq.asyncio.Context()
+
+    futures = []
+    for addr in node_addrs:
+        sock = ctx.socket(zmq.REQ)
+        sock.connect(f"tcp://{addr}:{COMPUTE_NODE_PORT}")
+        payload = {
+            "command": "launch",
+            "node_list": output["node_list"],
+            "node_addrs": output["node_addrs"],
+            "engine": output["engine"],
+            "model": output["model"],
+            "tp_size": output["tp_size"],
+            "pp_size": output["pp_size"]
+        }
+
+        future = sock.send(msgpack.packb(payload))
+        futures.append(future)
+    
+    try:
+        results = await asyncio.wait_for(asyncio.gather(*futures), timeout=60)
+        for i in range(len(results)):
+            reply = results[i]
+            if reply["status"] != 1:
+                logger.error(
+                    f"Failed to deploy mode, error from node ({output["node_list"][i]}): {results["error"]}"
+                )
+            else: 
+                logger.info("Model is up!")
+    
+    except Exception as e:
+        # Could be timed out
+        logger.error(f"Error in process_orch_output: {e}")
+        return
+
 
 # PHASE 4: APPLICATION DEPLOYMENT
 # Function: deploy_application()
