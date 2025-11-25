@@ -13,6 +13,7 @@ import traceback
 @dataclass
 class GlobalConfig:
     hostname: str = ""
+    listening_port: int
 
 @dataclass
 class LaunchConfig:
@@ -36,7 +37,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Some global variables
-worker_sockets = None
+worker_sockets = None # Only found on head node
+launch_status = None # If an engine is up right now, this will be a string
 
 # `options` is a dictionary of launch options
 async def launch_engine(options):
@@ -56,7 +58,7 @@ async def launch_engine(options):
 # Right now we use Ray to do multi-node vLLM, probably will change in the future
 async def launch_vllm(options: LaunchOptions):
 
-    global launch_config, config, worker_sockets
+    global launch_config, config, worker_sockets, launch_status
     cfg, lc, opt = config, launch_config, options
 
     # Launch Ray cluster
@@ -103,6 +105,7 @@ async def launch_vllm(options: LaunchOptions):
         
         # It's finally up, thank God
         logger.info("Ray cluster initialized.")
+        launch_status = "vllm"
 
     else: # Logic for non-head nodes
 
@@ -131,9 +134,10 @@ async def launch_vllm(options: LaunchOptions):
         
         # I've finally joined, thank God
         logger.info("Node has joined Ray cluster")
+        launch_status = "vllm"
 
         # Start the coroutine to listen for more commands from Ray cluster head
-        await asyncio.create_task(ray_worker_listen(recv_sock))
+        asyncio.create_task(ray_worker_listen(recv_sock))
     
     # Only first node in chain launch vllm
     if cfg.hostname != options.node_list[0]:
@@ -162,9 +166,10 @@ async def launch_vllm(options: LaunchOptions):
     await ray_head_teardown()
 
 # Listen for commands from Ray head node
+# Loops infinitely (but not busy since async) till teardown command received
 async def ray_worker_listen(rep_sock: zmq.asyncio.Socket):
 
-    global config, launch_config
+    global config, launch_config, launch_status
     cfg, lc = config, launch_config
 
     teardown = False
@@ -178,6 +183,10 @@ async def ray_worker_listen(rep_sock: zmq.asyncio.Socket):
                 subprocess.run(ray_teardown)
                 teardown = True
                 status = {"ray_status": 0, "hostname": cfg.hostname}
+
+                # Update global variables
+                launch_status = None
+
             case _:
                 status = {"ray_status": -1, "hostname": cfg.hostname}
 
@@ -186,11 +195,10 @@ async def ray_worker_listen(rep_sock: zmq.asyncio.Socket):
         except Exception as e:
             logger.error(f"Failed to send reply to command: {e}")
 
-
 # Teardown function invoked by head node
 async def ray_head_teardown():
 
-    global launch_config, worker_sockets
+    global launch_config, worker_sockets, launch_status
     lc = launch_config
 
     send_futures = []
@@ -205,6 +213,10 @@ async def ray_head_teardown():
     
     logger.info("All the Ray kids know to kill themselves. Goodbye world.")
     subprocess.run(["ray", "stop"])
+
+    # Update global variables
+    worker_sockets, launch_status = None, None
+
     return
 
 
@@ -213,24 +225,58 @@ def setup():
     lc = launch_config
     
     config.hostname = os.environ.get("TD_HOSTNAME")
+    config.listening_port = os.environ.get("TD_LISTENING_PORT")
 
     lc.ray_head_port = os.environ.get("TD_RAY_HEAD_PORT", lc.ray_head_port)
-    
 
+# A forever alive coro that listens to model deployment and jobs commands
+# Actl killing this whole process will prob be done with a container orchestration service
+async def listen_to_central():
+
+    global config
+    cfg = config
+
+    ctx = zmq.asyncio.Context()
+    central_sock = ctx.socket(zmq.REP)
+    central_sock.bind(f"tcp://*:{cfg.listening_port}")
+    while True:
+        msgb = await central_sock.recv()
+        msg = msgpack.unpackb(msgb)
+        reply = {}
+
+        match msg["command"]:
+            case "launch": # Launch a model
+
+                # Some sanity checks
+                if launch_status is not None: # Some deployment is already up
+                    reply = {"status": -1, "error": "A model is already deployed"}
+
+                options = LaunchOptions(
+                    node_list = msg["node_list"],
+                    node_addrs = msg["node_addrs"],
+                    engine = msg["engine"],
+                    model = msg["model"],
+                    tp_size = msg["tp_size"],
+                    pp_size = msg["pp_size"]
+                )
+
+                await asyncio.create_task(launch_engine(options))
+                if launch_status is not None:
+                    reply = {"status": -2, "error": "Model failed to launch"}
+                else:
+                    reply = {"status": 1}
+            
+            case "run": # Run a job
+                pass
+        
+        # Send reply
+        await central_sock.send(msgpack.packb(reply))
+
+# Main event loop invocation
 async def main():
     setup()
-
-    opt = LaunchOptions(
-        node_list = ["test1", "test2", "test3"],
-        node_addrs = ["","",""],
-        engine = "vllm",
-        model = "facebook/opt-125m",
-        tp_size = 4,
-        pp_size = 3
-    )
-
-    await launch_engine(opt)
-
-
+     
+    # Main loop that listens to commands from central server
+    asyncio.create_task(listen_to_central())
 
 asyncio.run(main())
