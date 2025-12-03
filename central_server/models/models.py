@@ -107,3 +107,15 @@ class DeployApplicationRequest(BaseModel):
     docker_image: str
     application_key: str
     assigned_topology: Dict[str, Any]
+
+
+### Orchestrator writes this into the Redis
+class DeploymentInfo(BaseModel):
+    job_id: str
+    dataset_path: Optional[str] = None # path to the dataset
+    node_list: List[str]
+    node_addrs: List[str]
+    engine: str
+    model: str
+    tp_size: int
+    pp_size: int

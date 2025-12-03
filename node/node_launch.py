@@ -10,6 +10,10 @@ import zmq.asyncio
 import msgpack
 import traceback
 
+# TODO: Look into cases where I should ray stop, it's not robust rn
+
+# Stuff in this config has to be defined in envvar
+# TODO: use dotenv lol
 @dataclass
 class GlobalConfig:
     hostname: str = ""
@@ -17,8 +21,8 @@ class GlobalConfig:
 
 @dataclass
 class LaunchConfig:
-    ray_head_port: int = 54321
-    chain_comms_port: int = 54322
+    ray_head_port: int = 54321 # Head node listening port of Ray cluster
+    chain_comms_port: int = 54322 # For ZMQ comms within the chain
     comms_timeout: int = 30
 
 config = GlobalConfig()
@@ -60,12 +64,12 @@ async def launch_vllm(options: LaunchOptions):
 
     global launch_config, config, worker_sockets, launch_status
     cfg, lc, opt = config, launch_config, options
+    ray_stop = ["ray", "stop"]
 
     # Launch Ray cluster
     ctx = zmq.asyncio.Context()
     if config.hostname == options.node_list[0]: # Logic for head node
         ray_head = ["ray", "start", "--head", f"--port={lc.ray_head_port}"]
-        ray_stop = ["ray", "stop"]
         subprocess.run(ray_head)
 
         # Initialize per worker socket and send ray start command
@@ -130,6 +134,7 @@ async def launch_vllm(options: LaunchOptions):
             await asyncio.wait_for(recv_sock.send(statusb), timeout=lc.comms_timeout)
         except Exception as e:
             logger.error(f"Failed to send ray up status: {e}")
+            subprocess.run(ray_stop)
             return
         
         # I've finally joined, thank God
@@ -219,21 +224,11 @@ async def ray_head_teardown():
 
     return
 
-
-def setup():
-    global config, launch_config
-    lc = launch_config
-    
-    config.hostname = os.environ.get("TD_HOSTNAME")
-    config.listening_port = os.environ.get("TD_LISTENING_PORT")
-
-    lc.ray_head_port = os.environ.get("TD_RAY_HEAD_PORT", lc.ray_head_port)
-
 # A forever alive coro that listens to model deployment and jobs commands
 # Actl killing this whole process will prob be done with a container orchestration service
 async def listen_to_central():
 
-    global config
+    global config, launch_status
     cfg = config
 
     ctx = zmq.asyncio.Context()
@@ -271,6 +266,17 @@ async def listen_to_central():
         
         # Send reply
         await central_sock.send(msgpack.packb(reply))
+
+
+def setup():
+    global config, launch_config
+    lc = launch_config
+    
+    config.hostname = os.environ.get("TD_HOSTNAME")
+    config.listening_port = os.environ.get("TD_LISTENING_PORT")
+
+    lc.ray_head_port = os.environ.get("TD_RAY_HEAD_PORT", lc.ray_head_port)
+
 
 # Main event loop invocation
 async def main():

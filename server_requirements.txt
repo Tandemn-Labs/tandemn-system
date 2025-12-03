@@ -7,3 +7,5 @@ psutil
 python-multipart
 pytest
 pytest-asyncio
+python-dotenv
+boto3

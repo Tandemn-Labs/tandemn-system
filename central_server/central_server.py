@@ -12,7 +12,6 @@ import asyncio
 import json 
 import os
 import logging
-import time
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -48,14 +47,15 @@ COMPUTE_NODE_PORT = int(os.getenv("TD_LISTENING_PORT"))
 HEALTH_CHECK_INTERVAL = 1  # seconds
 
 # Queue names
-GLOBAL_QUEUE_KEY = "tandemn:global_queue"
+REQUEST_QUEUE_KEY = "tandemn:request_queue"
+DEPLOYMENT_QUEUE = "tandemn:deployment_queue"
 APPLICATION_QUEUE_PREFIX = "tandemn:app_jobs:" # Redis HASH where jobs are stored as job_id -> job_json
 
 # ============================================================================
 # Data Models
 # ============================================================================
 
-from models.models import NodeInfo, Application, JobInfo, ApplicationKey, NodeStatus, JobStatus, ApplicationStatus
+from models.models import DeploymentInfo, NodeInfo, Application, JobInfo, ApplicationKey, NodeStatus, JobStatus, ApplicationStatus
 
 # ============================================================================
 # API + LoggingConfiguration
@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO)
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 # check redis connection
 if not redis_client.ping():
-    logger.critical("Failed to connect to GLobal Queue")
+    logger.critical("Failed to connect to Global Queue")
     os._exit(1)
 
 # Connect to MongoDB (for node info)
@@ -169,7 +169,7 @@ async def push_job_to_global_queue(job:JobInfo):
     try:
         job_dict = job.model_dump(mode="json")
         job_json = json.dumps(job_dict)
-        redis_client.rpush(GLOBAL_QUEUE_KEY, job_json)
+        redis_client.rpush(REQUEST_QUEUE_KEY, job_json)
         return True
     except Exception as e:
         logger.error(f"Error pushing job {job.job_id} to global queue: {e}")
@@ -513,7 +513,7 @@ async def global_queue_polling_loop():
     while True:
         try:
             # Blocking pop from global queue (1 second timeout)
-            current_job = redis_client.blpop(GLOBAL_QUEUE_KEY, timeout=1)
+            current_job = redis_client.blpop(REQUEST_QUEUE_KEY, timeout=1)
             if not current_job:
                 logger.info("No jobs in the global queue")
                 await asyncio.sleep(0.1)
@@ -574,19 +574,21 @@ async def global_queue_polling_loop():
             await asyncio.sleep(1)
 
 # CLI or API gateway or whatever inserts jobs into Redis. This coro processes them
-async def process_jobs():
+async def process_deployments():
 
-    # Read sth from Redis
+    while True:
+        # Read sth from Redis
+        dep = await redis_client.blpop(DEPLOYMENT_QUEUE)
+        deployment_info = DeploymentInfo(**(json.loads(dep)))
 
-    # Pass the info on to the Tandemn Planner
-    # (actl would it better for jobs to go directly to orchestrator without coming through cs?)
+        # Does not wait since the launch + run two steps might take quite long
+        asyncio.create_task(process_orchestrator_output(deployment_info))
 
-    pass
-
+    
 # TODO: discuss orchestrator output type
-async def process_orchestrator_output(output):
+async def process_orchestrator_output(dep: DeploymentInfo):
 
-    node_addrs = output["node_addrs"]
+    node_addrs = dep.node_addrs
     ctx = zmq.asyncio.Context()
 
     futures = []
@@ -595,12 +597,12 @@ async def process_orchestrator_output(output):
         sock.connect(f"tcp://{addr}:{COMPUTE_NODE_PORT}")
         payload = {
             "command": "launch",
-            "node_list": output["node_list"],
-            "node_addrs": output["node_addrs"],
-            "engine": output["engine"],
-            "model": output["model"],
-            "tp_size": output["tp_size"],
-            "pp_size": output["pp_size"]
+            "node_list": dep.node_list,
+            "node_addrs": dep.node_addrs,
+            "engine": dep.engine,
+            "model": dep.model,
+            "tp_size": dep.tp_size,
+            "pp_size": dep.pp_size
         }
 
         future = sock.send(msgpack.packb(payload))
@@ -612,7 +614,7 @@ async def process_orchestrator_output(output):
             reply = results[i]
             if reply["status"] != 1:
                 logger.error(
-                    f"Failed to deploy mode, error from node ({output["node_list"][i]}): {results["error"]}"
+                    f"Failed to deploy mode, error from node ({dep.node_list[i]}): {results["error"]}"
                 )
             else: 
                 logger.info("Model is up!")
