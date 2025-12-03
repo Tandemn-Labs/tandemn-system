@@ -10,6 +10,7 @@ Tandemn Central Orchestrator Server
 
 import asyncio
 import json 
+from multiprocessing import process
 import os
 import logging
 import uuid
@@ -38,8 +39,8 @@ load_dotenv()
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 MONGODB_URI = os.getenv("MONGODB_URI")
-if MONGODB_URI is None:
-    raise ValueError("MONGODB_URI is not set. Exiting.")
+# if MONGODB_URI is None:
+#     raise ValueError("MONGODB_URI is not set. Exiting.")
 SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT", 8000))
 COMPUTE_NODE_PORT = int(os.getenv("TD_LISTENING_PORT"))
 
@@ -580,6 +581,7 @@ async def process_deployments():
         # Read sth from Redis
         dep = await redis_client.blpop(DEPLOYMENT_QUEUE)
         deployment_info = DeploymentInfo(**(json.loads(dep)))
+        print(deployment_info)
 
         # Does not wait since the launch + run two steps might take quite long
         asyncio.create_task(process_orchestrator_output(deployment_info))
@@ -690,7 +692,7 @@ async def get_node_map():
 @app.on_event("startup")
 async def startup():
     # Start background tasks
-    asyncio.create_task(global_queue_polling_loop())
+    asyncio.create_task(process_deployments())
     logger.info("Tandemn Central Orchestrator Server Started")
 
 if __name__ == "__main__":
