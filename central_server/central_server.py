@@ -21,12 +21,13 @@ from collections import defaultdict
 import msgpack
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
-import redis
+import redis.asyncio as redis
 import httpx
 from pymongo import MongoClient
 import uvicorn
 import re
 import zmq.asyncio
+import traceback
 
 
 
@@ -42,13 +43,13 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 # if MONGODB_URI is None:
 #     raise ValueError("MONGODB_URI is not set. Exiting.")
 SERVER_PORT = int(os.getenv("CENTRAL_SERVER_PORT", 8000))
-COMPUTE_NODE_PORT = int(os.getenv("TD_LISTENING_PORT"))
+COMPUTE_NODE_PORT = int(os.getenv("TD_LISTENING_PORT", "12345"))
 
 # Health monitoring
 HEALTH_CHECK_INTERVAL = 1  # seconds
 
 # Queue names
-REQUEST_QUEUE_KEY = "tandemn:request_queue"
+REQUEST_QUEUE = "tandemn:request_queue"
 DEPLOYMENT_QUEUE = "tandemn:deployment_queue"
 APPLICATION_QUEUE_PREFIX = "tandemn:app_jobs:" # Redis HASH where jobs are stored as job_id -> job_json
 
@@ -170,7 +171,7 @@ async def push_job_to_global_queue(job:JobInfo):
     try:
         job_dict = job.model_dump(mode="json")
         job_json = json.dumps(job_dict)
-        redis_client.rpush(REQUEST_QUEUE_KEY, job_json)
+        await redis_client.rpush(REQUEST_QUEUE, job_json)
         return True
     except Exception as e:
         logger.error(f"Error pushing job {job.job_id} to global queue: {e}")
@@ -514,7 +515,7 @@ async def global_queue_polling_loop():
     while True:
         try:
             # Blocking pop from global queue (1 second timeout)
-            current_job = redis_client.blpop(REQUEST_QUEUE_KEY, timeout=1)
+            current_job = redis_client.blpop(REQUEST_QUEUE, timeout=1)
             if not current_job:
                 logger.info("No jobs in the global queue")
                 await asyncio.sleep(0.1)
@@ -577,14 +578,19 @@ async def global_queue_polling_loop():
 # CLI or API gateway or whatever inserts jobs into Redis. This coro processes them
 async def process_deployments():
 
+    global redis_client
+
     while True:
         # Read sth from Redis
-        dep = await redis_client.blpop(DEPLOYMENT_QUEUE)
+        print("Listening for jobs on the queue...")
+        _, dep = await redis_client.blpop(DEPLOYMENT_QUEUE)
+        print("Dequeued from redis...")
         deployment_info = DeploymentInfo(**(json.loads(dep)))
         print(deployment_info)
 
         # Does not wait since the launch + run two steps might take quite long
         asyncio.create_task(process_orchestrator_output(deployment_info))
+        print("Task created...")
 
     
 # TODO: discuss orchestrator output type
@@ -594,9 +600,13 @@ async def process_orchestrator_output(dep: DeploymentInfo):
     ctx = zmq.asyncio.Context()
 
     futures = []
+    sockets = []
     for addr in node_addrs:
         sock = ctx.socket(zmq.REQ)
-        sock.connect(f"tcp://{addr}:{COMPUTE_NODE_PORT}")
+        sockets.append(sock)
+        sock_addr = f"tcp://{addr}:{COMPUTE_NODE_PORT}"
+        print("Socket: ", sock_addr)
+        sock.connect(sock_addr)
         payload = {
             "command": "launch",
             "node_list": dep.node_list,
@@ -611,20 +621,43 @@ async def process_orchestrator_output(dep: DeploymentInfo):
         futures.append(future)
     
     try:
-        results = await asyncio.wait_for(asyncio.gather(*futures), timeout=60)
+        await asyncio.wait_for(asyncio.gather(*futures), timeout=60) 
+        print("Sent launch command to nodes!")
+
+        futures = []
+        for sock in sockets:
+            futures.append(sock.recv())
+        
+        results = await asyncio.wait_for(asyncio.gather(*futures), timeout=120)
+        print("Received reply to launch from nodes!")
+        failed = False
         for i in range(len(results)):
             reply = results[i]
+            reply = msgpack.unpackb(reply)
             if reply["status"] != 1:
+                failed = True
                 logger.error(
-                    f"Failed to deploy mode, error from node ({dep.node_list[i]}): {results["error"]}"
+                    f"Failed to deploy model, error from node ({dep.node_list[i]}): {reply["error"]}"
                 )
-            else: 
-                logger.info("Model is up!")
-    
+        
+        if not failed:
+            logger.info("Model is up!")
+
+        # Now teardown
+        payload = {"command": "teardown"}
+        await sockets[0].send(msgpack.packb(payload))
+        reply = await asyncio.wait_for(sockets[0].recv(), timeout=120)
+        reply = msgpack.unpackb(reply)
+        print(reply)
+
     except Exception as e:
         # Could be timed out
-        logger.error(f"Error in process_orch_output: {e}")
-        return
+        logging.exception(f"Error in process_orch_output: {e}")
+    
+    finally:
+        for sock in sockets:
+            sock.close(linger=0)
+        ctx.term()
 
 
 # PHASE 4: APPLICATION DEPLOYMENT
