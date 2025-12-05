@@ -7,7 +7,6 @@ import logging
 import os
 import random
 import redis.asyncio as redis
-from redis.cluster import NodesManager
 
 from central_server.models.models import DeploymentInfo, JobInfo
 from utils.utils import dict_from_file
@@ -34,12 +33,17 @@ async def get_jobs():
     while True:
 
         _, job = await redis_client.blpop(REQUEST_QUEUE)
+        print("Dequeued from redis")
         job_info = JobInfo(**(json.loads(job)))
+        print(job_info)
 
         # Makes the decision
         deployment_info = await real_magic(job_info)
         deployment_json = json.dumps(deployment_info.model_dump(mode="json"))
+        print(deployment_info)
+        
         await redis_client.rpush(DEPLOYMENT_QUEUE, deployment_json)
+        print("Pushed to redis!")
 
 
 # Hardcoded nodes
@@ -68,7 +72,7 @@ async def real_magic(job: JobInfo):
         engine = "vllm",
         model = job.model_name,
         tp_size = 4,
-        pp_size = 3
+        pp_size = 2
     )
 
     return output
@@ -79,7 +83,8 @@ def setup():
 
 # Main event loop invocation
 async def main():
-    asyncio.create_task(get_jobs())
-    pass
+    setup()
+    jobs_coro = asyncio.create_task(get_jobs())
+    await jobs_coro
 
 asyncio.run(main())

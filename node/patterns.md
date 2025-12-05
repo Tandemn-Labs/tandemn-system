@@ -6,9 +6,9 @@ Note: Need to check zmq.asyncio waiting pattern on sends. Does it return if
 socket is not connected
 
 ### Untracked coros
-- `listen_to_central` uses an infinite loop to listen to central server, it does
-`await` on the `launch_x` commands, but those commands shouldn't block, and will
-return after setting up the model + cluster
+- `listen_to_central` uses an infinite loop to listen to central server, it 
+launches coros to launch the model once a command is achieved, but it doesn't
+await those coros. Those coros are responsible for replying to central when done
 
 ### vLLM on Ray
 - After worker nodes join Ray cluster, an untracked coro is created that listens
