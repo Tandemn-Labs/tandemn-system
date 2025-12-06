@@ -620,7 +620,7 @@ async def process_orchestrator_output(dep: DeploymentInfo):
         future = sock.send(msgpack.packb(payload))
         futures.append(future)
     
-    try:
+    try: # Launching the model
         await asyncio.wait_for(asyncio.gather(*futures), timeout=60) 
         print("Sent launch command to nodes!")
 
@@ -643,21 +643,35 @@ async def process_orchestrator_output(dep: DeploymentInfo):
         if not failed:
             logger.info("Model is up!")
 
-        # Now teardown
-        payload = {"command": "teardown"}
-        await sockets[0].send(msgpack.packb(payload))
-        reply = await asyncio.wait_for(sockets[0].recv(), timeout=120)
-        reply = msgpack.unpackb(reply)
-        print(reply)
-
     except Exception as e:
         # Could be timed out
-        logging.exception(f"Error in process_orch_output: {e}")
+        logging.exception(f"Error in process_orch_output model launching: {e}")
     
-    finally:
-        for sock in sockets:
-            sock.close(linger=0)
-        ctx.term()
+    # Invoke the job
+    payload = {
+        "command": "run",
+        "input": dep.dataset_path,
+    }
+    head_sock = sockets[0]
+    try:
+        await asyncio.wait_for(head_sock.send(msgpack.packb(payload)), timeout=60)
+        reply = await asyncio.wait_for(head_sock.recv(), timeout=120)
+        reply = msgpack.unpackb(reply)
+        print(reply)
+    except Exception as e:
+        # Could be timed out
+        logging.exception(f"Error in process_orch_output starting jobs: {e}")
+
+    # Now teardown
+    payload = {"command": "teardown"}
+    await sockets[0].send(msgpack.packb(payload))
+    reply = await asyncio.wait_for(sockets[0].recv(), timeout=120)
+    reply = msgpack.unpackb(reply)
+    print(reply)
+    
+    for sock in sockets:
+        sock.close(linger=0)
+    ctx.term()
 
 
 # PHASE 4: APPLICATION DEPLOYMENT

@@ -43,14 +43,16 @@ logger.setLevel(logging.INFO)
 # Some global variables
 worker_sockets = None # Only found on head node
 launch_status = None # If an engine is up right now, this will be a string
+launch_options = None # Current launch options
+chain_zmq_context = None
 
 # `options` is a dictionary of launch options
 # id and socket are because we use ZMQ ROUTER
 async def launch_engine(options: LaunchOptions):
 
-    global launch_status
+    global launch_status, launch_options
 
-    opt = options
+    opt, launch_options = options, options
     reply = {}
 
     # Some sanity checks
@@ -83,12 +85,13 @@ async def launch_engine(options: LaunchOptions):
 # Right now we use Ray to do multi-node vLLM, probably will change in the future
 async def launch_vllm(options: LaunchOptions):
 
-    global launch_config, config, worker_sockets, launch_status
+    global launch_config, config, worker_sockets, launch_status, chain_zmq_context
     cfg, lc, opt = config, launch_config, options
     ray_stop = ["ray", "stop"]
 
     # Launch Ray cluster
     ctx = zmq.asyncio.Context()
+    chain_zmq_context = ctx
     if config.hostname == options.node_list[0]: # Logic for head node
         ray_head = ["ray", "start", "--head", f"--port={lc.ray_head_port}"]
         subprocess.run(ray_head)
@@ -165,19 +168,19 @@ async def launch_vllm(options: LaunchOptions):
         # Start the coroutine to listen for more commands from Ray cluster head
         asyncio.create_task(ray_worker_listen(recv_sock))
     
-    # Only first node in chain launch vllm
-    if cfg.hostname != options.node_list[0]:
-        return
+    # # Only first node in chain launch vllm
+    # if cfg.hostname != options.node_list[0]:
+    #     return
 
-    #? Will probably move to a new file?
-    from vllm import LLM
-    llm = LLM(
-        model=opt.model,
-        tensor_parallel_size=opt.tp_size,
-        pipeline_parallel_size=opt.pp_size,
-        enforce_eager=True,
-        distributed_executor_backend="ray"
-    )
+    # #? Will probably move to a new file?
+    # from vllm import LLM
+    # llm = LLM(
+    #     model=opt.model,
+    #     tensor_parallel_size=opt.tp_size,
+    #     pipeline_parallel_size=opt.pp_size,
+    #     enforce_eager=True,
+    #     distributed_executor_backend="ray"
+    # )
 
     # # Just for testing prompts
     # prompts = [
@@ -195,7 +198,7 @@ async def launch_vllm(options: LaunchOptions):
 # Loops infinitely (but not busy since async) till teardown command received
 async def ray_worker_listen(rep_sock: zmq.asyncio.Socket):
 
-    global config, launch_config, launch_status
+    global config, launch_config, launch_status, chain_zmq_context, launch_options
     cfg, lc = config, launch_config
 
     teardown = False
@@ -210,8 +213,15 @@ async def ray_worker_listen(rep_sock: zmq.asyncio.Socket):
                 teardown = True
                 status = {"ray_status": 0, "hostname": cfg.hostname}
 
+                await asyncio.wait_for(rep_sock.send(msgpack.packb(status)), timeout=lc.comms_timeout)
+
                 # Update global variables
-                launch_status = None
+                launch_status, launch_options = None, None
+
+                # Close ZMQ stuff
+                rep_sock.close(linger=0)
+                chain_zmq_context.term()
+                return
 
             case _:
                 status = {"ray_status": -1, "hostname": cfg.hostname}
@@ -224,7 +234,7 @@ async def ray_worker_listen(rep_sock: zmq.asyncio.Socket):
 # Teardown function invoked by head node
 async def ray_head_teardown():
 
-    global launch_config, worker_sockets, launch_status
+    global launch_config, worker_sockets, launch_status, chain_zmq_context, launch_options
     lc = launch_config
     reply = {}
 
@@ -247,9 +257,31 @@ async def ray_head_teardown():
     subprocess.run(["ray", "stop"])
 
     # Update global variables
-    worker_sockets, launch_status = None, None
+    launch_status, launch_options = None, None
+    
+    # Close ZMQ stuff
+    for sock in worker_sockets:
+        sock.close(linger=0)
+    chain_zmq_context.term()
 
     return reply
+
+
+# Run a batch job
+async def ray_head_run(msg):
+
+    global launch_options
+
+    run_batch = [
+        "vllm", "run-batch", "-i", msg["input"], "-o", "output.jsonl",
+        "--model", launch_options.model,
+        "--max-model-len", "1000"
+    ]
+    subprocess.run(run_batch)
+
+    reply = {"status": 1}
+    return reply
+
 
 # A forever alive coro that listens to model deployment and jobs commands
 # Actl killing this whole process will prob be done with a container orchestration service
@@ -295,6 +327,14 @@ async def listen_to_central():
                     reply = await ray_head_teardown()
 
             case "run": # Run a job
+                if worker_sockets is None:
+                    reply  = {
+                        "status": -1, 
+                        "error": f"{cfg.hostname} is not head of Ray cluster"
+                        }
+                else:
+                    reply = await ray_head_run(msg)
+
                 pass
 
         
