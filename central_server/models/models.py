@@ -112,7 +112,7 @@ class DeployApplicationRequest(BaseModel):
 ### Orchestrator writes this into the Redis
 class DeploymentInfo(BaseModel):
     job_id: str
-    dataset_path: Optional[str] = None # path to the dataset
+    dataset_path: Optional[str]
     node_list: List[str]
     node_addrs: List[str]
     engine: str
