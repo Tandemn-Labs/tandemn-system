@@ -9,6 +9,7 @@ import zmq
 import zmq.asyncio
 import msgpack
 import traceback
+import requests
 
 # TODO: Look into cases where I should ray stop, it's not robust rn
 
@@ -20,6 +21,11 @@ class GlobalConfig:
     listening_port: int = 12345
 
 @dataclass
+class StorageConfig:
+    storage_server_url: str = "54.163.113.67"
+    storage_server_port: int = 8000
+
+@dataclass
 class LaunchConfig:
     ray_head_port: int = 54321 # Head node listening port of Ray cluster
     chain_comms_port: int = 54322 # For ZMQ comms within the chain
@@ -27,6 +33,7 @@ class LaunchConfig:
 
 config = GlobalConfig()
 launch_config = LaunchConfig()
+storage_config = StorageConfig()
 
 @dataclass
 class LaunchOptions:
@@ -271,15 +278,61 @@ async def ray_head_teardown():
 async def ray_head_run(msg):
 
     global launch_options
+    user = msg["user"]
+    input = msg["input"]
 
+    # download the input file from storage server
+    logger.info(f"Downloading input file from storage server: {input}")
+    response_url = requests.get(f"http://{storage_config.storage_server_url}:{storage_config.storage_server_port}/storage/presign/download",
+                            params={"user": user, "remote_path": input, "expires": 600})
+    response_url.raise_for_status()
+    presigned_url = response_url.json()["url"]
+
+    # download the file from the presigned url
+    response_file = requests.get(presigned_url)
+    with open("input.jsonl", "wb") as f:
+        f.write(response_file.content)
+
+    logger.info(f"Downloaded input file to input.jsonl")
+
+    # run the batch job
     run_batch = [
-        "vllm", "run-batch", "-i", msg["input"], "-o", "output.jsonl",
+        "vllm", "run-batch", "-i", "input.jsonl", "-o", "output.jsonl",
         "--model", launch_options.model,
         "--max-model-len", "1000"
     ]
     subprocess.run(run_batch)
 
+    # upload the output file to the storage server
+    logger.info(f"Uploading output file to storage server")
+    response_upload = requests.post(
+        f"http://{storage_config.storage_server_url}:{storage_config.storage_server_port}/storage/presign/upload",
+        data={
+            "user": user,
+            "remote_path": "output.jsonl",
+            "expires": 600
+        }
+    )
+    response_upload.raise_for_status()
+    presigned_url = response_upload.json()["url"]
+
+    # upload the file to the url
+    with open("output.jsonl", "rb") as f:
+        response_upload = requests.put(presigned_url, data=f)
+    response_upload.raise_for_status()
+    logger.info(f"Uploaded output file to storage server")
+
+   # delete input and output files
+   #blocking call, remove this later
+    if os.path.exists("input.jsonl"):
+        os.remove("input.jsonl")
+    if os.path.exists("output.jsonl"):
+        os.remove("output.jsonl")
+
+    logger.info(f"Job completed successfully")
+    
     reply = {"status": 1}
+
     return reply
 
 
@@ -343,11 +396,16 @@ async def listen_to_central():
 
 
 def setup():
-    global config, launch_config
+    global config, launch_config, storage_config
     lc = launch_config
+    sc = storage_config
     
     config.hostname = os.environ.get("TD_HOSTNAME")
     config.listening_port = os.environ.get("TD_LISTENING_PORT")
+    # need to know how to automatically get this
+    # do we have the configs?
+    sc.storage_server_url = os.environ.get("STORAGE_SERVER_URL")
+    sc.storage_server_port = os.environ.get("STORAGE_SERVER_PORT")
 
     lc.ray_head_port = os.environ.get("TD_RAY_HEAD_PORT", lc.ray_head_port)
 

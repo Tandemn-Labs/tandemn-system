@@ -66,6 +66,7 @@ async def real_magic(job: JobInfo):
 
     output = DeploymentInfo(
         job_id = job.job_id,
+        user = job.user,
         dataset_path = job.dataset_path,
         node_list = nodes,
         node_addrs = node_addrs,

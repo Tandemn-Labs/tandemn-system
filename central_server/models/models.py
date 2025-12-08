@@ -113,6 +113,7 @@ class DeployApplicationRequest(BaseModel):
 class DeploymentInfo(BaseModel):
     job_id: str
     dataset_path: Optional[str]
+    user: str
     node_list: List[str]
     node_addrs: List[str]
     engine: str
