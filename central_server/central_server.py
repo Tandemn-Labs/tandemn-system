@@ -650,12 +650,13 @@ async def process_orchestrator_output(dep: DeploymentInfo):
     # Invoke the job
     payload = {
         "command": "run",
+        "user": dep.user,
         "input": dep.dataset_path,
     }
     head_sock = sockets[0]
     try:
         await asyncio.wait_for(head_sock.send(msgpack.packb(payload)), timeout=60)
-        reply = await asyncio.wait_for(head_sock.recv(), timeout=120)
+        reply = await head_sock.recv()
         reply = msgpack.unpackb(reply)
         print(reply)
     except Exception as e:
