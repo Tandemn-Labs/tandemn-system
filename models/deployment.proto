@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package deployment;
+
+
+// Output of the Magic Orchestrator
+message MagicOutput {
+
+  // Optional because deployment might be reused
+  optional DeploymentInfo deploy = 1;
+  JobInfo job = 2;
+}
+
+
+// DeploymentInfo represents deployment information decided by the orchestrator
+// Designed to allow deployments to be reused
+message DeploymentInfo {
+  
+  string deployment_id = 1;
+  repeated string node_list = 2; // List of node identifiers
+  repeated string node_addrs = 3; // List of node addresses
+  
+  // Engine-specific configs
+  oneof deployment_config {
+    VllmDeployConfig vllm_config = 4;
+  }
+}
+
+
+message VllmDeployConfig {
+  string model = 1;
+  int32 tp_size = 2;
+  int32 pp_size = 3;
+}
+
+
+// Data for a specific job to be run on a specific deployment
+message JobInfo {
+  string job_id = 1;
+  string deployment_id = 2;
+  string user = 3;
+
+  // Input / output files
+  string input = 4;
+  string output = 5;
+
+  // Engine-specific config for the jobs
+  oneof jobConfig {
+    VllmRunConfig vllm_config = 6;
+  }
+}
+
+
+message VllmRunConfig {}
+
+
+// Commands sent from central server to the compute nodes
+message Command {
+  enum Action {
+    LAUNCH = 0;
+    RUN = 1;
+    TEARDOWN = 2;
+  }
+  Action action = 1;
+
+  oneof context {
+    DeploymentInfo deployment_info = 2;
+    JobInfo job_info = 3;
+  }
+}
+
