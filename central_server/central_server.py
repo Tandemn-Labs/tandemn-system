@@ -57,7 +57,8 @@ APPLICATION_QUEUE_PREFIX = "tandemn:app_jobs:" # Redis HASH where jobs are store
 # Data Models
 # ============================================================================
 
-from models.models import DeploymentInfo, NodeInfo, Application, JobInfo, ApplicationKey, NodeStatus, JobStatus, ApplicationStatus
+from central_server.models.models import NodeInfo, Application, Request, ApplicationKey, NodeStatus, JobStatus, ApplicationStatus
+from models.deployment_pb2 import DeploymentInfo, Command, MagicOutput
 
 # ============================================================================
 # API + LoggingConfiguration
@@ -68,7 +69,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 # Connect to Global Queue (Redis)
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
 # check redis connection
 if not redis_client.ping():
     logger.critical("Failed to connect to Global Queue")
@@ -83,7 +84,7 @@ applications_collection = db["application_info"]
 # State Variables
 nodes: Dict[str, NodeInfo] = {} # [node_id: NodeInfo{}]
 applications: Dict[str, Application] = {} # [app_id: Application]
-jobs: Dict[str, JobInfo] = {} # [job_id: JobInfo]
+jobs: Dict[str, Request] = {} # [job_id: JobInfo]
 # app_key_to_id: Dict[str, str] = {}  # ✅ NEW: app_key_string → app_id (reverse index)
 
 # ============================================================================
@@ -161,7 +162,7 @@ async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
 
 ################################# REDIS #####################################
 
-async def push_job_to_global_queue(job:JobInfo):
+async def push_job_to_global_queue(job:Request):
     """
     Push a job to the global queue which is a Redis List.
     This is called by the submit_job function.
@@ -192,7 +193,7 @@ async def get_application_queue_key(app_key: ApplicationKey) -> str:
         logger.error(f"Error getting application queue key for application key: {app_key}: {e}")
         raise e
 
-async def add_job_to_application_queue(job:JobInfo):
+async def add_job_to_application_queue(job:Request):
     """
     Store the job in the per-application Redis HASH keyed by job_id -> job_json.
     If it is not deployed, we dont call it "TILL" its deployed.
@@ -216,7 +217,7 @@ async def add_job_to_application_queue(job:JobInfo):
 
 class TandemnPlanner:
 
-    def __init__(self,job: JobInfo, node_map: Dict[str, Any]):
+    def __init__(self,job: Request, node_map: Dict[str, Any]):
         self.job = job
         self.node_map = node_map
         logging.info("TandemnPlanner initialized")
@@ -373,7 +374,7 @@ async def update_node_status(request:NodeInfo, background_tasks: BackgroundTasks
 # - Returns job_id to caller
 
 @app.post("/jobs/submit")
-async def submit_job(request:JobInfo):
+async def submit_job(request:Request):
     """
     This is either called by the TandemnCLI when the user submits a job.
     """
@@ -441,7 +442,7 @@ async def submit_job(request:JobInfo):
         application_queue_key = await get_application_queue_key(application_key)
         logging.info(f"Application queue key: {application_queue_key}")
 
-        job_info = JobInfo(
+        job_info = Request(
             job_id=job_id,
             user=user,
             submit_time=submit_time,
@@ -523,7 +524,7 @@ async def global_queue_polling_loop():
             # Parse job
             _, job_json = current_job # Returns: ("tandemn:global_queue", "{"job_id":"job_001",...}") so we ignore "tandemn:global_queue"
             job_data = json.loads(job_json)
-            current_job_info = JobInfo(**job_data) # Converts the job_data to a JobInfo object
+            current_job_info = Request(**job_data) # Converts the job_data to a JobInfo object
             logger.info(f"📥 Processing job {current_job_info.job_id} from global queue")
             # Step 1: Extract ApplicationKey from job
             application_key = ApplicationKey(
@@ -575,6 +576,7 @@ async def global_queue_polling_loop():
             logger.error(f"❌ Error in global queue polling loop: {e}")
             await asyncio.sleep(1)
 
+
 # CLI or API gateway or whatever inserts jobs into Redis. This coro processes them
 async def process_deployments():
 
@@ -583,18 +585,22 @@ async def process_deployments():
     while True:
         # Read sth from Redis
         print("Listening for jobs on the queue...")
-        _, dep = await redis_client.blpop(DEPLOYMENT_QUEUE)
+        _, magicb = await redis_client.blpop(DEPLOYMENT_QUEUE)
         print("Dequeued from redis...")
-        deployment_info = DeploymentInfo(**(json.loads(dep)))
-        print(deployment_info)
+
+        magic_output = MagicOutput()
+        magic_output.ParseFromString(magicb)
+        print(magic_output)
 
         # Does not wait since the launch + run two steps might take quite long
-        asyncio.create_task(process_orchestrator_output(deployment_info))
+        asyncio.create_task(process_orchestrator_output(magic_output))
         print("Task created...")
 
     
 # TODO: discuss orchestrator output type
-async def process_orchestrator_output(dep: DeploymentInfo):
+async def process_orchestrator_output(magic: MagicOutput):
+
+    dep, job = magic.deploy, magic.job
 
     node_addrs = dep.node_addrs
     ctx = zmq.asyncio.Context()
@@ -607,17 +613,13 @@ async def process_orchestrator_output(dep: DeploymentInfo):
         sock_addr = f"tcp://{addr}:{COMPUTE_NODE_PORT}"
         print("Socket: ", sock_addr)
         sock.connect(sock_addr)
-        payload = {
-            "command": "launch",
-            "node_list": dep.node_list,
-            "node_addrs": dep.node_addrs,
-            "engine": dep.engine,
-            "model": dep.model,
-            "tp_size": dep.tp_size,
-            "pp_size": dep.pp_size
-        }
 
-        future = sock.send(msgpack.packb(payload))
+        command = Command(
+            action=Command.Action.LAUNCH,
+            deployment_info=dep
+        )
+
+        future = sock.send(command.SerializeToString())
         futures.append(future)
     
     try: # Launching the model
@@ -646,16 +648,19 @@ async def process_orchestrator_output(dep: DeploymentInfo):
     except Exception as e:
         # Could be timed out
         logging.exception(f"Error in process_orch_output model launching: {e}")
+        return
     
     # Invoke the job
-    payload = {
-        "command": "run",
-        "user": dep.user,
-        "input": dep.dataset_path,
-    }
+    command = Command(
+        action=Command.Action.RUN,
+        job_info=job
+    )
+
     head_sock = sockets[0]
     try:
-        await asyncio.wait_for(head_sock.send(msgpack.packb(payload)), timeout=60)
+        await asyncio.wait_for(
+            head_sock.send(command.SerializeToString()), timeout=60
+        )
         reply = await head_sock.recv()
         reply = msgpack.unpackb(reply)
         print(reply)
@@ -664,8 +669,10 @@ async def process_orchestrator_output(dep: DeploymentInfo):
         logging.exception(f"Error in process_orch_output starting jobs: {e}")
 
     # Now teardown
-    payload = {"command": "teardown"}
-    await sockets[0].send(msgpack.packb(payload))
+    command = Command(
+        action=Command.Action.TEARDOWN
+    )
+    await sockets[0].send(command.SerializeToString())
     reply = await asyncio.wait_for(sockets[0].recv(), timeout=120)
     reply = msgpack.unpackb(reply)
     print(reply)

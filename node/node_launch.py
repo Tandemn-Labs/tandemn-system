@@ -11,6 +11,8 @@ import msgpack
 import traceback
 import requests
 
+from models.deployment_pb2 import Command, DeploymentInfo, JobInfo
+
 # TODO: Look into cases where I should ray stop, it's not robust rn
 
 # Stuff in this config has to be defined in envvar
@@ -35,31 +37,22 @@ config = GlobalConfig()
 launch_config = LaunchConfig()
 storage_config = StorageConfig()
 
-@dataclass
-class LaunchOptions:
-    node_list: List[str]
-    node_addrs: List[str]
-    engine: str
-    model: str
-    tp_size: int
-    pp_size: int
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Some global variables
 worker_sockets = None # Only found on head node
 launch_status = None # If an engine is up right now, this will be a string
-launch_options = None # Current launch options
+deployment_info = None # Current launch options
 chain_zmq_context = None
 
 # `options` is a dictionary of launch options
 # id and socket are because we use ZMQ ROUTER
-async def launch_engine(options: LaunchOptions):
+async def launch_engine(dep: DeploymentInfo):
 
-    global launch_status, launch_options
+    global launch_status, deployment_info
 
-    opt, launch_options = options, options
+    deployment_info = dep
     reply = {}
 
     # Some sanity checks
@@ -67,7 +60,7 @@ async def launch_engine(options: LaunchOptions):
         reply = {"status": -1, "error": "A model is already deployed"}
         return reply
 
-    if config.hostname not in opt.node_list:
+    if config.hostname not in dep.node_list:
         logger.error("Hostname %s is not included in node_list", config.hostname)
         reply = {
             "status": -1, 
@@ -75,31 +68,31 @@ async def launch_engine(options: LaunchOptions):
         }
         return reply
     
-    match opt.engine:
-        case "vllm":
-            await launch_vllm(options)
+    match dep.WhichOneof("deployment_config"):
+        case "vllm_config":
+            await launch_vllm(dep)
             reply = {"status": 1}
             return reply
         case _:
-            logger.error("Engine %s is not supported right now", opt.engine)
+            logger.error("Unable to get right deployment_config")
             reply = {
                 "status": -1, 
-                "error": f"Engine {opt.engine} not supported"
+                "error": "Unable to get right deployment_config"
             }
             return reply
 
 
 # Right now we use Ray to do multi-node vLLM, probably will change in the future
-async def launch_vllm(options: LaunchOptions):
+async def launch_vllm(dep: DeploymentInfo):
 
     global launch_config, config, worker_sockets, launch_status, chain_zmq_context
-    cfg, lc, opt = config, launch_config, options
+    cfg, lc, opt = config, launch_config, dep
     ray_stop = ["ray", "stop"]
 
     # Launch Ray cluster
     ctx = zmq.asyncio.Context()
     chain_zmq_context = ctx
-    if config.hostname == options.node_list[0]: # Logic for head node
+    if config.hostname == opt.node_list[0]: # Logic for head node
         ray_head = ["ray", "start", "--head", f"--port={lc.ray_head_port}"]
         subprocess.run(ray_head)
 
@@ -175,31 +168,6 @@ async def launch_vllm(options: LaunchOptions):
         # Start the coroutine to listen for more commands from Ray cluster head
         asyncio.create_task(ray_worker_listen(recv_sock))
     
-    # # Only first node in chain launch vllm
-    # if cfg.hostname != options.node_list[0]:
-    #     return
-
-    # #? Will probably move to a new file?
-    # from vllm import LLM
-    # llm = LLM(
-    #     model=opt.model,
-    #     tensor_parallel_size=opt.tp_size,
-    #     pipeline_parallel_size=opt.pp_size,
-    #     enforce_eager=True,
-    #     distributed_executor_backend="ray"
-    # )
-
-    # # Just for testing prompts
-    # prompts = [
-    #     "Tell me more about the idea of irreducible complexity!",
-    #     "What is the difference between a spreadsheet and a database?",
-    #     "What are your thoughts on the myth of Cupid and Psyche?"
-    # ]
-
-    # outputs = llm.generate(prompts)
-    # print(outputs)
-
-    # await ray_head_teardown()
 
 # Listen for commands from Ray head node
 # Loops infinitely (but not busy since async) till teardown command received
@@ -275,11 +243,11 @@ async def ray_head_teardown():
 
 
 # Run a batch job
-async def ray_head_run(msg):
+async def ray_head_run(job_info: JobInfo):
 
-    global launch_options
-    user = msg["user"]
-    input = msg["input"]
+    global deployment_info
+    user = job_info.user
+    input = job_info.input
 
     # download the input file from storage server
     logger.info(f"Downloading input file from storage server: {input}")
@@ -347,30 +315,25 @@ async def listen_to_central():
     listen_address = f"tcp://*:{cfg.listening_port}"
     print("Listening on ", listen_address)
     central_sock = ctx.socket(zmq.REP)
-    central_sock.bind(f"tcp://*:{cfg.listening_port}")
+    central_sock.bind(listen_address)
     
     while True:
         msgb = await central_sock.recv()
-        msg = msgpack.unpackb(msgb)
-        print(msg)
+        command = Command()
+        command.ParseFromString(msgb)
+        print(command)
 
         reply = {}
-        match msg["command"]:
-            case "launch": # Launch a model
+        match command.action:
+            case Command.Action.LAUNCH: # Launch a model
+                print("matched")
 
-                options = LaunchOptions(
-                    node_list = msg["node_list"],
-                    node_addrs = msg["node_addrs"],
-                    engine = msg["engine"],
-                    model = msg["model"],
-                    tp_size = msg["tp_size"],
-                    pp_size = msg["pp_size"]
+                reply = await asyncio.create_task(
+                    launch_engine(command.deployment_info)
                 )
-
-                reply = await asyncio.create_task(launch_engine(options))
             
             # Only head of Ray cluster should get this msg
-            case "teardown":
+            case Command.Action.TEARDOWN:
                 if worker_sockets is None:
                     reply  = {
                         "status": -1, 
@@ -379,14 +342,14 @@ async def listen_to_central():
                 else:
                     reply = await ray_head_teardown()
 
-            case "run": # Run a job
+            case Command.Action.RUN: # Run a job
                 if worker_sockets is None:
                     reply  = {
                         "status": -1, 
                         "error": f"{cfg.hostname} is not head of Ray cluster"
                         }
                 else:
-                    reply = await ray_head_run(msg)
+                    reply = await ray_head_run(command.job_info)
 
                 pass
 
@@ -395,7 +358,7 @@ async def listen_to_central():
         
 
 
-def setup():
+async def setup():
     global config, launch_config, storage_config
     lc = launch_config
     sc = storage_config
@@ -412,7 +375,7 @@ def setup():
 
 # Main event loop invocation
 async def main():
-    setup()
+    await setup()
      
     # Main loop that listens to commands from central server
     main_task = asyncio.create_task(listen_to_central())

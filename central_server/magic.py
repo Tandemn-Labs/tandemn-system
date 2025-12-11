@@ -6,9 +6,11 @@ import json
 import logging
 import os
 import random
+import uuid
 import redis.asyncio as redis
 
-from central_server.models.models import DeploymentInfo, JobInfo
+from central_server.models.models import Request
+from models.deployment_pb2 import DeploymentInfo, JobInfo, MagicOutput, VllmDeployConfig, VllmRunConfig
 from utils.utils import dict_from_file
 
 logger = logging.getLogger(__name__)
@@ -34,15 +36,15 @@ async def get_jobs():
 
         _, job = await redis_client.blpop(REQUEST_QUEUE)
         print("Dequeued from redis")
-        job_info = JobInfo(**(json.loads(job)))
+        job_info = Request(**(json.loads(job)))
         print(job_info)
 
         # Makes the decision
         deployment_info = await real_magic(job_info)
-        deployment_json = json.dumps(deployment_info.model_dump(mode="json"))
         print(deployment_info)
+        deployment_b = deployment_info.SerializeToString()
         
-        await redis_client.rpush(DEPLOYMENT_QUEUE, deployment_json)
+        await redis_client.rpush(DEPLOYMENT_QUEUE, deployment_b)
         print("Pushed to redis!")
 
 
@@ -52,7 +54,7 @@ async def get_jobs():
 # Returns node list
 node_addrs = []
 node_list = ["test1", "test2", "test3"]
-async def real_magic(job: JobInfo):
+async def real_magic(job: Request) -> DeploymentInfo:
     
     global hostname_to_address
 
@@ -63,20 +65,36 @@ async def real_magic(job: JobInfo):
     del(nodes[exclude])
 
     node_addrs = [hostname_to_address[hostname] for hostname in nodes]
+    deployment_id = "dep-" + str(uuid.uuid4())
 
-    output = DeploymentInfo(
-        job_id = job.job_id,
-        user = job.user,
-        dataset_path = job.dataset_path,
-        node_list = nodes,
-        node_addrs = node_addrs,
-        engine = "vllm",
-        model = job.model_name,
-        tp_size = 4,
-        pp_size = 2
+    dep = DeploymentInfo(
+        deployment_id = deployment_id,
+        node_list = ["test1"],
+        node_addrs = ["0.0.0.0"],
+
+
+        vllm_config = VllmDeployConfig(
+            model = job.model_name,
+            tp_size = 4,
+            pp_size = 1
+        )
     )
 
-    return output
+    job = JobInfo(
+        job_id = job.job_id,
+        deployment_id = deployment_id,
+        user = job.user,
+
+        input = job.input,
+        output = job.output,
+
+        vllm_config = VllmRunConfig()
+    )
+
+    return MagicOutput(
+        deploy=dep, 
+        job=job
+    )
 
 def setup():
     global hostname_to_address

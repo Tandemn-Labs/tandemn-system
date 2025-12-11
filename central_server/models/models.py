@@ -50,7 +50,7 @@ class ApplicationStatus(str, Enum):
     STOPPED = "STOPPED"
     FAILED = "FAILED"
 
-class JobInfo(BaseModel):
+class Request(BaseModel):
     """This is for each JOB provided to it by Tandemn CLI.
     This is the config that the USER provides. 
     in the future - Tandemn CLI Will accept these configurations.
@@ -66,7 +66,8 @@ class JobInfo(BaseModel):
     app_queue_key: Optional[str] = None # application queue key
     backend: Optional[str] = None # vllm, sglang
     quantization: Optional[str] = None #awq, int4, int8, etc.
-    dataset_path: Optional[str] = None # path to the dataset
+    input: str = None # path to the dataset
+    output: Optional[str]
     column_names: Optional[List[str]] = None # column names of the dataset
     slo: Optional[str] = None # SLO for the job
     generation_kwargs: Optional[dict] = None # generation kwargs
@@ -107,16 +108,3 @@ class DeployApplicationRequest(BaseModel):
     docker_image: str
     application_key: str
     assigned_topology: Dict[str, Any]
-
-
-### Orchestrator writes this into the Redis
-class DeploymentInfo(BaseModel):
-    job_id: str
-    dataset_path: Optional[str]
-    user: str
-    node_list: List[str]
-    node_addrs: List[str]
-    engine: str
-    model: str
-    tp_size: int
-    pp_size: int
