@@ -371,66 +371,45 @@ async def update_node_status(request:NodeInfo, background_tasks: BackgroundTasks
 # - Validates job requirements
 # - Pushes job to GLOBAL_QUEUE (Redis)
 # - Returns job_id to caller
-
 @app.post("/jobs/submit")
-async def submit_job(request:JobInfo):
+async def submit_job(request: dict):  # ← Change from JobInfo to dict
     """
     This is either called by the TandemnCLI when the user submits a job.
+    Accepts both legacy flat structure and new nested job_config structure.
     """
     try:
-        job_id = request.job_id # unique identifier for the job
-        user = request.user# username of the user who submitted the job
-        submit_time = datetime.now() # when the job was submitted
-        task_mode = request.task_mode # batched_inference, streaming_inference etc.
-
-        if task_mode not in ["batched_inference", "online_inference", "image_generation"]: # a config file of all supported modes needs to be made for this. 
-            raise HTTPException(status_code=400, detail=f"Invalid task mode: {task_mode}")
-
-        model_name= request.model_name # llama-70b-hf
-
-        if request.backend is not None:
-            request.backend = request.backend.lower()
-            if request.backend not in ["vllm", "sglang"]: # a config file of all supported backends needs to be made. 
-                raise HTTPException(status_code=400, detail=f"Invalid backend: {request.backend}")
+        # Extract from nested structure (new API gateway format)
+        if "job_config" in request:
+            job_config = request["job_config"]
+            job_id = request.get("job_id")
+            user = request.get("user") or request.get("user_id")
+            submit_time = datetime.now()
+            
+            # Extract from nested structure
+            task_mode = job_config["task"]["type"]  # batched_inference, online_serving, etc.
+            model_name = job_config["model"]["model_name"]
+            
+            # Extract optional fields with proper defaults
+            engine = job_config["model"].get("engine")
+            backend = engine if engine and engine != "not_specified" else None
+            
+            quantization_method = job_config["model"]["quantization"].get("method")
+            quantization = quantization_method if quantization_method and quantization_method != "not_specified" else None
+            
+            # Extract SLO information
+            slo_config = job_config.get("slo", {})
+            if slo_config.get("mode") == "offline" and slo_config.get("offline"):
+                deadline_hours = slo_config["offline"].get("deadline_hours")
+                slo = f"{deadline_hours}h" if deadline_hours and deadline_hours != "not_specified" else None
             else:
-                backend = request.backend
-        else:
-            backend = None
-        
-        if request.quantization is not None:
-            request.quantization = request.quantization.lower()
-            if request.quantization not in ["awq", "fp4", "GGMEMMFp8", "gptq", "marlin", "exl2", "bitsandbytes", "bitsandbytes-nf4", "bitsandbytes-fp4"]: # a config file of all supported quantizations needs to be made. 
-                raise HTTPException(status_code=400, detail=f"Invalid quantization: {request.quantization}")
-            else:
-                quantization = request.quantization
-        else:
-            quantization = None
-
-        if request.slo is not None and task_mode == "batched_inference":
-            slo = request.slo
-            if isinstance(slo, str):
-                # Accept formats like "1h", "2h", "3h", etc.
-                pattern = r'^\d+\s*[h]$'
-                if not re.match(pattern, slo.strip().lower()):
-                    raise HTTPException(status_code=400, detail="SLO must be like '1h', '2h', '3h', etc. (h=hours)")
-            else:
-                raise HTTPException(status_code=400, detail="SLO must be a string")
-        else:
-            slo = None
-
-        if request.dataset_path is not None and task_mode == "batched_inference":
-            dataset_path = request.dataset_path
-            column_names = request.column_names
-        else:
-            dataset_path = None
+                slo = None
+            
+            # Extract dataset path from selected_file
+            dataset_path = request.get("selected_file")
             column_names = None
-
-        if request.generation_kwargs is not None:
-            generation_kwargs = request.generation_kwargs
-        else:
-            generation_kwargs = None # just use the default ones provide dby the library for the model
+            generation_kwargs = None
         
-        # make the application key from the job info
+        # Make the application key from the job info
         application_key = ApplicationKey(
             model_name=model_name,
             task_mode=task_mode,
@@ -447,7 +426,7 @@ async def submit_job(request:JobInfo):
             submit_time=submit_time,
             task_mode=task_mode,
             model_name=model_name,
-            app_queue_key = application_queue_key,
+            app_queue_key=application_queue_key,
             backend=backend if backend is not None else None,
             quantization=quantization if quantization is not None else None,
             dataset_path=dataset_path if dataset_path is not None else None,
@@ -456,10 +435,8 @@ async def submit_job(request:JobInfo):
             generation_kwargs=generation_kwargs if generation_kwargs is not None else None
         )
 
-        jobs[job_id] = job_info # add it to the jobs dictionary
+        jobs[job_id] = job_info
         await push_job_to_global_queue(job_info)
-        # this needs to be removed from here and added to the global_queue_polling_loop function.
-        # await add_job_to_application_queue(job_info)
 
         return {
             "status": "success",
@@ -469,9 +446,8 @@ async def submit_job(request:JobInfo):
         }
 
     except Exception as e:
-        logger.error(f"Error submitting job {request.job_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error submitting job {request.job_id}: {e}")
-
+        logger.error(f"Error submitting job: {e}")
+        raise HTTPException(status_code=500, detail=f"Error submitting job: {e}")
 
 # ============================================================================
 
