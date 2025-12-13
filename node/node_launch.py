@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import logging
 import os
 import subprocess
-from typing import List
+import httpx
 import zmq
 import zmq.asyncio
 import msgpack
@@ -12,6 +12,7 @@ import traceback
 import requests
 
 from models.deployment_pb2 import Command, DeploymentInfo, JobInfo
+from models.resources_pb2 import Node
 
 # TODO: Look into cases where I should ray stop, it's not robust rn
 
@@ -20,7 +21,11 @@ from models.deployment_pb2 import Command, DeploymentInfo, JobInfo
 @dataclass
 class GlobalConfig:
     hostname: str = ""
-    listening_port: int = 12345
+    listening_port: int = 0
+    device_type: str = ""
+    num_devices: int = 0
+    central_addr: str = ""
+    central_port: str = ""
 
 @dataclass
 class StorageConfig:
@@ -326,7 +331,6 @@ async def listen_to_central():
         reply = {}
         match command.action:
             case Command.Action.LAUNCH: # Launch a model
-                print("matched")
 
                 reply = await asyncio.create_task(
                     launch_engine(command.deployment_info)
@@ -365,6 +369,11 @@ async def setup():
     
     config.hostname = os.environ.get("TD_HOSTNAME")
     config.listening_port = os.environ.get("TD_LISTENING_PORT")
+    config.device_type = os.environ.get("TD_DEVICE_TYPE")
+    config.num_devices = os.environ.get("TD_NUM_DEVICES")
+    config.central_addr = os.environ.get("TD_CENTRAL_ADDR")
+    config.central_port = os.environ.get("TD_CENTRAL_PORT")
+
     # need to know how to automatically get this
     # do we have the configs?
     sc.storage_server_url = os.environ.get("STORAGE_SERVER_URL")
@@ -372,6 +381,23 @@ async def setup():
 
     lc.ray_head_port = os.environ.get("TD_RAY_HEAD_PORT", lc.ray_head_port)
 
+    # Register self with central server
+    node = Node(
+        name = config.hostname,
+        device_count = int(config.num_devices),
+        device_type = config.device_type
+    )
+    nodeb = node.SerializeToString()
+    url = f"http://{config.central_addr}:{config.central_port}/nodes/register"
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url, 
+            content=nodeb, 
+            headers={"Content-Type": "application/protobuf"}
+        )
+        if response.status_code >= 400:
+            print(f"Failed to register self ({config.hostname}) with central server")
+    
 
 # Main event loop invocation
 async def main():

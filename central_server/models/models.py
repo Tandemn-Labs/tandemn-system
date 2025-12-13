@@ -50,7 +50,7 @@ class ApplicationStatus(str, Enum):
     STOPPED = "STOPPED"
     FAILED = "FAILED"
 
-class Request(BaseModel):
+class UserRequest(BaseModel):
     """This is for each JOB provided to it by Tandemn CLI.
     This is the config that the USER provides. 
     in the future - Tandemn CLI Will accept these configurations.

@@ -9,7 +9,7 @@ import random
 import uuid
 import redis.asyncio as redis
 
-from central_server.models.models import Request
+from central_server.models.models import UserRequest
 from models.deployment_pb2 import DeploymentInfo, JobInfo, MagicOutput, VllmDeployConfig, VllmRunConfig
 from utils.utils import dict_from_file
 
@@ -36,7 +36,7 @@ async def get_jobs():
 
         _, job = await redis_client.blpop(REQUEST_QUEUE)
         print("Dequeued from redis")
-        job_info = Request(**(json.loads(job)))
+        job_info = UserRequest(**(json.loads(job)))
         print(job_info)
 
         # Makes the decision
@@ -54,7 +54,7 @@ async def get_jobs():
 # Returns node list
 node_addrs = []
 node_list = ["test1", "test2", "test3"]
-async def real_magic(job: Request) -> DeploymentInfo:
+async def real_magic(job: UserRequest) -> DeploymentInfo:
     
     global hostname_to_address
 

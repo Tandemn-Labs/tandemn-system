@@ -9,31 +9,33 @@ Tandemn Central Orchestrator Server
 """
 
 import asyncio
-import json 
-from multiprocessing import process
+import json
 import os
 import logging
-import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 
 import msgpack
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Header, Request, Response
 from pydantic import BaseModel
 import redis.asyncio as redis
-import httpx
-from pymongo import MongoClient
+from pymongo import AsyncMongoClient
 import uvicorn
 import re
 import zmq.asyncio
-import traceback
 
+from central_server.models.models import NodeInfo, Application, UserRequest, ApplicationKey, NodeStatus, JobStatus, ApplicationStatus
+from models.deployment_pb2 import Command, MagicOutput
+from models.resources_pb2 import Node, Fabric
 
+from google.protobuf.json_format import MessageToDict
 
 from dotenv import load_dotenv
+
+
 # ============================================================================
-# Configuration
+# Global variables
 # ============================================================================
 
 load_dotenv()
@@ -53,91 +55,39 @@ REQUEST_QUEUE = "tandemn:request_queue"
 DEPLOYMENT_QUEUE = "tandemn:deployment_queue"
 APPLICATION_QUEUE_PREFIX = "tandemn:app_jobs:" # Redis HASH where jobs are stored as job_id -> job_json
 
-# ============================================================================
-# Data Models
-# ============================================================================
+# Webserver
+MIME_PROTOBUF = "application/protobuf"
 
-from central_server.models.models import NodeInfo, Application, Request, ApplicationKey, NodeStatus, JobStatus, ApplicationStatus
-from models.deployment_pb2 import DeploymentInfo, Command, MagicOutput
+# Node map
+nodes_dict: dict[Node] = {}
+nodemap_total: Fabric = None
+nodemap_used: Fabric = None
+nodemap_free: Fabric = None
+
+# MongoDB
+mongo_client: AsyncMongoClient = None
+db = None
+nodes_collection = None
+fabric_collection = None
+
+# Redis
+redis_client = None
 
 # ============================================================================
-# API + LoggingConfiguration
+# Other setup
 # ============================================================================
 
 app = FastAPI(title="Tandemn Central Orchestrator Server")
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Connect to Global Queue (Redis)
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
-# check redis connection
-if not redis_client.ping():
-    logger.critical("Failed to connect to Global Queue")
-    os._exit(1)
-
-# Connect to MongoDB (for node info)
-mongo_client = MongoClient(MONGODB_URI)
-db = mongo_client["tandemn_orca"]
-nodes_collection = db["node_info"]
-applications_collection = db["application_info"]
-
 # State Variables
 nodes: Dict[str, NodeInfo] = {} # [node_id: NodeInfo{}]
 applications: Dict[str, Application] = {} # [app_id: Application]
-jobs: Dict[str, Request] = {} # [job_id: JobInfo]
+jobs: Dict[str, UserRequest] = {} # [job_id: JobInfo]
 # app_key_to_id: Dict[str, str] = {}  # ✅ NEW: app_key_string → app_id (reverse index)
 
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
 ################################# MONGODB #####################################
-
-async def register_node_to_mongodb(node_info: NodeInfo):
-    """
-    Register a new node to the MongoDB Collection of NodesCollection.
-    This should happen ONLY at the BOOTUP of all the machines, BEFORE the health monitor is up.
-    This can ALSO HAPPEN when a node is DEAD and is being re-registered.
-    This can ALSO HAPPEN when a node's IP Changes but is still AWAITING_STATUS/HEALTHY.
-    """
-    try:
-        node_dict = node_info.model_dump(mode="json")
-        # Convert datetime to ISO format string for MongoDB
-        if node_dict.get("registration_time"):
-            node_dict["registration_time"] = node_dict["registration_time"]
-        # Set document expiration after 30 hours (in seconds)
-        # MongoDB TTL works with a date, so we use a 'last_updated' field for TTL indexing.
-        node_dict["last_updated"] = str(datetime.utcnow())  # always add/update
-        nodes_collection.update_one(
-            {"node_id": node_info.node_id},
-            {"$set": node_dict},
-            upsert=True
-        )
-        # Ensure TTL index exists (will not duplicate after creation)
-        # This sets a TTL of 30 hours for a node if not updated
-        nodes_collection.create_index("last_updated", expireAfterSeconds=30*60*60)
-        logger.debug(f"Node {node_info.node_id} registered to MongoDB")
-    except Exception as e:
-        logger.error(f"Error registering node {node_info.node_id} to MongoDB: {e}")
-        raise e
-
-async def update_node_in_mongodb(node: NodeInfo):
-    """
-    Update a node in the MongoDB database.
-    This is called by the machine runner when the health monitor is up and running.
-    Also updates the 'last_updated' field for TTL expiration.
-    """
-    try:
-        node_dict = node.model_dump(mode="json")
-        node_dict["last_updated"] = str(datetime.utcnow())  # update TTL expiration
-        nodes_collection.update_one({"node_id": node.node_id}, {"$set": node_dict})
-        # Optionally, ensure TTL index exists (no-op if already present)
-        nodes_collection.create_index("last_updated", expireAfterSeconds=30*60*60)
-    except Exception as e:
-        logger.error(f"Error updating node {node.node_id} in MongoDB: {e}")
-        raise e
-    logger.info(f"Node {node.node_id} updated in MongoDB")
-
 
 async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
     """
@@ -148,7 +98,7 @@ async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
     try:
         node_map = {}
         # Fetch all NodeInfo docs from MongoDB (as dicts)
-        all_nodes = nodes_collection.find({})
+        all_nodes = nodes_collection_old.find({})
         for node_doc in all_nodes:
             node_id = node_doc.get("node_id")
             # Omit MongoDB's internal id for clarity in display
@@ -162,7 +112,7 @@ async def fetch_node_map_from_mongodb() -> Dict[str, Any]:
 
 ################################# REDIS #####################################
 
-async def push_job_to_global_queue(job:Request):
+async def push_job_to_global_queue(job:UserRequest):
     """
     Push a job to the global queue which is a Redis List.
     This is called by the submit_job function.
@@ -193,7 +143,7 @@ async def get_application_queue_key(app_key: ApplicationKey) -> str:
         logger.error(f"Error getting application queue key for application key: {app_key}: {e}")
         raise e
 
-async def add_job_to_application_queue(job:Request):
+async def add_job_to_application_queue(job:UserRequest):
     """
     Store the job in the per-application Redis HASH keyed by job_id -> job_json.
     If it is not deployed, we dont call it "TILL" its deployed.
@@ -213,30 +163,7 @@ async def add_job_to_application_queue(job:Request):
     except Exception as e:
         logger.error(f"Error adding job {job.job_id} to application job map {application_queue_key}: {e}")
         raise e
-############################# DEPLOYMENT FUNCTIONS #####################################
 
-class TandemnPlanner:
-
-    def __init__(self,job: Request, node_map: Dict[str, Any]):
-        self.job = job
-        self.node_map = node_map
-        logging.info("TandemnPlanner initialized")
-    
-    async def get_optimal_nodes(self) -> str:
-        """
-        This function provide the best node for the job and return the assigned topology.
-        """
-        # for now it returns the entire node_map as is
-        # in the future, it will return the best nodes for the job 
-        # TODO - GANGMUK'S PLANNER TO BE CALLED HERE.
-        return self.node_map
-
-async def get_application_docker_image(application_key: ApplicationKey) -> str:
-    """
-    This function will return the docker image for the application.
-    """
-    # keep it a placeholder for now
-    return "vllm/llama-70b-hf:latest"
 
 # ============================================================================
 # Central Server Functions
@@ -251,57 +178,7 @@ async def get_application_docker_image(application_key: ApplicationKey) -> str:
 # take the node map, and update the status of each of them as the health monitor says on each of the nodes.
 # This also keeps on pushing the updates to the MongoDB database (asynchronously)
 
-# PHASE 1: NODE REGISTRATION
-# Function: register_node()
-# - Called by machine_runner when it first starts up
-# - Registers node in the node map before health monitor is ready
-# - Use case: Node is provisioning (installing drivers, dependencies, etc.)
 
-@app.post("/nodes/register")
-async def register_node(request: NodeInfo, background_tasks: BackgroundTasks):
-    try:
-        node_id = request.node_id # get the node id from machine_runner
-        ip_address = request.ip_address # get the ip address of the node from machine_runner
-        machine_runner_url = request.machine_runner_url # get the machine runner url from machine_runner
-
-        if node_id in nodes:
-            logger.warning(f"Node {node_id} is already registered. Updating the Node Info")
-            if nodes[node_id].status == NodeStatus.DEAD:
-                # re - register a DEAD NODE
-                nodes[node_id].status = NodeStatus.AWAITING_STATUS
-                nodes[node_id].ip_address = ip_address
-                nodes[node_id].registration_time = datetime.now() # re-registration time
-            elif nodes[node_id].ip_address != ip_address:
-                # in case the IP Changed but node isnt dead
-                nodes[node_id].ip_address = ip_address
-            else:
-                pass # node is already registered and healthy (do not do anything)
-        else:
-            # new node registration
-            registration_time = datetime.now() # get the current time
-
-            node_info = NodeInfo(
-                node_id=node_id, 
-                ip_address=ip_address,
-                machine_runner_url=machine_runner_url,
-                status=NodeStatus.AWAITING_STATUS,
-                registration_time=registration_time,
-                # rest everything is None and Optional as Health Montior is not up yet.
-            )
-            nodes[node_id] = node_info # add it to node directory
-            # add it to the MongoDB database asynchronously
-            background_tasks.add_task(register_node_to_mongodb, node_info)
-            logger.info(f"Registering node {node_id} with IP {ip_address} and Machine Runner URL {machine_runner_url}")
-            return {
-                "status": "registered",
-                "node_id": node_id,
-                "ip_address": ip_address,
-                "registration_time": registration_time,
-                "message": f"Node {node_id} registered successfully"
-            }
-    except Exception as e:
-        logger.error(f"Error registering node {node_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error registering node {node_id}: {e}")
 
 # Function: update_node_status()
 # - Called periodically by node's health monitor once it's operational
@@ -362,6 +239,102 @@ async def update_node_status(request:NodeInfo, background_tasks: BackgroundTasks
         raise HTTPException(status_code=500, detail=f"Error updating node status: {e}")
 
 
+
+# Nodes register themselves here 
+# (will probably be scrapped when we have a better health service)
+@app.post("/nodes/register", response_class=Response)
+async def register_node(
+    request: Request,
+    content_type: str = Header(default=MIME_PROTOBUF)
+):  
+    print(content_type)
+    if MIME_PROTOBUF not in content_type:
+        raise HTTPException(status_code=415)
+    
+    node = Node()
+    raw_body = await request.body()
+    node.ParseFromString(raw_body)
+    print(node)
+
+    await add_node(node)
+
+
+# Register a new node, write to MongoDB and update the node maps
+# A new node is always assumed to be free, declaring used is another step
+async def add_node(node: Node):
+    
+    global nodes_collection, fabric_collection
+    global nodes_dict, nodemap_total, nodemap_free
+
+    # Add node to collection in MongoDB
+    node_dict = MessageToDict(
+        node, 
+        always_print_fields_with_no_presence=True,
+        preserving_proto_field_name=True
+    ) | {"_id": node.name, "last_updated": datetime.now(timezone.utc)}
+    
+    await nodes_collection.replace_one(
+        {"_id": node.name},
+        node_dict, upsert=True
+    )
+    nodes_dict[node.name] = node
+
+    # Update nodemaps (if in total, we assume it's processed and ignore it)
+    if node.name in nodemap_total.nodes:
+        return
+    
+    # Update nodemap of total resources
+    nodemap_total.nodes.append(node.name)
+    nodemap_total.device_counts[node.device_type] = \
+        nodemap_total.device_counts.get(node.device_type, 0) + node.device_count
+    device_on_node = nodemap_total.devices_on_node[node.name]
+    device_on_node.device_type = node.device_type
+    device_on_node.device_count = node.device_count
+
+    await write_nodemap_to_mongo(nodemap_total)
+
+    # Update nodemap of free resources
+    nodemap_free.nodes.append(node.name)
+    nodemap_free.device_counts[node.device_type] = \
+        nodemap_free.device_counts.get(node.device_type, 0) + node.device_count
+    device_on_node = nodemap_free.devices_on_node[node.name]
+    device_on_node.device_type = node.device_type
+    device_on_node.device_count = node.device_count
+
+    await write_nodemap_to_mongo(nodemap_free)
+
+    print(nodemap_total)
+    print(nodemap_free)
+
+
+# Declare the nodes in the list as used, update the free and used node maps
+# Update the node index with the job and deployment id
+async def use_nodes(nodes: List[Node], job_id: str, deployment_id: str):
+
+    global nodes_collection, fabric_collection, nodemap_used, nodemap_free
+
+    for node in nodes:
+        await nodes_collection.update_one(
+            {"_id": node.name},
+        )
+
+
+# Helper function to take in a Fabric object, convert to dict and write to Mongo
+async def write_nodemap_to_mongo(nodemap: Fabric):
+    
+    global fabric_collection
+
+    fabric_dict = MessageToDict(
+        nodemap, 
+        always_print_fields_with_no_presence=True,
+        preserving_proto_field_name=True
+    ) | {"_id": nodemap.name, "last_updated": datetime.now(timezone.utc)}
+    
+    await fabric_collection.update_one(
+        {"_id": nodemap.name},
+        {"$set": fabric_dict}, upsert=True
+    )
+
 # ============================================================================
 
 # One Function to submit jobs to the GLobal Queue. This is called by TandemnCLI by the user.
@@ -374,7 +347,7 @@ async def update_node_status(request:NodeInfo, background_tasks: BackgroundTasks
 # - Returns job_id to caller
 
 @app.post("/jobs/submit")
-async def submit_job(request:Request):
+async def submit_job(request:UserRequest):
     """
     This is either called by the TandemnCLI when the user submits a job.
     """
@@ -442,7 +415,7 @@ async def submit_job(request:Request):
         application_queue_key = await get_application_queue_key(application_key)
         logging.info(f"Application queue key: {application_queue_key}")
 
-        job_info = Request(
+        job_info = UserRequest(
             job_id=job_id,
             user=user,
             submit_time=submit_time,
@@ -475,106 +448,6 @@ async def submit_job(request:Request):
 
 
 # ============================================================================
-
-# One Function to keep on polling jobs from the Global Queue (Redis). This will, as soon as a job is queued: 
-# 1 - Check which application needs to run (model+task_mode+backend+quantization)
-# 2 - Checks if application is already running on any node. If yes, pop the job from the Global Queue, and add it to the Application queue, and current_jobs in the NodeInfo of those nodes. 
-# 3 - If not, if batched - upload dataset + start the container with the application in parallel. 
-# 3.5 - For the launching  - query tandemn_planner with the node_map (above function), and allocate nodes for the job and start container on them. 
-# 4 - Pops job from Global Queue, adds it to the Application_queue, and current_jobs in the NodeInfo of those nodes. 
-# Split in multiple functions if needed. The main function should be non blocking and async. Everytime a job is queued, its applicationkey should be made. 
-
-# One function to get the docker-image from the docker/apptainer hub. This is called by the machine_runner 
-# when the Application_queue gets something. The function is called, and each of those nodes are asked to pull the image, and load the application onto those GPUs
-
-# PHASE 3: JOB SCHEDULING & DISPATCH (Main Loop)
-# Function: global_queue_polling_loop()
-# - Continuously polls GLOBAL_QUEUE for new jobs
-# - For each job:
-#   Step 1: Extract ApplicationKey (model + task_mode + backend + quantization)
-#   Step 2: Check if application is already running on any node
-#     - YES: Route job to that application's queue
-#            Add job_id to existing node's current_jobs list
-#     - NO:  Provision new application instance:
-#            a) Query tandemn_planner for optimal node allocation
-#            b) Send container start command to selected nodes
-#            c) Wait for application readiness
-#   Step 3: Pop job from GLOBAL_QUEUE
-#   Step 4: Add job to APPLICATION_QUEUE_{app_key} 
-#   Step 5: Update node's current_jobs list in NodeInfo
-# - Non-blocking: Process jobs asynchronously
-
-async def global_queue_polling_loop():
-    """
-    Continuously polls global queue and routes jobs to application queues.
-    - Checks if application already exists using app_key_string mapping
-    - Creates new application if needed
-    - Maintains applications dict keyed by app_key_string
-    """
-    logger.info("🔄 Starting global queue polling loop...")
-    
-    while True:
-        try:
-            # Blocking pop from global queue (1 second timeout)
-            current_job = redis_client.blpop(REQUEST_QUEUE, timeout=1)
-            if not current_job:
-                logger.info("No jobs in the global queue")
-                await asyncio.sleep(0.1)
-                continue
-            # Parse job
-            _, job_json = current_job # Returns: ("tandemn:global_queue", "{"job_id":"job_001",...}") so we ignore "tandemn:global_queue"
-            job_data = json.loads(job_json)
-            current_job_info = Request(**job_data) # Converts the job_data to a JobInfo object
-            logger.info(f"📥 Processing job {current_job_info.job_id} from global queue")
-            # Step 1: Extract ApplicationKey from job
-            application_key = ApplicationKey(
-                model_name=current_job_info.model_name,
-                task_mode=current_job_info.task_mode,
-                backend=current_job_info.backend,
-                quantization=current_job_info.quantization
-            )
-            app_key_string = await get_application_queue_key(application_key)
-            # Step 2: Check if application already exists (single-level, keyed by app_key_string)
-            if app_key_string in applications:
-                app = applications[app_key_string]
-                logger.info(f"Reusing existing application: {app_key_string}")
-                # Add job to application's running jobs
-                app.running_jobs.append(current_job_info.job_id)
-            else:
-                # Need to create new application
-                logger.info(f"🆕 Creating new application for {app_key_string}")
-                # Query tandemn_planner for node allocation
-                node_map = await fetch_node_map_from_mongodb()
-                tandemn_planner = TandemnPlanner(current_job_info, node_map)
-                assigned_topology = await tandemn_planner.get_optimal_nodes()
-                docker_image = await get_application_docker_image(application_key)
-                app_id = f"app_{uuid.uuid4().hex[:8]}"
-                application = Application(
-                    app_id=app_id,
-                    key=application_key,
-                    docker_image=docker_image,
-                    assigned_topology=json.dumps(assigned_topology),
-                    status=ApplicationStatus.LOADING.value,
-                    created_at=datetime.now(),
-                    running_jobs=[current_job_info.job_id]
-                )
-                applications[app_key_string] = application
-                logger.info(f"✅ Created application {app_key_string}")
-                # Trigger deployment to nodes
-                await deploy_application(assigned_topology, docker_image, application_key)
-            
-            # Step 3: Store job JSON in per-application Redis HASH (unsorted)
-            await add_job_to_application_queue(current_job_info)
-            
-            # Step 4: Update job status
-            current_job_info.status = JobStatus.QUEUED
-            jobs[current_job_info.job_id] = current_job_info
-            
-            logger.info(f"✅ Job {current_job_info.job_id} routed successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Error in global queue polling loop: {e}")
-            await asyncio.sleep(1)
 
 
 # CLI or API gateway or whatever inserts jobs into Redis. This coro processes them
@@ -682,43 +555,6 @@ async def process_orchestrator_output(magic: MagicOutput):
     ctx.term()
 
 
-# PHASE 4: APPLICATION DEPLOYMENT
-# Function: deploy_application()
-# - Called internally when scheduling determines new app instance needed
-# - Sends deployment request to machine_runner on target nodes
-# - Machine_runner pulls docker/apptainer image
-# - Machine_runner starts container and loads model onto GPUs
-# - Returns when application is ready to accept jobs
-
-async def deploy_application(assigned_topology: str, docker_image: str, application_key: ApplicationKey):
-    """
-    This function sends a signal to the machine_runners of the 
-    nodes in the assigned topology to deploy the application
-    """
-    for node_id, node_info in assigned_topology.items():
-        try:
-            machine_runner_url = node_info.get('machine_runner_url')
-            if not machine_runner_url:
-                logger.error(f"Missing machine_runner_url for node {node_id}, skipping deployment.")
-                continue
-            deploy_endpoint = f"{machine_runner_url}/deploy_application"
-
-            payload = {
-                "docker_image": docker_image,
-                "application_key": application_key.to_string() if hasattr(application_key, "to_string") else str(application_key),
-                "assigned_topology": assigned_topology,  # Pass full topology for context
-            }
-
-            # Use an httpx client for async POST
-            async with httpx.AsyncClient() as client:
-                response = await client.post(deploy_endpoint, json=payload, timeout=60)
-                if response.status_code != 200:
-                    logger.error(f"Deployment to node {node_id} failed: {response.status_code} - {response.text}")
-                else:
-                    logger.info(f"Deployment of application {application_key} to node {node_id} succeeded.")
-        except Exception as e:
-            logger.error(f"Exception deploying to node {node_id}: {e}")
-
 # ============================================================================
 # Monitoring Functions
 # ============================================================================
@@ -744,8 +580,49 @@ async def get_node_map():
 # Startup Functions
 # ============================================================================
 
+# Setup some initial variables
+async def setup():
+    
+    # Connect to Redis
+    global redis_client
+    redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+
+    # Connect to MongoDB
+    global mongo_client, db, nodes_collection, fabric_collection
+    global nodemap_total, nodemap_free, nodemap_used
+
+    mongo_client = AsyncMongoClient(MONGODB_URI)
+    db = mongo_client["tandemn_orca"]
+    nodes_collection = db["nodes"]
+    await nodes_collection.create_index("last_updated", expireAfterSeconds=3600)
+    fabric_collection = db["fabrics"]
+    await fabric_collection.create_index(
+        "last_updated", expireAfterSeconds=3600
+    )
+
+    # Populate the nodemaps
+    nodemap_total = Fabric(name="total")
+    if (doc := await fabric_collection.find_one({"_id": "total"})) is not None:
+        nodemap_total.ParseFromString(doc["store"])
+
+    nodemap_free = Fabric(name="free")
+    if (doc := await fabric_collection.find_one({"_id": "free"})) is not None:
+        nodemap_free.ParseFromString(doc["store"])
+
+    nodemap_used = Fabric(name="used")
+    if (doc := await fabric_collection.find_one({"_id": "used"})) is not None:
+        nodemap_used.ParseFromString(doc["store"])
+
+    print(nodemap_total)
+    print(nodemap_used)
+    print(nodemap_free)
+
+
 @app.on_event("startup")
 async def startup():
+
+    await setup()
+
     # Start background tasks
     asyncio.create_task(process_deployments())
     logger.info("Tandemn Central Orchestrator Server Started")

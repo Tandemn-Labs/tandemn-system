@@ -1,8 +1,0 @@
-psutil
-pynvml
-nvidia-ml-py
-fastapi
-uvicorn
-httpx
-pydantic
-python-dotenv
