@@ -37,7 +37,7 @@ TANDEMN_ORCA_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(TANDEMN_ORCA_ROOT))
 
 
-from central_server.models.models import Request, Application, NodeStatus, DeployApplicationRequest
+from central_server.models.models import UserRequest, Application, NodeStatus, DeployApplicationRequest
 
 # ============================================================================
 # Load Configuration from .env file (REQUIRED)
@@ -80,7 +80,7 @@ logging.basicConfig(level=logging.INFO)
 # Global State Variables
 # ============================================================================
 
-current_jobs: Dict[str, Request] = {} # [job_id: JobInfo]
+current_jobs: Dict[str, UserRequest] = {} # [job_id: JobInfo]
 current_applications: Dict[str, Application] = {} # [app_id: Application]
 
 

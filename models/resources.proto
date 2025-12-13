@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package resources;
+
+// Representation of a node and its resources
+// Could hold information about current tasks if in use
+message Node {
+
+  string name = 1;
+
+  // device_type is like nvidia-v100-32
+  int32 device_count = 2;
+  string device_type = 3;
+
+  repeated string deployment_id = 4;
+  repeated string job_id = 5; 
+
+}
+
+
+// Representation of resources in a fabric
+message Fabric {
+
+  string name = 1;
+  repeated string nodes = 2;
+
+  // Map of aggregates, total devices in fabric sorted by type
+  map<string, int32> device_counts = 3;
+
+  // Map of nodes, and device type and count
+  // Functionally more a list
+  map<string, DevicesOnNode> devices_on_node = 4;
+
+  message DevicesOnNode{
+    string device_type = 1;
+    int32 device_count = 2;
+  }
+}
