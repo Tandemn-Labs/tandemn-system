@@ -1,0 +1,9 @@
+set -euxo pipefail
+source .venv/bin/activate
+
+~/sky_templates/ray/start_cluster
+
+if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    vllm run-batch -i {input_file} -o {output_file} --model {model} \
+    {additional_params}
+fi
