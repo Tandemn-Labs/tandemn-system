@@ -3,11 +3,9 @@ name: default-cluster
 num_nodes: 1
 
 resources:
-  infra: aws
-  use_spot: false
+  infra: aws/us-east-1
+  use_spot: true
   disk_size: 500GB
-  memory: "64GB+"
-  region: us-east-1
   instance_type: p3.gxlarge
 
 workdir: .
@@ -32,5 +30,8 @@ run: |
   ~/sky_templates/ray/start_cluster
 
   if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
-    
+    vllm run-batch \
+    -i offline_inference/openai_batch/openai_example_batch.jsonl \
+    -o results.jsonl \
+    --model meta-llama/Meta-Llama-3-8B-Instruct
   fi
