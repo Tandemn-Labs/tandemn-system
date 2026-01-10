@@ -209,7 +209,8 @@ class S3BigStorageBackend(StorageBackend):
                 "url":url,
                 "method":"put",
                 "headers":{"Content-Type":"application/octet-stream"},
-                "key":key
+                "key":key,
+                "s3_uri": f"s3://{self.bucket_name}/{key}"
             }
         except ClientError as e:
             logger.error(f"Error generating presigned upload URL: {e}")
@@ -251,7 +252,8 @@ class S3BigStorageBackend(StorageBackend):
         return{
             "upload_id":response["UploadId"],
             "key":key,
-            "bucket":self.bucket_name
+            "bucket":self.bucket_name, 
+            "s3_uri": f"s3://{self.bucket_name}/{key}"
         }
 
     async def multipart_sign_part(self,upload_id:str,user:str,remote_path:str,part_number:int,expires_seconds:int=600) -> dict:
