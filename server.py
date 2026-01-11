@@ -4,7 +4,7 @@ import sky
 from fastapi import FastAPI
 from models.requests import BatchedRequest
 from models.resources import MagicOutput
-from utils.utils import update_template, update_yaml_file
+from utils.utils import split_uri, update_template, update_yaml_file
 
 ##### Global variables
 YAML_OUTPUT = "temp/output.yaml"
@@ -40,14 +40,16 @@ async def submit_batch(request: BatchedRequest):
 async def sp_launch_vllm(request: BatchedRequest, config: MagicOutput):
     replace_run_dict = replace_run_vllm(request, config)
     run_string = update_template("templates/vllm_run", replace_run_dict)
-    print(run_string)
+
+    dirname, _ = split_uri(request.input_file)
+
 
     replace_yaml = {
         "name": config.decision_id,
         "num_nodes": config.num_nodes,
         "resources.instance_type": config.instances,
-        "workdir": "files",
-        "run": run_string
+        "run": run_string,
+        "file_mounts./data.source": dirname
     }
     update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
 
@@ -61,8 +63,11 @@ def replace_run_vllm(request: BatchedRequest, config: MagicOutput):
     replace = {}
 
     replace["model"] = request.model_name
-    replace["input_file"] = request.input_file
-    replace["output_file"] = request.output_file
+
+    _, input_file = split_uri(request.input_file)
+    _, output = split_uri(request.output_file)
+    replace["input_file"] = "/data/" + input_file
+    replace["output_file"] = "/data/" + output
 
     if (
         request.vllm_specific_config is not None
@@ -80,7 +85,6 @@ def replace_run_vllm(request: BatchedRequest, config: MagicOutput):
         
         spec_string = spec_string.rstrip(" ")
         replace["additional_params"] = spec_string
-        print(spec_string)
     
     else:
         replace["additional_params"] = ""

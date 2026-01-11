@@ -58,3 +58,39 @@ def update_template(template_file: str, replace_dict: Dict[str, str]) -> str:
     script = tmpl.format(**replace_dict)
 
     return script
+
+
+def split_uri(uri: str) -> tuple[str, str]:
+    """
+    Split a cloud bucket URI into bucket (with scheme) and object path.
+    
+    Args:
+        uri: A URI string like "s3://tandemn/test/input.txt"
+    
+    Returns:
+        A tuple of (bucket_uri, object_path) where:
+        - bucket_uri: The scheme and bucket name (e.g., "s3://tandemn")
+        - object_path: The path within the bucket (e.g., "test/input.txt")
+    
+    Examples:
+        >>> split_uri("s3://tandemn/test/input.txt")
+        ('s3://tandemn', 'test/input.txt')
+        >>> split_uri("gs://my-bucket/folder/file.json")
+        ('gs://my-bucket', 'folder/file.json')
+    """
+    # Find the scheme separator "://"
+    scheme_end = uri.find("://")
+    if scheme_end == -1:
+        raise ValueError(f"Invalid URI format: missing scheme (expected '://')")
+    
+    # Find the first slash after the bucket name
+    # Start searching after "://" + bucket name
+    bucket_end = uri.find("/", scheme_end + 3)
+    if bucket_end == -1:
+        # No path after bucket, return bucket and empty string
+        return uri, ""
+    
+    bucket_uri = uri[:bucket_end]
+    object_path = uri[bucket_end + 1:]  # +1 to skip the slash
+    
+    return bucket_uri, object_path
