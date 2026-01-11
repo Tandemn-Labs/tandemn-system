@@ -5,6 +5,7 @@ from backends.s3_big import S3BigStorageBackend
 
 logger = logging.getLogger(__name__)
 
+
 def get_storage_backend() -> StorageBackend:
     """
     Factory function to get the appropriate storage backend based on environment variables.
@@ -14,11 +15,12 @@ def get_storage_backend() -> StorageBackend:
     aws_region = os.getenv("AWS_REGION", "us-east-1")
 
     if not bucket_name:
-        raise ValueError("S3_BUCKET_NAME environment variable is required to initialize the storage backend")
+        raise ValueError(
+            "S3_BUCKET_NAME environment variable is required to initialize the storage backend"
+        )
 
     if storage_type == "s3_big":
         logger.info("Initializing S3 Big storage backend")
         return S3BigStorageBackend()
     else:
         raise ValueError(f"Unknown storage backend type: {storage_type}")
-

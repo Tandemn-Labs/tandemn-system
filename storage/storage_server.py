@@ -12,7 +12,7 @@ from storage_factory import get_storage_backend
 
 load_dotenv()
 SERVER_PORT = int(os.getenv("STORAGE_SERVER_PORT", 8002))
-CHUNK_SIZE_MB = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024 # 8MB chunks
+CHUNK_SIZE_MB = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024  # 8MB chunks
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -23,14 +23,13 @@ storage_backend = get_storage_backend()
 # STORAGE FUNCTIONS
 # ============================================================================
 
+
 # ### One function to upload a file to the storage backend (actual_file, file_path and a user)
 # ### One function to download the file from a (user and a file_path)
 # One Function to STREAM UPLOAD a file to the backend (user and a file_path)
 @app.post("/storage/upload")
 async def upload_file_to_storage(
-    file: UploadFile = File(...),
-    remote_path: str = Form(...),
-    user: str = Form(...)
+    file: UploadFile = File(...), remote_path: str = Form(...), user: str = Form(...)
 ):
     """
     Upload a file to storage backend using streaming.
@@ -58,11 +57,12 @@ async def upload_file_to_storage(
             "storage_uri": storage_uri,
             "remote_path": remote_path,
             "user": user,
-            "filename": file.filename
+            "filename": file.filename,
         }
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
         raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
+
 
 # One function to get a list of all files for a user
 @app.get("/storage/list/{user}")
@@ -74,17 +74,18 @@ async def list_user_files(user: str, prefix: str = ""):
     try:
         logger.info(f"Listing files for user {user} with prefix '{prefix}'")
         files = await storage_backend.list_files(prefix, user)
-        
+
         return {
             "status": "success",
             "user": user,
             "prefix": prefix,
             "files": files,
-            "count": len(files)
+            "count": len(files),
         }
     except Exception as e:
         logger.error(f"Error listing files: {e}")
         raise HTTPException(status_code=500, detail=f"Error listing files: {str(e)}")
+
 
 # One Function to STREAM DOWNLOAD a file from the backend (user and a file_path)
 @app.get("/storage/download/{user}/{file_path:path}")
@@ -98,12 +99,12 @@ async def download_file_from_storage(user: str, file_path: str):
         logger.info(f"Downloading file {file_path} for user {user}")
         # Get filename for the download
         filename = file_path.split("/")[-1] or "download"
-        
+
         # Stream the file
         async def file_stream_iterator():
             async for chunk in storage_backend.stream_file(file_path, user):
                 yield chunk
-        
+
         return StreamingResponse(
             file_stream_iterator(),
             media_type="application/octet-stream",
@@ -115,6 +116,7 @@ async def download_file_from_storage(user: str, file_path: str):
         logger.error(f"Error downloading file: {e}")
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
+
 # One Function to Delete a File from the storage backend (user and a file_path)
 @app.delete("/storage/delete/{user}/{file_path:path}")
 async def delete_file_from_storage(user: str, file_path: str):
@@ -124,21 +126,24 @@ async def delete_file_from_storage(user: str, file_path: str):
     try:
         logger.info(f"Deleting file {file_path} for user {user}")
         success = await storage_backend.delete_file(file_path, user)
-        
+
         if success:
             return {
                 "status": "success",
                 "message": f"File {file_path} deleted successfully",
                 "user": user,
-                "file_path": file_path
+                "file_path": file_path,
             }
         else:
-            raise HTTPException(status_code=500, detail=f"Failed to delete file {file_path}")
+            raise HTTPException(
+                status_code=500, detail=f"Failed to delete file {file_path}"
+            )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error deleting file: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
+
 
 # One Function to check if a file exists in the storage backend (user and a file_path)
 @app.get("/storage/exists/{user}/{file_path:path}")
@@ -149,38 +154,55 @@ async def check_file_exists(user: str, file_path: str):
     """
     try:
         exists = await storage_backend.file_exists(file_path, user)
-        
+
         return {
             "status": "success",
             "user": user,
             "file_path": file_path,
-            "exists": exists
+            "exists": exists,
         }
     except Exception as e:
         logger.error(f"Error checking file existence: {e}")
         raise HTTPException(status_code=500, detail=f"Error checking file: {str(e)}")
 
+
 # =========== PreSigned Upload and Download Features ========================
 
+
 @app.post("/storage/presign/upload")
-async def presign_upload(remote_path: str = Form(...), user: str = Form(...), expires: int = Form(600)):
+async def presign_upload(
+    remote_path: str = Form(...), user: str = Form(...), expires: int = Form(600)
+):
     payload = await storage_backend.presigned_upload(remote_path, user, expires)
     return {"status": "success", **payload}
+
 
 @app.get("/storage/presign/download")
 async def presign_download(user: str, remote_path: str, expires: int = 600):
     payload = await storage_backend.presigned_download(remote_path, user, expires)
     return {"status": "success", **payload}
 
+
 # =========== Multipart Upload and Download Features ========================
 
+
 @app.post("/storage/multipart/start")
-async def multipart_start(remote_path: str = Form(...), user:str = Form(...)):
+async def multipart_start(remote_path: str = Form(...), user: str = Form(...)):
     return await storage_backend.multipart_upload_start(remote_path, user)
 
+
 @app.post("/storage/multipart/sign-part")
-async def multipart_sign_part(upload_id: str = Form(...), user: str = Form(...), remote_path: str = Form(...), part_number: int = Form(...), expires: int = Form(600)):
-    return await storage_backend.multipart_sign_part(upload_id, user, remote_path, part_number, expires)
+async def multipart_sign_part(
+    upload_id: str = Form(...),
+    user: str = Form(...),
+    remote_path: str = Form(...),
+    part_number: int = Form(...),
+    expires: int = Form(600),
+):
+    return await storage_backend.multipart_sign_part(
+        upload_id, user, remote_path, part_number, expires
+    )
+
 
 @app.post("/storage/multipart/complete")
 async def multipart_complete(
@@ -191,7 +213,7 @@ async def multipart_complete(
 ):
     parts_list = json.loads(parts)
     if not isinstance(parts_list, list):
-            raise ValueError("parts is not a list")
+        raise ValueError("parts is not a list")
     return await storage_backend.multipart_complete(
         remote_path, user, upload_id, parts_list
     )
@@ -199,4 +221,3 @@ async def multipart_complete(
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=SERVER_PORT)
-
