@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import json
 
 
-from storage_factory import get_storage_backend
+from storage.storage_factory import get_storage_backend
 
 load_dotenv()
 SERVER_PORT = int(os.getenv("STORAGE_SERVER_PORT", 8002))
@@ -26,7 +26,7 @@ storage_backend = get_storage_backend()
 
 # ### One function to upload a file to the storage backend (actual_file, file_path and a user)
 # ### One function to download the file from a (user and a file_path)
-# One Function to STREAM UPLOAD a file to the backend (user and a file_path)
+# One Function to STREAM UPLOAD a file to the backend (usrer and a file_path)
 @app.post("/storage/upload")
 async def upload_file_to_storage(
     file: UploadFile = File(...), remote_path: str = Form(...), user: str = Form(...)

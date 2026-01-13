@@ -1,9 +1,10 @@
 import uuid
 import sky
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Form
 from models.requests import BatchedRequest
 from models.resources import MagicOutput
+from storage.storage_server import storage_backend
 from utils.utils import split_uri, update_template, update_yaml_file
 
 ##### Global variables
@@ -38,6 +39,7 @@ async def submit_batch(request: BatchedRequest):
 
 
 async def sp_launch_vllm(request: BatchedRequest, config: MagicOutput):
+
     replace_run_dict = replace_run_vllm(request, config)
     run_string = update_template("templates/vllm_run", replace_run_dict)
 
@@ -54,18 +56,20 @@ async def sp_launch_vllm(request: BatchedRequest, config: MagicOutput):
     update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
 
     task = sky.Task.from_yaml(YAML_OUTPUT)
-    print(task)
-    result = sky.launch(task, cluster_name=config.decision_id, down=True)
-    print(result)
+    result_id = sky.launch(task, cluster_name=config.decision_id, down=True)
+    job_id, _ = sky.stream_and_get(result_id, follow=True)
+    sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
 
 
 def replace_run_vllm(request: BatchedRequest, config: MagicOutput):
     replace = {}
 
     replace["model"] = request.model_name
+    replace["tp"] = config.tp_size
+    replace["pp"] = config.pp_size
 
     _, input_file = split_uri(request.input_file)
-    _, output = split_uri(request.output_file)
+    output = request.output_file
     replace["input_file"] = "/data/" + input_file
     replace["output_file"] = "/data/" + output
 
@@ -103,6 +107,19 @@ def real_magic(request: BatchedRequest) -> MagicOutput:
         pp_size=1,
     )
 
+##### Storage stuff #####
+@app.post("/storage/presigned_upload")
+async def presign_upload(
+    remote_path: str = Form(...), user: str = Form(...), expires: int = Form(600)
+):
+    payload = await storage_backend.presigned_upload(remote_path, user, expires)
+    return {"status": "success", **payload}
+
+
+@app.get("/storage/presigned_download")
+async def presign_download(user: str, remote_path: str, expires: int = 600):
+    payload = await storage_backend.presigned_download(remote_path, user, expires)
+    return {"status": "success", **payload}
 
 if __name__ == "__main__":
     import uvicorn

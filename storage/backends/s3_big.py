@@ -8,6 +8,8 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 from botocore.config import Config
 
+from utils.utils import split_uri
+
 
 from .base import StorageBackend
 
@@ -28,12 +30,7 @@ class S3BigStorageBackend(StorageBackend):
     """
 
     def __init__(self):
-        self.bucket_name = os.getenv("S3_BUCKET_NAME")
-        if self.bucket_name is None:
-            raise ValueError(
-                "S3_BUCKET_NAME environment variable is required to initialize the storage backend"
-            )
-        self.aws_region = os.getenv("AWS_REGION", "us-east-1")
+        self.aws_region = os.getenv("AWS_REGION", "us-east-2")
         boto_config = Config(signature_version="s3v4")
         print("running in region: ", self.aws_region)
         self.s3_client = boto3.client(
@@ -63,22 +60,39 @@ class S3BigStorageBackend(StorageBackend):
             int(os.getenv("S3_STREAM_CHUNK_MB", DEFAULT_STREAM_CHUNK_MB)) * 1024 * 1024
         )
 
-    def _get_key(self, remote_path: str, user: str) -> str:
+    def _get_bucket_and_key(self, remote_path: str) -> tuple[str, str]:
+        """
+        Extract bucket name and key from remote_path.
+        If remote_path is a full S3 URI (s3://bucket/key), extract both.
+        Otherwise, use the user prefix and remote_path as the key.
+        Returns: (bucket_name, key)
+        """
         if remote_path.startswith("s3://"):
-            return remote_path.replace(f"s3://{self.bucket_name}/", "")
-        return f"{self.get_user_prefix(user)}{remote_path}"
+            uri_bucket, key = split_uri(remote_path)
+            bucket_name = uri_bucket.split('://')[1]
+            return bucket_name, key
+        # For non-URI paths, we need a bucket name - this should come from remote_path
+        # If it's not a full URI, we can't determine the bucket, so raise an error
+        raise ValueError(
+            f"remote_path must be a full S3 URI (s3://bucket/key) or include bucket information. Got: {remote_path}"
+        )
+    
+    def _get_key(self, remote_path: str, user: str) -> str:
+        """Deprecated: Use _get_bucket_and_key instead. Kept for backward compatibility."""
+        _, key = self._get_bucket_and_key(remote_path)
+        return key
 
     async def upload_file(self, local_path: str, remote_path: str, user: str) -> str:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         try:
             await asyncio.to_thread(
                 self.s3_client.upload_file,
                 local_path,
-                self.bucket_name,
+                bucket_name,
                 key,
                 Config=self.transfer_config,
             )
-            s3_uri = f"s3://{self.bucket_name}/{key}"
+            s3_uri = f"s3://{bucket_name}/{key}"
             logger.info(f"Uploaded {local_path} to {s3_uri}")
             return s3_uri
         except ClientError as e:
@@ -86,11 +100,11 @@ class S3BigStorageBackend(StorageBackend):
             raise
 
     async def download_file(self, remote_path: str, local_path: str, user: str) -> str:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         try:
             await asyncio.to_thread(
                 self.s3_client.download_file,
-                self.bucket_name,
+                bucket_name,
                 key,
                 local_path,
                 Config=self.transfer_config,
@@ -106,15 +120,15 @@ class S3BigStorageBackend(StorageBackend):
         For raw bytes we fall back to put_object (synchronous) since the payload
         is expected to be relatively small. Large payloads should be handled via upload_file.
         """
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         try:
             await asyncio.to_thread(
                 self.s3_client.put_object,
-                Bucket=self.bucket_name,
+                Bucket=bucket_name,
                 Key=key,
                 Body=data,
             )
-            s3_uri = f"s3://{self.bucket_name}/{key}"
+            s3_uri = f"s3://{bucket_name}/{key}"
             logger.info(f"Uploaded data to {s3_uri}")
             return s3_uri
         except ClientError as e:
@@ -122,10 +136,10 @@ class S3BigStorageBackend(StorageBackend):
             raise
 
     async def download_data(self, remote_path: str, user: str) -> bytes:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         try:
             response = await asyncio.to_thread(
-                self.s3_client.get_object, Bucket=self.bucket_name, Key=key
+                self.s3_client.get_object, Bucket=bucket_name, Key=key
             )
             return response["Body"].read()
         except ClientError as e:
@@ -138,11 +152,11 @@ class S3BigStorageBackend(StorageBackend):
         user: str,
         chunk_size: int | None = None,
     ) -> AsyncIterator[bytes]:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         chunk_size = chunk_size or self.stream_chunk_size
         try:
             response = await asyncio.to_thread(
-                self.s3_client.get_object, Bucket=self.bucket_name, Key=key
+                self.s3_client.get_object, Bucket=bucket_name, Key=key
             )
             body = response["Body"]
             while True:
@@ -153,31 +167,42 @@ class S3BigStorageBackend(StorageBackend):
         except ClientError as e:
             logger.error(f"Error streaming data from S3: {e}")
             raise
-
+    
     async def list_files(self, prefix: str, user: str) -> List[str]:
-        key_prefix = f"{self.get_user_prefix(user)}{prefix}"
-        try:
-            paginator = self.s3_client.get_paginator("list_objects_v2")
-            page_iterator = paginator.paginate(
-                Bucket=self.bucket_name,
-                Prefix=key_prefix,
-            )
-            files: List[str] = []
-            async for page in _paginate_async(page_iterator):
-                contents = page.get("Contents", [])
-                for obj in contents:
-                    files.append(f"s3://{self.bucket_name}/{obj['Key']}")
-            return files
-        except ClientError as e:
-            logger.error(f"Error listing S3 objects: {e}")
-            raise
+        return ""
+
+    # async def list_files(self, prefix: str, user: str) -> List[str]:
+    #     # For list_files, prefix should be a full S3 URI or we need to handle it differently
+    #     # If prefix is a full URI, extract bucket; otherwise, we can't determine bucket
+    #     if prefix.startswith("s3://"):
+    #         bucket_name, key_prefix = self._get_bucket_and_key(prefix, user)
+    #     else:
+    #         # If prefix doesn't include bucket, we can't list without knowing the bucket
+    #         raise ValueError(
+    #             f"prefix must be a full S3 URI (s3://bucket/prefix) when bucket_name is not configured. Got: {prefix}"
+    #         )
+    #     try:
+    #         paginator = self.s3_client.get_paginator("list_objects_v2")
+    #         page_iterator = paginator.paginate(
+    #             Bucket=self.bucket_name,
+    #             Prefix=key_prefix,
+    #         )
+    #         files: List[str] = []
+    #         async for page in _paginate_async(page_iterator):
+    #             contents = page.get("Contents", [])
+    #             for obj in contents:
+    #                 files.append(f"s3://{self.bucket_name}/{obj['Key']}")
+    #         return files
+    #     except ClientError as e:
+    #         logger.error(f"Error  qw listing S3 objects: {e}")
+    #         raise
 
     async def delete_file(self, remote_path: str, user: str) -> bool:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         try:
             await asyncio.to_thread(
                 self.s3_client.delete_object,
-                Bucket=self.bucket_name,
+                Bucket=bucket_name,
                 Key=key,
             )
             logger.info(f"Deleted {key} from S3")
@@ -187,11 +212,11 @@ class S3BigStorageBackend(StorageBackend):
             return False
 
     async def file_exists(self, remote_path: str, user: str) -> bool:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         try:
             await asyncio.to_thread(
                 self.s3_client.head_object,
-                Bucket=self.bucket_name,
+                Bucket=bucket_name,
                 Key=key,
             )
             return True
@@ -205,8 +230,8 @@ class S3BigStorageBackend(StorageBackend):
     async def presigned_upload(
         self, remote_path: str, user: str, expires_seconds: int = 600
     ) -> dict:
-        key = self._get_key(remote_path, user)
-        params = {"Bucket": self.bucket_name, "Key": key}
+        bucket_name, key = self._get_bucket_and_key(remote_path)
+        params = {"Bucket": bucket_name, "Key": key}
         try:
             url = self.s3_client.generate_presigned_url(
                 "put_object",
@@ -219,7 +244,7 @@ class S3BigStorageBackend(StorageBackend):
                 "method": "put",
                 "headers": {"Content-Type": "application/octet-stream"},
                 "key": key,
-                "s3_uri": f"s3://{self.bucket_name}/{key}",
+                "s3_uri": f"s3://{bucket_name}/{key}",
             }
         except ClientError as e:
             logger.error(f"Error generating presigned upload URL: {e}")
@@ -233,8 +258,9 @@ class S3BigStorageBackend(StorageBackend):
         thread pool background executor and just returns the URL when
         it is available.
         """
-        key = self._get_key(remote_path, user)
-        params = {"Bucket": self.bucket_name, "Key": key}
+        bucket_name, key = self._get_bucket_and_key(remote_path)
+
+        params = {"Bucket": bucket_name, "Key": key}
         try:
             url = await asyncio.to_thread(
                 self.s3_client.generate_presigned_url,
@@ -254,15 +280,15 @@ class S3BigStorageBackend(StorageBackend):
 
     # ===================== Multipart Upload and Download Features =====================
     async def multipart_upload_start(self, remote_path: str, user: str) -> dict:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         response = await asyncio.to_thread(
-            self.s3_client.create_multipart_upload, Bucket=self.bucket_name, Key=key
+            self.s3_client.create_multipart_upload, Bucket=bucket_name, Key=key
         )
         return {
             "upload_id": response["UploadId"],
             "key": key,
-            "bucket": self.bucket_name,
-            "s3_uri": f"s3://{self.bucket_name}/{key}",
+            "bucket": bucket_name,
+            "s3_uri": f"s3://{bucket_name}/{key}",
         }
 
     async def multipart_sign_part(
@@ -273,9 +299,9 @@ class S3BigStorageBackend(StorageBackend):
         part_number: int,
         expires_seconds: int = 600,
     ) -> dict:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         params = {
-            "Bucket": self.bucket_name,
+            "Bucket": bucket_name,
             "Key": key,
             "UploadId": upload_id,
             "PartNumber": part_number,
@@ -298,28 +324,28 @@ class S3BigStorageBackend(StorageBackend):
     async def multipart_complete(
         self, remote_path: str, user: str, upload_id: str, parts: list[dict]
     ) -> dict:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         await asyncio.to_thread(
             self.s3_client.complete_multipart_upload,
-            Bucket=self.bucket_name,
+            Bucket=bucket_name,
             Key=key,
             UploadId=upload_id,
             MultipartUpload={"Parts": parts},
         )
         return {
-            "s3_uri": f"s3://{self.bucket_name}/{key}",
+            "s3_uri": f"s3://{bucket_name}/{key}",
             "key": key,
-            "bucket": self.bucket_name,
+            "bucket": bucket_name,
         }
 
     # TODO(Hetarth): have to test it if it still works or not
     async def multipart_abort(
         self, remote_path: str, user: str, upload_id: str
     ) -> bool:
-        key = self._get_key(remote_path, user)
+        bucket_name, key = self._get_bucket_and_key(remote_path)
         await asyncio.to_thread(
             self.s3_client.abort_multipart_upload,
-            Bucket=self.bucket_name,
+            Bucket=bucket_name,
             Key=key,
             UploadId=upload_id,
         )
