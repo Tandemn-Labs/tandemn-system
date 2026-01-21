@@ -30,7 +30,24 @@ class BatchedRequest(BaseModel):
     # ----- diffusers_specific_config: DiffusersSpecificConfig ----
     # ----- xDIT_specific_config: XDITSpecificConfig ----
 
+class OnlineServingRequest(BaseModel):
+    """Request to send online inference job to central server."""
+    user_id: str
+    description: str
+    task_type: str
+    task_priority: Optional[str] = None
+    model_name: str
+    engine: str
+    quantization_bits: Optional[Literal["4", "8", "16"]] = None
+    is_speculative_decode: Optional[bool] = None
+    is_PD_disaggregation: Optional[bool] = None
+    slo_mode: Optional[str] = "online" # the slo of online serving is always online
+    placement: str
 
+    # # online-specific config
+    # port: Optional[int] = 8000  # we will use the default port 8000 *(the cli user has no idea what to do?)
+    # host: Optional[str] = "0.0.0.0" # we will use the default host 0.0.0.0 
+    vllm_specific_config: Optional[vLLMSpecificConfig] = None
 
 ################## VLLM Specific Config #####################
 #### These parameters will be filled both from the LLM parameters and with
