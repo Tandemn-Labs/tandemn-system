@@ -8,8 +8,9 @@ from pydantic import BaseModel
 class BatchedRequest(BaseModel):
     """Request to send batched inference job to central server."""
     user_id: str
-    input_file: Optional[str] = None  # Path to file
-    output_file: Optional[str] = None
+    input_file: Optional[str] = None  # S3/local path to the file
+    output_file: Optional[str] = None  # local path to where the output will be saved
+    num_lines: Optional[int] = None  # number of prompt lines in the file
     # Get some parameters directly from the JobConfig
     description : str
     task_type : str
@@ -17,8 +18,8 @@ class BatchedRequest(BaseModel):
     model_name: Optional[str] = None
     engine: str 
     quantization_bits: Optional[Literal["4", "8", "16"]] = None
-    is_speculative_decode: Optional[bool] = None
-    is_PD_disaggregation: Optional[bool] = None
+    is_speculative_decode: Optional[bool] = None # none means not specified
+    is_PD_disaggregation: Optional[bool] = None # none means not specified
     slo_mode : str
     slo_deadline_hours: Optional[int] = None
     placement : str
