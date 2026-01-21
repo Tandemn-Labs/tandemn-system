@@ -1,3 +1,5 @@
 fastapi
 pydantic
 uvicorn
+skypilot
+boto3
