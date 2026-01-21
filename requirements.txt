@@ -1,5 +1,5 @@
 fastapi
 pydantic
 uvicorn
-skypilot
+skypilot[aws, kubernetes, vast]
 boto3
