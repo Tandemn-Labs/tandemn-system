@@ -1,0 +1,32 @@
+name: online-cluster
+
+num_nodes: 1
+
+resources:
+  infra: aws/us-east-1
+  use_spot: false  # Use on-demand for persistent serving
+  disk_size: 500GB
+  instance_type: p3.xlarge
+  ports: 8001  # Expose port
+
+setup: | 
+  export PYTHONHASHSEED=0
+  set -euxo pipefail
+  python3 -m pip install -U pip
+  python3 -m pip install -U uv
+
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+
+  # Install vLLM
+  uv pip install "vllm==0.10.0"
+
+run: |
+  set -euxo pipefail
+  source .venv/bin/activate
+
+  ~/sky_templates/ray/start_cluster
+
+  if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo "Starting vLLM server..."
+  fi
