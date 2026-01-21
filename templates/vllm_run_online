@@ -1,0 +1,40 @@
+set -euxo pipefail
+source .venv/bin/activate
+
+~/sky_templates/ray/start_cluster
+
+if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo "Starting vLLM server..."
+    setsid nohup vllm serve {model} \
+    --host {host} \
+    --port {port} \
+    -tp {tp} \
+    -pp {pp} \
+    {additional_params} > vllm.log 2>&1 &
+    
+    VLLM_PID=$!
+    disown $VLLM_PID
+
+    tail -f vllm.log &
+    TAIL_PID=$!
+
+    URL="http://localhost:8001/v1/models"
+    MAX_TRIES=600
+    INTERVAL=3
+
+    echo "LOADING MODEL... (This may take a few minutes)"
+    echo "Streaming vLLM logs:"
+    echo "---"
+    
+    for ((i=1; i<=$MAX_TRIES; i++)); do
+        if curl -sf "$URL" > /dev/null 2>&1; then
+            echo "---"
+            echo "✓ vLLM API server is up!"
+            kill $TAIL_PID 2>/dev/null || true
+            exit 0
+        fi
+        sleep "$INTERVAL"
+    done
+
+    kill $TAIL_PID 2>/dev/null || true
+fi
