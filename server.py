@@ -10,6 +10,10 @@ from storage.storage_server import storage_backend
 from utils.utils import split_uri, update_template, update_yaml_file
 from sky import core as sky_core
 
+import pandas as pd
+from dataclasses import dataclass, field
+from typing import Dict, Tuple
+from threading import Lock
 ##### Global variables
 YAML_OUTPUT = "temp/output.yaml"
 
@@ -22,6 +26,112 @@ app = FastAPI(
     title="Tandemn Server",
     description="API for receiving job requests",
 )
+
+
+@dataclass
+class VPCQuotaTracker:
+    quota_csv_file: str = "temp/aws_gpu_quota_by_region.csv"
+    quota_df: pd.DataFrame = field(init=False)
+    # Key: (region, market, family_type) → vcpu_in_use
+    used_vcpu: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
+    lock: Lock = field(default_factory=Lock)
+
+    def __post_init__(self):
+        self.reload_quota()
+    
+    def reload_quota(self):
+        """Reload the quota from CSV (called after Refresh)"""
+        print(f"Reloading Quota from {self.quota_csv_file}")
+        self.quota_df = pd.read_csv(self.quota_csv_file)
+        print(f"[QuotaTracker] Loaded {len(self.quota_df)} instance types")
+    
+    def get_baseline_quota(self, region:str, market:str, family_type:str):
+        """Get the AWS Quota limit for family type"""
+        col = f"{region}_{market}"
+        family_rows = self.quota_df[self.quota_df["Family_Type"] == family_type]
+        if col not in family_rows:
+            return 0
+        return family_rows[col].iloc[0]
+
+    def get_used_vcpu(self, region:str, market:str, family_type:str):
+        """Get the vCPU in use for the given region, market, and family type"""
+        # with self.lock:
+        print("region", region)
+        print("market", market)
+        print("family_type", family_type)
+        return self.used_vcpu.get((region, market, family_type), 0)
+    
+    def get_available(self,region:str, market:str, family_type:str):
+        """combine the baseline quota and the used vCPU to get the available vCPU"""
+        baseline_quota = self.get_baseline_quota(region, market, family_type)
+        used_vcpu = self.get_used_vcpu(region, market, family_type)
+        return baseline_quota - used_vcpu
+    
+    def reserve(self, region:str, market:str, family_type:str, vcpu:int):
+        """Reserve vCPU, returns True if successful, False otherwise"""
+        with self.lock:
+            available = self.get_available(region, market, family_type)
+
+            if vcpu > available:
+                print(f"[QuotaTracker] Not enough quota for {region}, {market}, {family_type}")
+                return False
+            self.used_vcpu[(region, market, family_type)] = self.used_vcpu.get((region, market, family_type), 0) + vcpu
+            print(f"[QuotaTracker] Reserved {vcpu} vCPU for {region}, {market}, {family_type}")
+            return True
+    
+    def release(self, region:str, market:str, family_type:str, vcpu:int):
+        """Release vCPU quota"""
+        with self.lock:
+            old = self.get_used_vcpu(region, market, family_type)
+            self.used_vcpu[(region, market, family_type)] = max(0, old - vcpu)
+            print(f"[QuotaTracker] Released {vcpu} vCPU for {region}, {market}, {family_type}")
+    
+    def get_family_for_instance(self, instance_type:str):
+        """Get the family for the given instance example - g6e.xlarge -> G Family"""
+        row = self.quota_df[self.quota_df["Instance_Type"] == instance_type]
+        return row["Family_Type"].iloc[0]
+    
+    def reserve_for_instance(self, region:str, market:str, instance_type:str, num_instances:int):
+        """Convenience: reserve by instance type (auto-looks up family + vCPU)."""
+        row = self.quota_df[self.quota_df["Instance_Type"] == instance_type]
+        if row.empty:
+            raise ValueError(f"Instance type {instance_type} not found in quota CSV")
+        family_type = row["Family_Type"].iloc[0]
+        vcpu = row["vCPU"].iloc[0]
+        return self.reserve(region, market, family_type, vcpu * num_instances)
+
+    def status_summary(self) -> pd.DataFrame:
+        """Get a human-readable summary of quota usage."""
+        rows = []
+        for (region, market, family), used in self.used_vcpu.items():
+            baseline = self.get_baseline_quota(region, market, family)
+            rows.append({
+                "Region": region,
+                "Market": market,
+                "Family": family,
+                "Baseline": baseline,
+                "Used": used,
+                "Available": baseline - used,
+                "Usage %": f"{(used/baseline*100):.1f}%" if baseline > 0 else "N/A"
+            })
+        return pd.DataFrame(rows)
+
+
+@app.on_event("startup")
+async def startup_event():
+    print("[QuotaTracker] Starting up")
+    tracker = VPCQuotaTracker()
+
+
+@app.get("/quota/status")
+async def quota_status():
+    """Get current quota usage summary."""
+    tracker = get_quota_tracker()
+    summary = tracker.status_summary()
+    return {
+        "status": "success",
+        "quota_usage": summary.to_dict(orient="records")
+    }
 
 
 @app.post("/submit/batch")
@@ -211,7 +321,52 @@ async def presign_download(user: str, remote_path: str, expires: int = 600):
     payload = await storage_backend.presigned_download(remote_path, user, expires)
     return {"status": "success", **payload}
 
-if __name__ == "__main__":
-    import uvicorn
+# if __name__ == "__main__":
+#     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=26336)
+#     uvicorn.run(app, host="0.0.0.0", port=26336)
+
+    # tracker = VPCQuotaTracker()
+
+    # # Reserve some quota
+    # tracker.reserve_for_instance("us-east-1", "spot", "g6e.xlarge", num_instances=10)
+    # tracker.reserve_for_instance("us-east-1", "spot", "g6e.12xlarge", num_instances=2)
+
+    # # Check status
+    # print(tracker.status_summary())
+
+    # # Release
+    # tracker.release("us-east-1", "spot", "G", 40)  # g6e.xlarge has 4 vCPU
+    # print(tracker.status_summary())
+
+if __name__ == "__main__":
+    print("="*60)
+    print("Testing VPCQuotaTracker")
+    print("="*60)
+    
+    tracker = VPCQuotaTracker()
+    
+    # Test 1: Reserve quota
+    print("\n[Test 1] Reserving quota...")
+    tracker.reserve_for_instance("us-east-1", "spot", "g6e.xlarge", num_instances=10)
+    tracker.reserve_for_instance("us-east-1", "spot", "g6e.12xlarge", num_instances=2)
+    
+    # Test 2: Check status
+    print("\n[Test 2] Current status:")
+    print(tracker.status_summary())
+    
+    # Test 3: Check available
+    print("\n[Test 3] Available quota for G family in us-east-1/spot:")
+    avail = tracker.get_available("us-east-1", "spot", "G")
+    baseline = tracker.get_baseline_quota("us-east-1", "spot", "G")
+    print(f"  Baseline: {baseline} vCPU")
+    print(f"  Available: {avail} vCPU")
+    
+    # Test 4: Release
+    print("\n[Test 4] Releasing 40 vCPU...")
+    tracker.release("us-east-1", "spot", "G", 40)
+    print(tracker.status_summary())
+    
+    print("\n" + "="*60)
+    print("✅ All tests complete!")
+    print("="*60)
