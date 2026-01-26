@@ -1,14 +1,15 @@
-name: mo-9d3422d4-1c12-4cdb-947b-60d3e0b0461e
+name: mo-582f7d80-a920-4542-a962-978d2d9f443e
 num_nodes: 1
 resources:
   infra: aws/us-east-1
   use_spot: true
   disk_size: 500GB
   instance_type: g6e.xlarge
+  ports: 8001
 file_mounts:
   /data:
     mode: MOUNT
-    source: s3://tandemn-user-data
+    source: s3://tandemn-orca
 setup: 'export PYTHONHASHSEED=0
 
   set -euxo pipefail
@@ -31,5 +32,6 @@ setup: 'export PYTHONHASHSEED=0
 
   '
 run: "set -euxo pipefail\nsource .venv/bin/activate\n\n~/sky_templates/ray/start_cluster\n\
-  \nif [ \"$SKYPILOT_NODE_RANK\" == \"0\" ]; then\n    vllm run-batch -i /data/test.jsonl\
-  \ -o /data/output.txt --model Qwen/Qwen3-0.6B \\\n    -tp 1 -pp 1 \\\n    \nfi"
+  \nif [ \"$SKYPILOT_NODE_RANK\" == \"0\" ]; then\n    vllm run-batch -i /data/orange/test.jsonl\
+  \ -o /data/output_out.txt --model Qwen/Qwen3-0.6B \\\n    -tp 1 -pp 1 --enable-metrics\
+  \ --url 0.0.0.0 --port 8001 \\\n    \nfi"

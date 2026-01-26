@@ -5,6 +5,6 @@ source .venv/bin/activate
 
 if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
     vllm run-batch -i {input_file} -o {output_file} --model {model} \
-    -tp {tp} -pp {pp} \
+    -tp {tp} -pp {pp} --enable-metrics --url 0.0.0.0 --port 8001 \
     {additional_params}
 fi
