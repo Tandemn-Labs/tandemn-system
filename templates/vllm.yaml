@@ -7,6 +7,7 @@ resources:
   use_spot: true
   disk_size: 500GB
   instance_type: p3.gxlarge
+  ports: 8001  # Expose port for observability
 
 file_mounts:
   /data:
@@ -28,6 +29,8 @@ setup: |
 
 run: |
   set -euxo pipefail
+
+  
   source .venv/bin/activate
 
   ~/sky_templates/ray/start_cluster

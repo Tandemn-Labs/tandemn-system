@@ -41,15 +41,15 @@ class JobState:
     submitted_at: float
     progress_frac: float = 0.0
     gpu_base: Optional[str] = None    # added
-    tp: int = 0
-    pp: int = 0
-    replicas: int = 0
-    allocated_gpus: int = 0  #added
-    vcpu_needed: int = 0   # #added
+    tp: Optional[int] = None
+    pp: Optional[int] = None
+    replicas: Optional[int] = None
+    allocated_gpus: Optional[int] = None  #added
+    vcpu_needed: Optional[int] = None   # #added
     instance_types: Optional[str] = None  #added
-    num_instances: int = 0            #added
-    instance_ids: List[str] = field(default_factory=list)  #added
-    allocations: List[Tuple[str, int]] = field(default_factory=list)  #added
+    num_instances: Optional[int] = None            #added
+    instance_ids: Optional[List[str]] = None  #added
+    allocations: Optional[List[Tuple[str, int]]] = None  #added
 
     @property
     def deadline_ts(self) -> float:
@@ -143,15 +143,6 @@ def load_quota_csv(quota_csv):
     print("Detected the GPU Types in your Quota: ", df["gpu_base"].unique())
     print("Detected the GPU Count: ", df["gpu_count"].unique())
     return df
-
-perf_files = load_all_perfdb_files(perfdb_dir)
-# print(perf_files)
-closest_perf_file = select_perf_files_closest_to_model_size(perf_files, 60.0, 1)
-quota_df = load_quota_csv(quota_csv)
-# print("GPU types with perf:", sorted(set(x["gpu_base"] for x in perf_files)))
-# print("Model sizes (B):", [x["model_size_b"] for x in perf_files])
-# print("The closest perf file to 60B is:", closest_perf_file)
-# print("Quota csv:", quota_df)
 
 
 ##### Enumerate Candidates ###########
@@ -478,12 +469,82 @@ def llm_choose_config_from_candidates(
 
     return None
 
+def choose_and_apply_llm_plan(job_state, plans, plan_labels, cpmi_model, cpmi_tokenizer):
+        """
+        Given a job_state, list of plans [(label, cfg)], and plan_labels,
+        builds context, queries C-PMI, chooses best config, and updates job_state in place.
+        Returns (best_label, probs, chosen_cfg).
+        """
+        context_lines = []
+        context_lines.append("We are choosing a GPU parallelism configuration for an LLM job.\n")
+        context_lines.append("Goals:\n")
+        context_lines.append("1. Meet the SLO (deadline).\n")
+        context_lines.append("2. Minimize total GPU-hours.\n")
+        context_lines.append("3. Prefer simpler configs when close.\n")
+        context_lines.append("4. In VPC, also prefer lower vCPU usage when close.\n\n")
 
+        context_lines.append("Job:\n")
+        context_lines.append(f"- Model: {job_state.spec.model_name}\n")
+        context_lines.append(f"- Lines: {job_state.spec.num_lines}\n")
+        context_lines.append(f"- Avg input tokens: {job_state.spec.avg_input_tokens}\n")
+        context_lines.append(f"- Avg output tokens: {job_state.spec.avg_output_tokens}\n")
+        context_lines.append(f"- SLO: {job_state.spec.slo_hours} hours\n")
+        context_lines.append(f"- Total tokens: {job_state.total_tokens}\n\n")
+
+        context_lines.append("Advisor proposals:\n")
+        for name, cfg in plans:
+            context_lines.append(
+                f"{name} proposes:\n"
+                f"  - gpu_base: {cfg.get('gpu_base')}\n"
+                f"  - tp: {cfg['tp']}\n"
+                f"  - pp: {cfg['pp']}\n"
+                f"  - replicas: {cfg['replicas']}\n"
+                f"  - total GPUs: {cfg['gpus_needed']}\n"
+                f"  - instance_type: {cfg.get('instance_type')}\n"
+                f"  - vcpu_needed: {cfg.get('vcpu_needed')}\n"
+                f"  - predicted runtime: {cfg['runtime_hours']:.2f} hours\n"
+                f"  - GPU-hours: {cfg['gpu_time']:.2f}\n\n"
+            )
+
+        context_str = "".join(context_lines)
+        print(context_str)
+
+        best_label, probs = c_pmi_rank_plans(
+            context=context_str,
+            plan_labels=plan_labels,
+            tokenizer=c_pmi_tokenizer,
+            model=c_pmi_model,
+        )
+
+        print("[C-PMI] probs:", probs)
+        print("[C-PMI] winner:", best_label)
+
+        # Choose config by label
+        chosen_cfg = next(cfg for name, cfg in plans if name == best_label)
+
+        # Update JobState (minimal fields for testing)
+        job_state.gpu_base = chosen_cfg.get("gpu_base")
+        job_state.tp = chosen_cfg["tp"]
+        job_state.pp = chosen_cfg["pp"]
+        job_state.replicas = chosen_cfg["replicas"]
+        job_state.allocated_gpus = chosen_cfg["gpus_needed"]
+        job_state.vcpu_needed = chosen_cfg.get("vcpu_needed", 0)
+        job_state.instance_type = chosen_cfg.get("instance_type")
+        job_state.num_instances = chosen_cfg.get("num_instances", 0)
+
+        print("[FINAL] chosen:", chosen_cfg)
+        print("[FINAL] job_state:", job_state)
+
+        return best_label, probs, chosen_cfg
     
 
 # # ============== QUICK TEST ==============
 
 if __name__ == "__main__":
+    perf_files = load_all_perfdb_files(perfdb_dir)
+    closest_perf_file = select_perf_files_closest_to_model_size(perf_files, 60.0, 1)
+    quota_df = load_quota_csv(quota_csv)
+
     print("\n" + "="*60)
     print("TESTING get_vcpu_count_from_gpu()")
     print("="*60)
@@ -563,67 +624,7 @@ if __name__ == "__main__":
                     f"r={devstral_cfg['replicas']}")    
         plans = [("Math", math_cfg), ("XiaomiMimo", mimo_cfg), ("Devstral", devstral_cfg)]
         plan_labels = [name for name, _ in plans]
-        
-        context_lines = []
-        context_lines.append("We are choosing a GPU parallelism configuration for an LLM job.\n")
-        context_lines.append("Goals:\n")
-        context_lines.append("1. Meet the SLO (deadline).\n")
-        context_lines.append("2. Minimize total GPU-hours.\n")
-        context_lines.append("3. Prefer simpler configs when close.\n")
-        context_lines.append("4. In VPC, also prefer lower vCPU usage when close.\n\n")
-
-        context_lines.append("Job:\n")
-        context_lines.append(f"- Model: {job_state.spec.model_name}\n")
-        context_lines.append(f"- Lines: {job_state.spec.num_lines}\n")
-        context_lines.append(f"- Avg input tokens: {job_state.spec.avg_input_tokens}\n")
-        context_lines.append(f"- Avg output tokens: {job_state.spec.avg_output_tokens}\n")
-        context_lines.append(f"- SLO: {job_state.spec.slo_hours} hours\n")
-        context_lines.append(f"- Total tokens: {job_state.total_tokens}\n\n")
-
-        context_lines.append("Advisor proposals:\n")
-        for name, cfg in plans:
-            context_lines.append(
-                f"{name} proposes:\n"
-                f"  - gpu_base: {cfg.get('gpu_base')}\n"
-                f"  - tp: {cfg['tp']}\n"
-                f"  - pp: {cfg['pp']}\n"
-                f"  - replicas: {cfg['replicas']}\n"
-                f"  - total GPUs: {cfg['gpus_needed']}\n"
-                f"  - instance_type: {cfg.get('instance_type')}\n"
-                f"  - vcpu_needed: {cfg.get('vcpu_needed')}\n"
-                f"  - predicted runtime: {cfg['runtime_hours']:.2f} hours\n"
-                f"  - GPU-hours: {cfg['gpu_time']:.2f}\n\n"
-            )
-
-        context_str = "".join(context_lines)
-        print(context_str)
-
         c_pmi_model, c_pmi_tokenizer = load_c_pmi_model()
-
-        best_label, probs = c_pmi_rank_plans(
-            context=context_str,
-            plan_labels=plan_labels,
-            tokenizer=c_pmi_tokenizer,
-            model=c_pmi_model,
-        )
-
-        print("[C-PMI] probs:", probs)
-        print("[C-PMI] winner:", best_label)
-
-        # Choose config by label
-        chosen_cfg = next(cfg for name, cfg in plans if name == best_label)
-
-        # Update JobState (minimal fields for testing)
-        job_state.gpu_base = chosen_cfg.get("gpu_base")
-        job_state.tp = chosen_cfg["tp"]
-        job_state.pp = chosen_cfg["pp"]
-        job_state.replicas = chosen_cfg["replicas"]
-        job_state.allocated_gpus = chosen_cfg["gpus_needed"]
-        job_state.vcpu_needed = chosen_cfg.get("vcpu_needed", 0)
-        job_state.instance_type = chosen_cfg.get("instance_type")
-        job_state.num_instances = chosen_cfg.get("num_instances", 0)
-
-        print("[FINAL] chosen:", chosen_cfg)
-        print("[FINAL] job_state:", job_state)
-    else:
+        # Use the new function
+        best_label, probs, chosen_cfg = choose_and_apply_llm_plan(job_state, plans, plan_labels, c_pmi_model, c_pmi_tokenizer)
         print("No perf files found!")
