@@ -1,1 +1,8 @@
 __pycache__/
+.venv/
+
+temp/
+files/
+.env
+
+*.code-workspace
