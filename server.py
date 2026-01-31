@@ -1,143 +1,43 @@
 import uuid
-
 import requests
 import sky
 from fastapi import FastAPI, Form
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from storage.storage_server import storage_backend
+from tracking.tracking import JobRecord, VPCQuotaTracker
 from utils.utils import split_uri, update_template, update_yaml_file
-from sky import core as sky_core
-import pandas as pd
-from dataclasses import dataclass, field
 from typing import Dict, Tuple, Union, Optional, Literal
 from threading import Lock
 from orca import JobSpec, load_all_perfdb_files, load_quota_csv, JobState
-from orca import get_num_params_from_text, enumerate_gpus_and_candidates, llm_choose_config_from_candidates
+from orca import (
+    get_num_params_from_text,
+    enumerate_gpus_and_candidates,
+    llm_choose_config_from_candidates,
+)
 from orca import choose_and_apply_llm_plan, load_c_pmi_model
-import threading 
+import threading
 import time
-import requests
 import re
+from dotenv import load_dotenv
+import os
 
-##### Global variables
-YAML_OUTPUT = "temp/output.yaml"
-
-# To run the server:
-# uvicorn server:app --reload
-# or
-# python server.py
-
+load_dotenv()
 app = FastAPI(
     title="Tandemn Server",
     description="API for receiving job requests",
 )
 
-
-################################# In Memory Quota Tracker #################################
-# this will be a wrapper around the database soon, rn it is in memory only
-@dataclass
-class VPCQuotaTracker:
-    quota_csv_file: str = "temp/aws_gpu_quota_by_region.csv"
-    quota_df: pd.DataFrame = field(init=False)
-    # Key: (region, market, family_type) → vcpu_in_use
-    used_vcpu: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
-    lock: Lock = field(default_factory=Lock)
-
-    def __post_init__(self):
-        self.reload_quota()
-    
-    def reload_quota(self):
-        """Reload the quota from CSV (called after Refresh)"""
-        print(f"Reloading Quota from {self.quota_csv_file}")
-        self.quota_df = pd.read_csv(self.quota_csv_file)
-        print(f"[QuotaTracker] Loaded {len(self.quota_df)} instance types")
-    
-    def get_baseline_quota(self, region:str, market:str, family_type:str):
-        """Get the AWS Quota limit for family type"""
-        col = f"{region}_{market}"
-        family_rows = self.quota_df[self.quota_df["Family_Type"] == family_type]
-        if col not in family_rows:
-            return 0
-        return family_rows[col].iloc[0]
-
-    def get_used_vcpu(self, region:str, market:str, family_type:str):
-        """Get the vCPU in use for the given region, market, and family type"""
-        return self.used_vcpu.get((region, market, family_type), 0)
-    
-    def get_available(self,region:str, market:str, family_type:str):
-        """combine the baseline quota and the used vCPU to get the available vCPU"""
-        baseline_quota = self.get_baseline_quota(region, market, family_type)
-        used_vcpu = self.get_used_vcpu(region, market, family_type)
-        return baseline_quota - used_vcpu
-    
-    def reserve(self, region:str, market:str, family_type:str, vcpu:int):
-        """Reserve vCPU, returns True if successful, False otherwise"""
-        with self.lock:
-            available = self.get_available(region, market, family_type)
-
-            if vcpu > available:
-                print(f"[QuotaTracker] Not enough quota for {region}, {market}, {family_type}")
-                return False
-            self.used_vcpu[(region, market, family_type)] = self.used_vcpu.get((region, market, family_type), 0) + vcpu
-            print(f"[QuotaTracker] Reserved {vcpu} vCPU for {region}, {market}, {family_type}")
-            return True
-    
-    def release(self, region:str, market:str, family_type:str, vcpu:int):
-        """Release vCPU quota"""
-        with self.lock:
-            old = self.get_used_vcpu(region, market, family_type)
-            self.used_vcpu[(region, market, family_type)] = max(0, old - vcpu)
-            print(f"[QuotaTracker] Released {vcpu} vCPU for {region}, {market}, {family_type}")
-    
-    def get_family_for_instance(self, instance_type:str):
-        """Get the family for the given instance example - g6e.xlarge -> G Family"""
-        row = self.quota_df[self.quota_df["Instance_Type"] == instance_type]
-        return row["Family_Type"].iloc[0]
-    
-    def reserve_for_instance(self, region:str, market:str, instance_type:str, num_instances:int):
-        """Convenience: reserve by instance type (auto-looks up family + vCPU)."""
-        row = self.quota_df[self.quota_df["Instance_Type"] == instance_type]
-        if row.empty:
-            raise ValueError(f"Instance type {instance_type} not found in quota CSV")
-        family_type = row["Family_Type"].iloc[0]
-        vcpu = row["vCPU"].iloc[0]
-        return self.reserve(region, market, family_type, vcpu * num_instances)
-
-    def status_summary(self) -> pd.DataFrame:
-        """Get a human-readable summary of quota usage."""
-        rows = []
-        for (region, market, family), used in self.used_vcpu.items():
-            baseline = self.get_baseline_quota(region, market, family)
-            rows.append({
-                "Region": region,
-                "Market": market,
-                "Family": family,
-                "Baseline": baseline,
-                "Used": used,
-                "Available": baseline - used,
-                "Usage %": f"{(used/baseline*100):.1f}%" if baseline > 0 else "N/A"
-            })
-        return pd.DataFrame(rows)
-###################################################################################################
-
-################################ Job Tracker ######################################################
-
-@dataclass
-class JobRecord:
-    state: JobState
-    status: Literal["queued", "launching","running", "succeeded", "failed", "cancelled"] = "queued"
-    endpoint_url: Optional[str] = None
-    created_at: float = field(default_factory=time.time)
-    last_updated_at: float = field(default_factory=time.time)
-    head_ip: Optional[str] = None
+##### Global variables
+YAML_OUTPUT = "temp/output.yaml"
+OPENROUTER_API_KEY = os.environ("TD_OPENROUTER_KEY")
 
 
 class JobTracker:
     def __init__(self):
         self.jobs: Dict[str, JobRecord] = {}
-        self.lock =  Lock()
-    
+        self.lock = Lock()
+
     def build_job_state_batched(self, req: BatchedRequest, config: MagicOutput):
         # job_id = f"job-{int(time.time())}" # deprecate this
         return JobState(
@@ -145,13 +45,17 @@ class JobTracker:
                 job_id=config.decision_id,
                 model_name=req.model_name,
                 num_lines=req.num_lines or 1,
-                avg_input_tokens=req.avg_input_tokens if req.avg_input_tokens is not None else 4096,
-                avg_output_tokens=req.avg_output_tokens if req.avg_output_tokens is not None else 2048,
+                avg_input_tokens=req.avg_input_tokens
+                if req.avg_input_tokens is not None
+                else 4096,
+                avg_output_tokens=req.avg_output_tokens
+                if req.avg_output_tokens is not None
+                else 2048,
                 slo_hours=req.slo_deadline_hours or 12,
                 region="us-east-1",
                 market="spot",
             ),
-            submitted_at=time.time()
+            submitted_at=time.time(),
             # add other fields when they will be decided by the Orca
         )
 
@@ -164,7 +68,7 @@ class JobTracker:
     def get(self, job_id: str) -> Optional[JobRecord]:
         with self.lock:
             return self.jobs.get(job_id)
-    
+
     def update_progress(self, job_id: str, progress_frac: float):
         with self.lock:
             job_record = self.jobs.get(job_id)
@@ -172,8 +76,14 @@ class JobTracker:
                 job_record.state.progress_frac = progress_frac
                 job_record.last_updated_at = time.time()
             return job_record
-    
-    def update_status(self, job_id: str, status: Literal["queued", "launching","running", "succeeded", "failed", "cancelled"]):
+
+    def update_status(
+        self,
+        job_id: str,
+        status: Literal[
+            "queued", "launching", "running", "succeeded", "failed", "cancelled"
+        ],
+    ):
         with self.lock:
             job_record = self.jobs.get(job_id)
             if job_record:
@@ -188,7 +98,7 @@ class JobTracker:
                 rec.head_ip = head_ip
                 rec.last_updated_at = time.time()
             return rec
-    
+
     def set_endpoint_url(self, job_id: str, endpoint_url: str):
         with self.lock:
             rec = self.jobs.get(job_id)
@@ -198,22 +108,22 @@ class JobTracker:
             return rec
 
 
-
-###################################################################################################
-
-################################# Orca ############################################################
-
 class OrcaOrchestrator:
-    def __init__(self, quota_tracker: VPCQuotaTracker, job_tracker: JobTracker, perfdb_dir="./perf_db", quota_csv="./temp/aws_gpu_quota_by_region.csv"):
+    def __init__(
+        self,
+        quota_tracker: VPCQuotaTracker,
+        job_tracker: JobTracker,
+        perfdb_dir="./perf_db",
+        quota_csv="./temp/aws_gpu_quota_by_region.csv",
+    ):
         self.quota_tracker = quota_tracker
         self.job_tracker = job_tracker
         self.perf_files = load_all_perfdb_files(perfdb_dir)
         self.quota_df = load_quota_csv(quota_csv)
         self.c_pmi_model, self.c_pmi_tokenizer = load_c_pmi_model()
 
-    
     def decide_on_allocation(self, job_state: JobState) -> Tuple[str, int]:
-        model_size_b  = get_num_params_from_text(job_state.spec.model_name)
+        model_size_b = get_num_params_from_text(job_state.spec.model_name)
         candidates = enumerate_gpus_and_candidates(
             user_model_size_b=model_size_b,
             num_lines=job_state.spec.num_lines,
@@ -225,8 +135,13 @@ class OrcaOrchestrator:
         )
         # math solver
         # candidates_sorted = sorted(candidates, key=lambda c: (c["replicas"], c["vcpu_needed"], c["runtime_hours"]))
-        math_cfg = min(candidates, key=lambda c: (c["replicas"], c["vcpu_needed"], c["runtime_hours"]))
-        print(f"[Math] tp={math_cfg['tp']} pp={math_cfg['pp']} r={math_cfg['replicas']} gpu-h={math_cfg['gpu_time']:.2f}")
+        math_cfg = min(
+            candidates,
+            key=lambda c: (c["replicas"], c["vcpu_needed"], c["runtime_hours"]),
+        )
+        print(
+            f"[Math] tp={math_cfg['tp']} pp={math_cfg['pp']} r={math_cfg['replicas']} gpu-h={math_cfg['gpu_time']:.2f}"
+        )
         # llm solver
         mimo_cfg = llm_choose_config_from_candidates(
             job=job_state,
@@ -234,23 +149,34 @@ class OrcaOrchestrator:
             model_id="xiaomi/mimo-v2-flash:free",
             openrouter_api_key=OPENROUTER_API_KEY,
             advisor_name="XiaomiMimoAdvisor",
-            top_k=20)
+            top_k=20,
+        )
         if mimo_cfg:
-            print(f"[XiaomiMimo Advisor] Picks: tp={mimo_cfg['tp']} pp={mimo_cfg['pp']} r={mimo_cfg['replicas']}")
+            print(
+                f"[XiaomiMimo Advisor] Picks: tp={mimo_cfg['tp']} pp={mimo_cfg['pp']} r={mimo_cfg['replicas']}"
+            )
         devstral_cfg = llm_choose_config_from_candidates(
             job=job_state,
             candidates=candidates,
             model_id="mistralai/devstral-2512:free",
             openrouter_api_key=OPENROUTER_API_KEY,
             advisor_name="DevstralAdvisor",
-            top_k=20)
+            top_k=20,
+        )
         if devstral_cfg:
-            print(f"[Devstral Advisor] Picks: tp={devstral_cfg['tp']} pp={devstral_cfg['pp']} r={devstral_cfg['replicas']}")
-        plans = [("Math", math_cfg), ("XiaomiMimo", mimo_cfg), ("Devstral", devstral_cfg)]
+            print(
+                f"[Devstral Advisor] Picks: tp={devstral_cfg['tp']} pp={devstral_cfg['pp']} r={devstral_cfg['replicas']}"
+            )
+        plans = [
+            ("Math", math_cfg),
+            ("XiaomiMimo", mimo_cfg),
+            ("Devstral", devstral_cfg),
+        ]
         plan_labels = [name for name, _ in plans]
-        best_label, probs, chosen_cfg = choose_and_apply_llm_plan(job_state, plans, plan_labels, self.c_pmi_model, self.c_pmi_tokenizer)
+        best_label, probs, chosen_cfg = choose_and_apply_llm_plan(
+            job_state, plans, plan_labels, self.c_pmi_model, self.c_pmi_tokenizer
+        )
         return chosen_cfg
-    
 
 
 ###################################################################################################
@@ -258,10 +184,11 @@ class OrcaOrchestrator:
 ##################################### vLLM Metrics Parser #########################################
 # This will be replaced with a proper mechanism (prometheus), but for now, this is it.
 _METRIC_LINE_RE = re.compile(
-    r'^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)'          # metric name
-    r'(?:\{(?P<labels>[^}]*)\})?'                   # optional {k="v",...}
-    r'\s+(?P<value>[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*$'
+    r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)"  # metric name
+    r"(?:\{(?P<labels>[^}]*)\})?"  # optional {k="v",...}
+    r"\s+(?P<value>[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*$"
 )
+
 
 def _parse_labels(labels_blob: str) -> dict[str, str]:
     # Very small parser; works for the usual key="value" labels vLLM emits.
@@ -273,7 +200,10 @@ def _parse_labels(labels_blob: str) -> dict[str, str]:
         out[k.strip()] = v.strip().strip('"')
     return out
 
-def _sum_metric(text: str, metric_name: str, *, where: dict[str, str] | None = None) -> float:
+
+def _sum_metric(
+    text: str, metric_name: str, *, where: dict[str, str] | None = None
+) -> float:
     total = 0.0
     for line in text.splitlines():
         if not line or line[0] == "#":
@@ -289,7 +219,10 @@ def _sum_metric(text: str, metric_name: str, *, where: dict[str, str] | None = N
         total += float(m.group("value"))
     return total
 
-def get_vllm_progress(endpoint_url: str, *, model_name: str | None = None) -> tuple[int, int]:
+
+def get_vllm_progress(
+    endpoint_url: str, *, model_name: str | None = None
+) -> tuple[int, int]:
     r = requests.get(endpoint_url + "/metrics", timeout=5)
     r.raise_for_status()
     text = r.text
@@ -306,7 +239,14 @@ def get_vllm_progress(endpoint_url: str, *, model_name: str | None = None) -> tu
     queued = running + waiting
     return int(done), int(queued)
 
-def poll_job_progress(job_id: str, endpoint_url: str, total_prompts: int, tracker: JobTracker, interval_sec=1):
+
+def poll_job_progress(
+    job_id: str,
+    endpoint_url: str,
+    total_prompts: int,
+    tracker: JobTracker,
+    interval_sec=1,
+):
     tracker.update_status(job_id, "installing")
     while True:
         try:
@@ -322,6 +262,7 @@ def poll_job_progress(job_id: str, endpoint_url: str, total_prompts: int, tracke
             pass
         time.sleep(interval_sec)
 
+
 def jobtracker_snapshot(tracker: JobTracker) -> dict:
     with tracker.lock:
         snap = {}
@@ -336,6 +277,7 @@ def jobtracker_snapshot(tracker: JobTracker) -> dict:
             }
         return snap
 
+
 def log_jobtracker_loop(tracker: JobTracker, interval_sec: int = 0.5):
     prev = None
     while True:
@@ -344,12 +286,15 @@ def log_jobtracker_loop(tracker: JobTracker, interval_sec: int = 0.5):
         for job_id, d in snap.items():
             print(
                 f"  - {job_id} status={d['status']} "
-                f"progress={d['progress']*100:.1f}% "
+                f"progress={d['progress'] * 100:.1f}% "
                 f"lines={d['num_lines']} head_ip={d['head_ip']} "
                 f"endpoint={d['endpoint_url']}"
             )
         time.sleep(interval_sec)
+
+
 ###################################################################################################
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -358,12 +303,19 @@ async def startup_event():
     # when the server is being run on multiple threads and multiple ppl are calling it
     app.state.quota_tracker = VPCQuotaTracker()
     app.state.job_tracker = JobTracker()
-    app.state.orca_orchestrator = OrcaOrchestrator(app.state.quota_tracker, app.state.job_tracker)
+    app.state.orca_orchestrator = OrcaOrchestrator(
+        app.state.quota_tracker, app.state.job_tracker
+    )
+
 
 def get_quota_tracker():
     return app.state.quota_tracker
+
+
 def get_job_tracker():
     return app.state.job_tracker
+
+
 def get_orca_orchestrator():
     return app.state.orca_orchestrator
 
@@ -373,10 +325,7 @@ async def quota_status():
     """Get current quota usage summary."""
     tracker = get_quota_tracker()
     summary = tracker.status_summary()
-    return {
-        "status": "success",
-        "quota_usage": summary.to_dict(orient="records")
-    }
+    return {"status": "success", "quota_usage": summary.to_dict(orient="records")}
 
 
 @app.post("/submit/batch")
@@ -395,11 +344,12 @@ async def submit_batch(request: BatchedRequest):
     job_state = jt.build_job_state_batched(request, launch_config)
     jt.add(job_state)
     jt.update_status(launch_config.decision_id, "queued")
-    
+
     # launch the job
     match launch_config.engine:
         case "vllm":
             await sp_launch_vllm_batch(request, launch_config)
+
 
 @app.post("/submit/online")
 async def submit_online(request: OnlineServingRequest):
@@ -419,24 +369,22 @@ async def submit_online(request: OnlineServingRequest):
                 "job_id": launch_config.decision_id,
                 "endpoint": endpoint_url,
                 "model": request.model_name,
-                "message": f"vLLM server launched at {endpoint_url}"
+                "message": f"vLLM server launched at {endpoint_url}",
             }
 
 
 async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput):
-
     replace_run_dict = replace_run_vllm(request, config)
     run_string = update_template("templates/vllm_run", replace_run_dict)
 
     dirname, _ = split_uri(request.input_file)
-
 
     replace_yaml = {
         "name": config.decision_id,
         "num_nodes": config.num_nodes,
         "resources.instance_type": config.instances,
         "run": run_string,
-        "file_mounts./data.source": dirname
+        "file_mounts./data.source": dirname,
     }
     update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
 
@@ -459,7 +407,6 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput):
         daemon=False,
     ).start()
 
-    
     # sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
     threading.Thread(
         target=sky.tail_logs,
@@ -467,11 +414,12 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput):
         daemon=False,
     ).start()
 
+
 async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutput):
     """Launch persistant vllm online deployment"""
     replace_run_dict = replace_run_vllm_online(request, config)
     run_string = update_template("templates/vllm_run_online", replace_run_dict)
-    
+
     replace_yaml = {
         "name": config.decision_id,
         "num_nodes": config.num_nodes,
@@ -481,15 +429,17 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
     }
     update_yaml_file("templates/vllm_online.yaml", replace_yaml, YAML_OUTPUT)
     task = sky.Task.from_yaml(YAML_OUTPUT)
-    result_id = sky.launch(task,cluster_name=config.decision_id, down=False) # do not LET IT DIE!
-    
+    result_id = sky.launch(
+        task, cluster_name=config.decision_id, down=False
+    )  # do not LET IT DIE!
+
     # return the public IP of the deployment
-    # cluster_info = sky.status(cluster_names=[config.decision_id]) 
+    # cluster_info = sky.status(cluster_names=[config.decision_id])
     # cluster_info = sky_core.status(cluster_names=[config.decision_id])
     job_id, handle = sky.stream_and_get(result_id, follow=True)
     sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
 
-    public_ip = handle.head_ip 
+    public_ip = handle.head_ip
 
     endpoint_url = f"http://{public_ip}:8001"
 
@@ -497,11 +447,14 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
 
     url = f"http://{public_ip}:8001/v1/models"
     response = requests.get(url, timeout=5)
-    if response.status_code == 200: #do sth here for a valid API up and sth else otherwise
+    if (
+        response.status_code == 200
+    ):  # do sth here for a valid API up and sth else otherwise
         print(f"vLLM server API is up at {endpoint_url}")
         return endpoint_url
     else:
         raise Exception(f"vLLM server API is not up at {endpoint_url}")
+
 
 def replace_run_vllm_online(request: OnlineServingRequest, config: MagicOutput):
     replace = {}
@@ -509,8 +462,8 @@ def replace_run_vllm_online(request: OnlineServingRequest, config: MagicOutput):
     replace["tp"] = config.tp_size
     replace["pp"] = config.pp_size
     replace["host"] = "0.0.0.0"  # Bind to all interfaces (allows external access)
-    replace["port"] = "8001"     # hardcode the port to 8002
-    
+    replace["port"] = "8001"  # hardcode the port to 8002
+
     if (
         request.vllm_specific_config is not None
         and request.vllm_specific_config.speculative_config is not None
@@ -524,14 +477,15 @@ def replace_run_vllm_online(request: OnlineServingRequest, config: MagicOutput):
         for key, value in spec_config.items():
             string = prefix + key + " " + str(value)
             spec_string += string + " "
-        
+
         spec_string = spec_string.rstrip(" ")
         replace["additional_params"] = spec_string
-    
+
     else:
         replace["additional_params"] = ""
-    
+
     return replace
+
 
 def replace_run_vllm(request: BatchedRequest, config: MagicOutput):
     replace = {}
@@ -558,13 +512,13 @@ def replace_run_vllm(request: BatchedRequest, config: MagicOutput):
         for key, value in spec_config.items():
             string = prefix + key + " " + str(value)
             spec_string += string + " "
-        
+
         spec_string = spec_string.rstrip(" ")
         replace["additional_params"] = spec_string
-    
+
     else:
         replace["additional_params"] = ""
-    
+
     return replace
 
 
@@ -578,6 +532,7 @@ def real_magic(request: Union[BatchedRequest, OnlineServingRequest]) -> MagicOut
         tp_size=1,
         pp_size=1,
     )
+
 
 ##### Storage stuff #####
 @app.post("/storage/presigned_upload")
@@ -593,6 +548,7 @@ async def presign_download(user: str, remote_path: str, expires: int = 600):
     payload = await storage_backend.presigned_download(remote_path, user, expires)
     return {"status": "success", **payload}
 
+
 # if __name__ == "__main__":
 #     import uvicorn
 
@@ -601,6 +557,7 @@ async def presign_download(user: str, remote_path: str, expires: int = 600):
 
 if __name__ == "__main__":
     import asyncio
+
     asyncio.run(startup_event())
 
     # Fake request

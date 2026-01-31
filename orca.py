@@ -1,67 +1,23 @@
-import os
 import re
-import glob
 import math
 import pandas as pd
 from pathlib import Path
 import torch
 from typing import Dict, Any, Optional, List, Tuple
-from dataclasses import dataclass, field
-from huggingface_hub import InferenceClient       
-from transformers import AutoTokenizer, AutoModelWithLMHead, AutoModelForCausalLM
+from dataclasses import dataclass     
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import time
 from openai import OpenAI
-import pprint
 from termcolor import colored
 from tabulate import tabulate
+
+from tracking.tracking import JobSpec, JobState
 perfdb_dir = "./perf_db"
 quota_csv = "./temp/aws_gpu_quota_by_region.csv"
 
 pd.set_option('display.max_columns', None)  # Show all columns
 pd.set_option('display.width', None)        # Don't wrap columns to the next line
 
-OPENROUTER_API_KEY = "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"
-
-
-@dataclass
-class JobSpec:
-    job_id: str
-    model_name: str
-    num_lines: int
-    avg_input_tokens: int
-    avg_output_tokens: int
-    slo_hours: float
-    job_type: str = "batch"
-    region: str = "us-east-1"  
-    market: str = "spot" 
-
-@dataclass
-class JobState:
-    spec: JobSpec
-    submitted_at: float
-    progress_frac: float = 0.0
-    gpu_base: Optional[str] = None    # added
-    tp: Optional[int] = None
-    pp: Optional[int] = None
-    replicas: Optional[int] = None
-    allocated_gpus: Optional[int] = None  #added
-    vcpu_needed: Optional[int] = None   # #added
-    instance_types: Optional[str] = None  #added
-    num_instances: Optional[int] = None            #added
-    instance_ids: Optional[List[str]] = None  #added
-    allocations: Optional[List[Tuple[str, int]]] = None  #added
-
-    @property
-    def deadline_ts(self) -> float:
-        return self.submitted_at + self.spec.slo_hours * 3600.0
-
-    @property
-    def total_tokens(self) -> int:
-        return self.spec.num_lines * (self.spec.avg_input_tokens + self.spec.avg_output_tokens)
-
-    @property
-    def remaining_tokens(self) -> int:
-        return int((1.0 - self.progress_frac) * self.total_tokens)
 
 def normalize_gpu_name(s_name):
     if s_name is None:
