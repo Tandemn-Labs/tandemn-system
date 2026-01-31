@@ -257,8 +257,9 @@ def poll_job_progress(
             if done >= total_prompts:
                 tracker.update_status(job_id, "succeeded")
                 break
-        except Exception:
-            # keep polling, simple prototype
+        except Exception as e:
+            # keep polling, simple prototype, but log the error
+            print(f"[ERROR] Polling job {job_id} failed: {e}")
             pass
         time.sleep(interval_sec)
 
