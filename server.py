@@ -1,21 +1,16 @@
+from contextlib import asynccontextmanager
 import uuid
 import requests
 import sky
 from fastapi import FastAPI, Form
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
+from placement.aws_magic import AWSAllocation
 from storage.storage_server import storage_backend
-from tracking.tracking import JobRecord, VPCQuotaTracker
+from tracking.tracking import JobRecord, JobSpec, JobState
 from utils.utils import split_uri, update_template, update_yaml_file
-from typing import Dict, Tuple, Union, Optional, Literal
+from typing import Dict, Union, Optional, Literal
 from threading import Lock
-from orca import JobSpec, load_all_perfdb_files, load_quota_csv, JobState
-from orca import (
-    get_num_params_from_text,
-    enumerate_gpus_and_candidates,
-    llm_choose_config_from_candidates,
-)
-from orca import choose_and_apply_llm_plan, load_c_pmi_model
 import threading
 import time
 import re
@@ -23,14 +18,35 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
+##### Global variables
+YAML_OUTPUT = "temp/output.yaml"
+OPENROUTER_API_KEY = os.environ.get("TD_OPENROUTER_KEY")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    # Startup logic
+
+    # Initialize AWSAllocation
+    print("[AWSAllocation] Starting up")
+    app.state.aws_allocation = AWSAllocation(
+        openrouter_key=OPENROUTER_API_KEY,
+        perfdb_dir="./perf_db",  # Note: matches OrcaOrchestrator's path
+        aws_quota_csv="./quotas/aws_gpu_quota_by_region.csv",
+        k_nearest_model_size=5,
+    )
+
+    yield
+
+    # Shutdown logic
+
+
 app = FastAPI(
     title="Tandemn Server",
     description="API for receiving job requests",
+    lifespan=lifespan,
 )
-
-##### Global variables
-YAML_OUTPUT = "temp/output.yaml"
-OPENROUTER_API_KEY = os.environ("TD_OPENROUTER_KEY")
 
 
 class JobTracker:
@@ -106,77 +122,6 @@ class JobTracker:
                 rec.endpoint_url = endpoint_url
                 rec.last_updated_at = time.time()
             return rec
-
-
-class OrcaOrchestrator:
-    def __init__(
-        self,
-        quota_tracker: VPCQuotaTracker,
-        job_tracker: JobTracker,
-        perfdb_dir="./perf_db",
-        quota_csv="./temp/aws_gpu_quota_by_region.csv",
-    ):
-        self.quota_tracker = quota_tracker
-        self.job_tracker = job_tracker
-        self.perf_files = load_all_perfdb_files(perfdb_dir)
-        self.quota_df = load_quota_csv(quota_csv)
-        self.c_pmi_model, self.c_pmi_tokenizer = load_c_pmi_model()
-
-    def decide_on_allocation(self, job_state: JobState) -> Tuple[str, int]:
-        model_size_b = get_num_params_from_text(job_state.spec.model_name)
-        candidates = enumerate_gpus_and_candidates(
-            user_model_size_b=model_size_b,
-            num_lines=job_state.spec.num_lines,
-            avg_input_tokens=job_state.spec.avg_input_tokens,
-            avg_output_tokens=job_state.spec.avg_output_tokens,
-            slo_hours=job_state.spec.slo_hours,
-            region=job_state.spec.region,
-            market=job_state.spec.market,
-        )
-        # math solver
-        # candidates_sorted = sorted(candidates, key=lambda c: (c["replicas"], c["vcpu_needed"], c["runtime_hours"]))
-        math_cfg = min(
-            candidates,
-            key=lambda c: (c["replicas"], c["vcpu_needed"], c["runtime_hours"]),
-        )
-        print(
-            f"[Math] tp={math_cfg['tp']} pp={math_cfg['pp']} r={math_cfg['replicas']} gpu-h={math_cfg['gpu_time']:.2f}"
-        )
-        # llm solver
-        mimo_cfg = llm_choose_config_from_candidates(
-            job=job_state,
-            candidates=candidates,
-            model_id="xiaomi/mimo-v2-flash:free",
-            openrouter_api_key=OPENROUTER_API_KEY,
-            advisor_name="XiaomiMimoAdvisor",
-            top_k=20,
-        )
-        if mimo_cfg:
-            print(
-                f"[XiaomiMimo Advisor] Picks: tp={mimo_cfg['tp']} pp={mimo_cfg['pp']} r={mimo_cfg['replicas']}"
-            )
-        devstral_cfg = llm_choose_config_from_candidates(
-            job=job_state,
-            candidates=candidates,
-            model_id="mistralai/devstral-2512:free",
-            openrouter_api_key=OPENROUTER_API_KEY,
-            advisor_name="DevstralAdvisor",
-            top_k=20,
-        )
-        if devstral_cfg:
-            print(
-                f"[Devstral Advisor] Picks: tp={devstral_cfg['tp']} pp={devstral_cfg['pp']} r={devstral_cfg['replicas']}"
-            )
-        plans = [
-            ("Math", math_cfg),
-            ("XiaomiMimo", mimo_cfg),
-            ("Devstral", devstral_cfg),
-        ]
-        plan_labels = [name for name, _ in plans]
-        best_label, probs, chosen_cfg = choose_and_apply_llm_plan(
-            job_state, plans, plan_labels, self.c_pmi_model, self.c_pmi_tokenizer
-        )
-        return chosen_cfg
 
 
 ###################################################################################################
@@ -280,7 +225,6 @@ def jobtracker_snapshot(tracker: JobTracker) -> dict:
 
 
 def log_jobtracker_loop(tracker: JobTracker, interval_sec: int = 0.5):
-    prev = None
     while True:
         snap = jobtracker_snapshot(tracker)
         print("\n[JobTracker] snapshot:")
@@ -295,18 +239,6 @@ def log_jobtracker_loop(tracker: JobTracker, interval_sec: int = 0.5):
 
 
 ###################################################################################################
-
-
-@app.on_event("startup")
-async def startup_event():
-    print("[QuotaTracker] Starting up")
-    # there is something called as app.state that shares these variables across requests
-    # when the server is being run on multiple threads and multiple ppl are calling it
-    app.state.quota_tracker = VPCQuotaTracker()
-    app.state.job_tracker = JobTracker()
-    app.state.orca_orchestrator = OrcaOrchestrator(
-        app.state.quota_tracker, app.state.job_tracker
-    )
 
 
 def get_quota_tracker():
@@ -338,18 +270,22 @@ async def submit_batch(request: BatchedRequest):
     confirmation of receipt.
     """
 
-    launch_config = real_magic(request)
+    # launch_config = real_magic(request)
+    # print(launch_config)
+
+    # jt = app.state.job_tracker
+    # job_state = jt.build_job_state_batched(request, launch_config)
+    # jt.add(job_state)
+    # jt.update_status(launch_config.decision_id, "queued")
+
+    aws_alloc_engine: AWSAllocation = app.state.aws_allocation
+    launch_config = aws_alloc_engine.decide(request)
     print(launch_config)
 
-    jt = app.state.job_tracker
-    job_state = jt.build_job_state_batched(request, launch_config)
-    jt.add(job_state)
-    jt.update_status(launch_config.decision_id, "queued")
-
     # launch the job
-    match launch_config.engine:
-        case "vllm":
-            await sp_launch_vllm_batch(request, launch_config)
+    # match launch_config.engine:
+    #     case "vllm":
+    #         await sp_launch_vllm_batch(request, launch_config)
 
 
 @app.post("/submit/online")
@@ -550,31 +486,7 @@ async def presign_download(user: str, remote_path: str, expires: int = 600):
     return {"status": "success", **payload}
 
 
-# if __name__ == "__main__":
-#     import uvicorn
-
-#     uvicorn.run(app, host="0.0.0.0", port=26336)
-
-
 if __name__ == "__main__":
-    import asyncio
+    import uvicorn
 
-    asyncio.run(startup_event())
-
-    # Fake request
-    req = BatchedRequest(
-        user_id="test",
-        input_file="s3://tandemn-orca/orange/test.jsonl",
-        output_file="output_out.txt",
-        num_lines=5,
-        description="test run",
-        task_type="batch",
-        task_priority="low",
-        model_name="Qwen/Qwen3-0.6B",
-        engine="vllm",
-        slo_mode="batch",
-        placement="vpc",
-    )
-
-    asyncio.run(submit_batch(req))
-    log_jobtracker_loop(app.state.job_tracker, interval_sec=0.5)
+    uvicorn.run(app, host="0.0.0.0", port=26336)
