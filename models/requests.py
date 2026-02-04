@@ -8,11 +8,11 @@ from pydantic import BaseModel
 class BatchedRequest(BaseModel):
     """Request to send batched inference job to central server."""
     user_id: str
-    input_file: Optional[str] = None  # S3/local path to the file
-    output_file: Optional[str] = None  # local path to where the output will be saved
-    num_lines: Optional[int] = None  # number of prompt lines in the file
-    avg_input_tokens: Optional[int] = None # estimated per line
-    avg_output_tokens: Optional[int] = None # estimated per line 
+    input_file: str  # S3/local path to the file
+    output_file: str  # local path to where the output will be saved
+    num_lines: int # number of prompt lines in the file
+    avg_input_tokens: int # estimated per line
+    avg_output_tokens: int # estimated per line 
     # Get some parameters directly from the JobConfig
     description : str
     task_type : str
@@ -23,7 +23,7 @@ class BatchedRequest(BaseModel):
     is_speculative_decode: Optional[bool] = None # none means not specified
     is_PD_disaggregation: Optional[bool] = None # none means not specified
     slo_mode : str
-    slo_deadline_hours: Optional[int] = None
+    slo_deadline_hours: int = None
     placement : str
     # Only change the ModelSpecificCofig
     # right now its just vllm, but we can interject the parameters here

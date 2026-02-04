@@ -3,6 +3,7 @@ __pycache__/
 
 temp/
 files/
+quotas/
 .env
 
 *.code-workspace
