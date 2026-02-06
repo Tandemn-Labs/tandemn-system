@@ -1,6 +1,9 @@
 import math
+import re
 from typing import Any, Dict, List, Optional, Tuple, Union
+import uuid
 
+from models.resources import MagicOutput
 import pandas as pd
 
 from openai import OpenAI
@@ -9,7 +12,6 @@ from tabulate import tabulate
 from termcolor import colored
 import torch
 from models.requests import BatchedRequest, OnlineServingRequest
-from models.resources import MagicOutput
 from placement.magic import VPCMagic
 from utils.utils import (
     get_num_params_from_text,
@@ -54,15 +56,23 @@ class AWSAllocation(VPCMagic):
 
     def decide(
         self, request: Union[BatchedRequest, OnlineServingRequest]
-    ) -> MagicOutput:
+    ) -> AWSPlacementCandidate:
         """Main decision function called by server"""
 
         if isinstance(request, BatchedRequest):
-            return self.process_batch(request)
+            candidate = self.process_batch(request)
+            return MagicOutput(
+                decision_id=f"mo-{uuid.uuid4()}",
+                engine="vllm",
+                instance_type=candidate.instance_type,
+                tp_size=candidate.tp,
+                pp_size=candidate.pp,
+                replicas=candidate.replicas,
+            )
 
     def process_batch(
         self, req: BatchedRequest, region="us-east-1", market="on_demand"
-    ) -> MagicOutput:
+    ) -> AWSPlacementCandidate:
         # Load inputs: Performance DB + AWS Quota
         model_size = get_num_params_from_text(req.model_name)
         perf_files = load_all_perfdb_files(self.perfdb_dir)

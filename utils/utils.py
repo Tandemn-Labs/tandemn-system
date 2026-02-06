@@ -224,7 +224,7 @@ def get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed):
     """
     instances = quota_df[quota_df["gpu_base"] == gpu_base].copy()
     if instances.empty:
-        return []
+        return []   
     packings = []
     for _, inst in instances.iterrows():
         gpu_per = inst["gpu_count"]
