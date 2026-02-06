@@ -1,5 +1,22 @@
+# Server & API
 fastapi
-pydantic
-uvicorn
-skypilot[aws, kubernetes, vast]
+uvicorn[standard]
+python-dotenv
+requests
+
+# Placement (AWS allocation, LLM advisors)
+pandas
+openai
+tabulate
+termcolor
+torch
+transformers
+
+# Cloud / job launch
+skypilot[aws]
+
+# Storage (S3 presign/multipart used by server)
 boto3
+
+# Config / data
+PyYAML

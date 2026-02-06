@@ -11,7 +11,6 @@ from tracking.tracking import JobRecord, JobSpec, JobState
 from utils.utils import split_uri, update_template, update_yaml_file
 from typing import Dict, Union, Optional, Literal
 from threading import Lock
-import threading
 import time
 import re
 from dotenv import load_dotenv
@@ -32,7 +31,7 @@ async def lifespan(app: FastAPI):
     print("[AWSAllocation] Starting up")
     app.state.aws_allocation = AWSAllocation(
         openrouter_key=OPENROUTER_API_KEY,
-        perfdb_dir="./perf_db",  # Note: matches OrcaOrchestrator's path
+        perfdb_dir="./perf_db",
         aws_quota_csv="./quotas/aws_gpu_quota_by_region.csv",
         k_nearest_model_size=5,
     )
@@ -282,10 +281,7 @@ async def submit_batch(request: BatchedRequest):
     launch_config = aws_alloc_engine.decide(request)
     print(launch_config)
 
-    # launch the job
-    # match launch_config.engine:
-    #     case "vllm":
-    #         await sp_launch_vllm_batch(request, launch_config)
+    await sp_launch_vllm_batch(request, launch_config)
 
 
 @app.post("/submit/online")
@@ -318,8 +314,8 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput):
 
     replace_yaml = {
         "name": config.decision_id,
-        "num_nodes": config.num_nodes,
-        "resources.instance_type": config.instances,
+        "num_nodes": config.pp_size * config.replicas,
+        "resources.instance_type": config.instance_type,
         "run": run_string,
         "file_mounts./data.source": dirname,
     }
@@ -330,26 +326,26 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput):
     job_id, handle = sky.stream_and_get(result_id, follow=True)
 
     # get the head IP
-    head_ip = handle.head_ip
-    endpoint_url = f"http://{head_ip}:8001/"
+    # head_ip = handle.head_ip
+    # endpoint_url = f"http://{head_ip}:8001/"
 
-    jt = get_job_tracker()
-    jt.set_head_ip(config.decision_id, head_ip)
-    jt.set_endpoint_url(config.decision_id, endpoint_url)
-    jt.update_status(config.decision_id, "launching")
+    # jt = get_job_tracker()
+    # jt.set_head_ip(config.decision_id, head_ip)
+    # jt.set_endpoint_url(config.decision_id, endpoint_url)
+    # jt.update_status(config.decision_id, "launching")
 
-    threading.Thread(
-        target=poll_job_progress,
-        args=(config.decision_id, endpoint_url.rstrip("/"), request.num_lines or 1, jt),
-        daemon=False,
-    ).start()
+    # threading.Thread(
+    #     target=poll_job_progress,
+    #     args=(config.decision_id, endpoint_url.rstrip("/"), request.num_lines or 1, jt),
+    #     daemon=False,
+    # ).start()
 
-    # sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
-    threading.Thread(
-        target=sky.tail_logs,
-        kwargs={"cluster_name": config.decision_id, "job_id": job_id, "follow": True},
-        daemon=False,
-    ).start()
+    # # sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
+    # threading.Thread(
+    #     target=sky.tail_logs,
+    #     kwargs={"cluster_name": config.decision_id, "job_id": job_id, "follow": True},
+    #     daemon=False,
+    # ).start()
 
 
 async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutput):
@@ -359,8 +355,8 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
 
     replace_yaml = {
         "name": config.decision_id,
-        "num_nodes": config.num_nodes,
-        "resources.instance_type": config.instances,
+        "num_nodes": config.pp_size * config.replicas,
+        "resources.instance_type": config.instance_type,
         "resources.ports": "8001",
         "run": run_string,
     }
@@ -464,10 +460,10 @@ def real_magic(request: Union[BatchedRequest, OnlineServingRequest]) -> MagicOut
     return MagicOutput(
         decision_id="mo-" + str(uuid.uuid4()),
         engine="vllm",
-        instances="g6e.xlarge",
-        num_nodes=1,
+        instance_type="g6e.xlarge",
         tp_size=1,
         pp_size=1,
+        replicas=1,
     )
 
 

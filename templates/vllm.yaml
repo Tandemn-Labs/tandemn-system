@@ -3,9 +3,8 @@ name: default-cluster
 num_nodes: 1
 
 resources:
-  infra: aws/us-east-1
-  use_spot: true
-  disk_size: 500GB
+  infra: aws
+  disk_size: 100GB
   instance_type: p3.gxlarge
   ports: 8001  # Expose port for observability
 
