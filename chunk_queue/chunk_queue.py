@@ -12,7 +12,7 @@ from typing import List, Dict, Any
 
 import redis.asyncio as aioredis
 
-from queue.keys import (
+from chunk_queue.keys import (
     pending_queue,
     leased_set,
     completed_set,
@@ -23,7 +23,7 @@ from queue.keys import (
     DEFAULT_LEASE_TTL_SECONDS,
     MAX_LEASE_RETRIES,
 )
-from queue.lua_scripts import REAP_EXPIRED_LEASES
+from chunk_queue.lua_scripts import REAP_EXPIRED_LEASES
 
 logger = logging.getLogger(__name__)
 
