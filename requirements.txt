@@ -18,5 +18,8 @@ skypilot[aws]
 # Storage (S3 presign/multipart used by server)
 boto3
 
+# Queue / state tracking
+redis[hiredis]
+
 # Config / data
 PyYAML
