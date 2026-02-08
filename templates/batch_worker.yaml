@@ -1,0 +1,41 @@
+name: batch-worker
+
+num_nodes: 1
+
+resources:
+  infra: aws
+  disk_size: 100GB
+  instance_type: p3.xlarge
+
+file_mounts:
+  /data:
+    mode: MOUNT
+    source: s3://tandemn_orca/test
+  /opt/tandemn-worker:
+    mode: COPY
+    source: ./worker
+
+setup: |
+  export PYTHONHASHSEED=0
+  set -euxo pipefail
+  python3 -m pip install -U pip
+  python3 -m pip install -U uv
+
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+
+  # Inference engine
+  uv pip install "vllm==0.10.0"
+
+  # Worker dependencies
+  uv pip install "redis[hiredis]" "requests"
+
+run: |
+  set -euxo pipefail
+  source .venv/bin/activate
+
+  ~/sky_templates/ray/start_cluster
+
+  if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo hello
+  fi

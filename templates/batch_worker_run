@@ -1,0 +1,20 @@
+set -euxo pipefail
+source .venv/bin/activate
+
+~/sky_templates/ray/start_cluster
+
+if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    python /opt/tandemn-worker/batch_worker.py \
+        --redis-host {redis_host} \
+        --redis-port {redis_port} \
+        {redis_password_flag} \
+        --job-id {job_id} \
+        --worker-id {worker_id} \
+        --data-dir /data \
+        --lease-ttl {lease_ttl} \
+        --serve-command '{serve_command}' \
+        --engine-port {engine_port} \
+        --health-endpoint {health_endpoint} \
+        --inference-endpoint {inference_endpoint} \
+        --max-concurrent {max_concurrent}
+fi

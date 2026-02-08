@@ -1,0 +1,1 @@
+vllm serve {model} --host 0.0.0.0 --port {engine_port} -tp {tp} -pp {pp} {additional_params}
