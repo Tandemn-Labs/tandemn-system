@@ -134,7 +134,8 @@ class JobState:
 class JobRecord:
     state: JobState
     status: Literal[
-        "queued", "launching", "running", "succeeded", "failed", "cancelled"
+        "queued", "launching", "running", "combining",
+        "succeeded", "failed", "cancelled",
     ] = "queued"
     endpoint_url: Optional[str] = None
     created_at: float = field(default_factory=time.time)
