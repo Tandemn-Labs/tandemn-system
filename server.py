@@ -1,4 +1,7 @@
 from contextlib import asynccontextmanager
+import asyncio
+import logging
+import math
 import uuid
 import requests
 import sky
@@ -8,8 +11,10 @@ from models.resources import MagicOutput
 from placement.aws_magic import AWSAllocation
 from storage.storage_server import storage_backend
 from tracking.tracking import JobRecord, JobSpec, JobState
+from chunk_queue.redis_pool import get_redis, close_redis
+from chunk_queue.chunk_queue import ChunkQueueManager, ChunkInfo
 from utils.utils import split_uri, update_template, update_yaml_file
-from typing import Dict, Union, Optional, Literal
+from typing import Dict, List, Union, Optional, Literal
 from threading import Lock
 import time
 import re
@@ -17,9 +22,16 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
 ##### Global variables
 YAML_OUTPUT = "temp/output.yaml"
 OPENROUTER_API_KEY = os.environ.get("TD_OPENROUTER_KEY")
+CONTROL_PLANE_IP = os.environ.get("CONTROL_PLANE_IP", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", None)
+ENGINE_PORT = 8000
+CHUNK_SIZE_LINES = 200  # must match CLI chunking convention
 
 
 @asynccontextmanager
@@ -36,9 +48,26 @@ async def lifespan(app: FastAPI):
         k_nearest_model_size=5,
     )
 
+    # Initialize Redis + chunk queue
+    redis_conn = await get_redis()
+    app.state.redis = redis_conn
+    app.state.chunk_queue = ChunkQueueManager(redis_conn=redis_conn)
+    logger.info("Redis and ChunkQueueManager initialized")
+
+    # Start background tasks (reaper + combiner)
+    from chunk_queue.background_tasks import lease_reaper_loop, combiner_loop
+    app.state.bg_tasks = [
+        asyncio.create_task(lease_reaper_loop(app)),
+        asyncio.create_task(combiner_loop(app)),
+    ]
+
     yield
 
     # Shutdown logic
+    for task in app.state.bg_tasks:
+        task.cancel()
+    await close_redis()
+    logger.info("Redis connection closed")
 
 
 app = FastAPI(
@@ -265,23 +294,178 @@ async def submit_batch(request: BatchedRequest):
     """
     Submit a batched inference job request.
 
-    Receives a BatchedRequest with job configuration and returns
-    confirmation of receipt.
+    1. Run placement to decide instance type, TP/PP, replicas
+    2. Build chunk list from input_file prefix + num_lines
+    3. Enqueue all chunks in Redis
+    4. Launch worker replicas as background tasks
+    5. Return immediately with job_id (progress tracked via Redis)
     """
-
-    # launch_config = real_magic(request)
-    # print(launch_config)
-
-    # jt = app.state.job_tracker
-    # job_state = jt.build_job_state_batched(request, launch_config)
-    # jt.add(job_state)
-    # jt.update_status(launch_config.decision_id, "queued")
-
     aws_alloc_engine: AWSAllocation = app.state.aws_allocation
     launch_config = aws_alloc_engine.decide(request)
-    print(launch_config)
+    job_id = launch_config.decision_id
+    logger.info(f"Placement decided: {launch_config}")
 
-    await sp_launch_vllm_batch(request, launch_config)
+    # Build chunk list from the deterministic naming convention
+    bucket_uri, prefix = split_uri(request.input_file)
+    chunks = build_chunk_list(prefix, request.num_lines)
+
+    # Enqueue in Redis
+    cq: ChunkQueueManager = app.state.chunk_queue
+    await cq.enqueue_job(
+        job_id=job_id,
+        chunks=chunks,
+        model_name=request.model_name,
+        input_prefix=prefix,
+        bucket=bucket_uri,
+    )
+    await cq.update_job_status(job_id, "launching")
+    logger.info(f"Job {job_id}: enqueued {len(chunks)} chunks")
+
+    # Launch worker replicas in the background (non-blocking)
+    for replica_idx in range(launch_config.replicas):
+        worker_id = f"{job_id}-w{replica_idx}"
+        asyncio.create_task(
+            launch_batch_worker(request, launch_config, job_id, worker_id, bucket_uri)
+        )
+
+    return {
+        "status": "accepted",
+        "job_id": job_id,
+        "total_chunks": len(chunks),
+        "replicas": launch_config.replicas,
+        "model": request.model_name,
+    }
+
+
+# ── Chunk-based batch helpers ──────────────────────────────────────────────
+
+
+def build_chunk_list(prefix: str, num_lines: int) -> List[ChunkInfo]:
+    """Build the chunk list from the deterministic naming convention.
+
+    The CLI chunks at CHUNK_SIZE_LINES lines per chunk and names them
+    000001.jsonl, 000002.jsonl, etc. under the input prefix.
+    No cloud API calls needed — just math.
+    """
+    num_chunks = math.ceil(num_lines / CHUNK_SIZE_LINES)
+    prefix = prefix.rstrip("/")
+    return [
+        ChunkInfo(
+            chunk_id=f"{i:06d}",
+            chunk_index=i,
+            input_path=f"{prefix}/{i:06d}.jsonl",
+        )
+        for i in range(1, num_chunks + 1)
+    ]
+
+
+def build_serve_command(request: BatchedRequest, config: MagicOutput) -> str:
+    """Build the engine-specific serve command from the template.
+
+    Selects the template based on config.engine (e.g., templates/vllm_serve).
+    For a new engine, just add templates/{engine}_serve.
+    """
+    additional_params = build_additional_params(request)
+    replace = {
+        "model": request.model_name,
+        "engine_port": ENGINE_PORT,
+        "tp": config.tp_size,
+        "pp": config.pp_size,
+        "additional_params": additional_params,
+    }
+    template = f"templates/{config.engine}_serve"
+    return update_template(template, replace)
+
+
+def build_additional_params(request: BatchedRequest) -> str:
+    """Extract engine-specific additional params (e.g., speculative decoding)."""
+    if (
+        request.vllm_specific_config is not None
+        and request.vllm_specific_config.speculative_config is not None
+    ):
+        prefix = "--speculative-config."
+        spec_config = request.vllm_specific_config.speculative_config.model_dump(
+            exclude_none=True
+        )
+        return " ".join(f"{prefix}{key} {value}" for key, value in spec_config.items())
+    return ""
+
+
+async def launch_batch_worker(
+    request: BatchedRequest,
+    config: MagicOutput,
+    job_id: str,
+    worker_id: str,
+    bucket_uri: str,
+):
+    """Launch a single SkyPilot worker cluster (runs in background task)."""
+    try:
+        # Build engine serve command from template
+        serve_command = build_serve_command(request, config)
+
+        # Build worker run script from template
+        run_replace = {
+            "redis_host": CONTROL_PLANE_IP,
+            "redis_port": REDIS_PORT,
+            "redis_password_flag": f"--redis-password {REDIS_PASSWORD}" if REDIS_PASSWORD else "",
+            "job_id": job_id,
+            "worker_id": worker_id,
+            "lease_ttl": 600,
+            "serve_command": serve_command,
+            "engine_port": ENGINE_PORT,
+            "health_endpoint": "/v1/models",
+            "inference_endpoint": "/v1/chat/completions",
+            "max_concurrent": 64,
+        }
+        run_string = update_template("templates/batch_worker_run", run_replace)
+
+        # Build SkyPilot YAML (unique file per worker to avoid races)
+        yaml_output = f"temp/{worker_id}.yaml"
+        replace_yaml = {
+            "name": worker_id,
+            "num_nodes": config.pp_size,
+            "resources.instance_type": config.instance_type,
+            "run": run_string,
+            "file_mounts./data.source": bucket_uri,
+        }
+        update_yaml_file("templates/batch_worker.yaml", replace_yaml, yaml_output)
+
+        # Launch via SkyPilot (blocking call, run in thread to not block event loop)
+        task = sky.Task.from_yaml(yaml_output)
+        result_id = await asyncio.to_thread(
+            sky.launch, task, cluster_name=worker_id, down=True
+        )
+        await asyncio.to_thread(sky.stream_and_get, result_id, follow=True)
+
+        logger.info(f"Worker {worker_id} launched for job {job_id}")
+    except Exception:
+        logger.exception(f"Failed to launch worker {worker_id}")
+
+
+# ── Progress endpoints ─────────────────────────────────────────────────────
+
+
+@app.get("/job/{job_id}/status")
+async def job_status(job_id: str):
+    """Get real-time job progress from Redis."""
+    cq: ChunkQueueManager = app.state.chunk_queue
+    progress = await cq.get_job_progress(job_id)
+    if progress.total_chunks == 0:
+        return {"error": "job not found", "job_id": job_id}
+
+    meta = await app.state.redis.hgetall(f"job:{job_id}:meta")
+    return {
+        "job_id": job_id,
+        "status": meta.get("status", "unknown"),
+        "model": meta.get("model_name", ""),
+        "total_chunks": progress.total_chunks,
+        "completed": progress.completed,
+        "pending": progress.pending,
+        "leased": progress.leased,
+        "failed": progress.failed,
+        "progress": round(progress.progress_frac, 4),
+        "is_done": progress.is_done,
+    }
 
 
 @app.post("/submit/online")
