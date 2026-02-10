@@ -13,7 +13,7 @@ from tabulate import tabulate
 
 from tracking.tracking import JobSpec, JobState
 perfdb_dir = "./perf_db"
-quota_csv = "./temp/aws_gpu_quota_by_region.csv"
+quota_csv = "./quota/aws_gpu_quota_by_region.csv"
 
 pd.set_option('display.max_columns', None)  # Show all columns
 pd.set_option('display.width', None)        # Don't wrap columns to the next line

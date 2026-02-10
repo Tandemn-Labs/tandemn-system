@@ -45,7 +45,7 @@ class AWSAllocation(VPCMagic):
         self,
         openrouter_key,
         perfdb_dir="./perfdb",
-        aws_quota_csv="./quotas/aws_gpu_quota_by_region.csv",
+        aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
         k_nearest_model_size=1,
     ):
         self.perfdb_dir = perfdb_dir

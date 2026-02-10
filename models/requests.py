@@ -12,19 +12,23 @@ class BatchedRequest(BaseModel):
     output_file: str  # local path to where the output will be saved
     num_lines: int # number of prompt lines in the file
     avg_input_tokens: int # estimated per line
-    avg_output_tokens: int # estimated per line 
+    avg_output_tokens: int # estimated per line
     # Get some parameters directly from the JobConfig
     description : str
     task_type : str
     task_priority : str
     model_name: Optional[str] = None
-    engine: str 
+    engine: str
     quantization_bits: Optional[Literal["4", "8", "16"]] = None
     is_speculative_decode: Optional[bool] = None # none means not specified
     is_PD_disaggregation: Optional[bool] = None # none means not specified
     slo_mode : str
     slo_deadline_hours: int = None
     placement : str
+    # Placement solver selection: "roofline" (deterministic) or "llm" (3-advisor + C-PMI)
+    placement_solver: Optional[Literal["roofline", "llm"]] = None
+    # HuggingFace token for gated models (Llama, etc.)
+    hf_token: Optional[str] = None
     # Only change the ModelSpecificCofig
     # right now its just vllm, but we can interject the parameters here
     vllm_specific_config: Optional[vLLMSpecificConfig] = None
@@ -46,6 +50,8 @@ class OnlineServingRequest(BaseModel):
     is_PD_disaggregation: Optional[bool] = None
     slo_mode: Optional[str] = "online" # the slo of online serving is always online
     placement: str
+    # HuggingFace token for gated models (Llama, etc.)
+    hf_token: Optional[str] = None
 
     # # online-specific config
     # port: Optional[int] = 8000  # we will use the default port 8000 *(the cli user has no idea what to do?)

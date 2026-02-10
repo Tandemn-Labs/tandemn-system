@@ -7,7 +7,7 @@ import pandas as pd
 # this will be a wrapper around the database soon, rn it is in memory only
 @dataclass
 class VPCQuotaTracker:
-    quota_csv_file: str = "temp/aws_gpu_quota_by_region.csv"
+    quota_csv_file: str = "quota/aws_gpu_quota_by_region.csv"
     quota_df: pd.DataFrame = field(init=False)
     # Key: (region, market, family_type) → vcpu_in_use
     used_vcpu: Dict[Tuple[str, str, str], int] = field(default_factory=dict)

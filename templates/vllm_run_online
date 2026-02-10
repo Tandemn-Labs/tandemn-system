@@ -10,6 +10,7 @@ if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
     --port {port} \
     -tp {tp} \
     -pp {pp} \
+    --hf-token "$HF_TOKEN" \
     {additional_params} > vllm.log 2>&1 &
     
     VLLM_PID=$!

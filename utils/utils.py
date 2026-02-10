@@ -36,7 +36,9 @@ def update_yaml_file(
         else:
             data[key] = value
 
-    # Write the updated YAML back
+    # Write the updated YAML back (create parent directory if needed)
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
