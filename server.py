@@ -32,6 +32,7 @@ REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", None)
 ENGINE_PORT = 8000
 CHUNK_SIZE_LINES = 200  # must match CLI chunking convention
+TEST_FORCE_REPLICAS = int(os.environ.get("TEST_FORCE_REPLICAS", 0))  # 0 = use placement
 
 
 @asynccontextmanager
@@ -301,7 +302,21 @@ async def submit_batch(request: BatchedRequest):
     5. Return immediately with job_id (progress tracked via Redis)
     """
     aws_alloc_engine: AWSAllocation = app.state.aws_allocation
-    launch_config = aws_alloc_engine.decide(request)
+    if TEST_FORCE_REPLICAS > 0 and aws_alloc_engine.quota_df is None:
+        launch_config = MagicOutput(
+            decision_id=f"mo-{uuid.uuid4().hex[:12]}",
+            engine="vllm",
+            instance_type="g5.xlarge",
+            tp_size=1,
+            pp_size=1,
+            replicas=TEST_FORCE_REPLICAS,
+        )
+        logger.warning(f"TEST_FORCE_REPLICAS={TEST_FORCE_REPLICAS}, quota CSV missing — using A10G defaults")
+    else:
+        launch_config = aws_alloc_engine.decide(request)
+        if TEST_FORCE_REPLICAS > 0:
+            launch_config.replicas = TEST_FORCE_REPLICAS
+            logger.warning(f"TEST_FORCE_REPLICAS={TEST_FORCE_REPLICAS} overriding placement")
     job_id = launch_config.decision_id
     logger.info(f"Placement decided: {launch_config}")
 

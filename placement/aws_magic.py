@@ -50,9 +50,13 @@ class AWSAllocation(VPCMagic):
     ):
         self.perfdb_dir = perfdb_dir
         self.aws_quota_csv = aws_quota_csv
-        self.quota_df = load_aws_quota_csv(self.aws_quota_csv)
         self.k_nearest_model_size = k_nearest_model_size
         self.openrouter_key = openrouter_key
+        try:
+            self.quota_df = load_aws_quota_csv(self.aws_quota_csv)
+        except FileNotFoundError:
+            print(f"[AWSAllocation] Warning: quota CSV not found at {aws_quota_csv}, placement will be unavailable")
+            self.quota_df = None
 
     def decide(
         self, request: Union[BatchedRequest, OnlineServingRequest]

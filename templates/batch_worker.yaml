@@ -12,8 +12,9 @@ file_mounts:
     mode: MOUNT
     source: s3://tandemn_orca/test
   /opt/tandemn-worker:
+    name: tandemn-worker-src
     mode: COPY
-    source: ./worker
+    source: /opt/tandemn-orca/worker
 
 setup: |
   export PYTHONHASHSEED=0
@@ -25,7 +26,7 @@ setup: |
   source .venv/bin/activate
 
   # Inference engine
-  uv pip install "vllm==0.10.0"
+  uv pip install "vllm==0.10.0" "transformers<5"
 
   # Worker dependencies
   uv pip install "redis[hiredis]" "requests"
