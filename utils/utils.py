@@ -217,19 +217,23 @@ def sort_perf_entries_io_length(df, job_avg_input, job_avg_output):
     return df
 
 
-def get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed):
+def get_vcpu_count_from_gpu(quota_df, gpu_base, tp, pp, replicas):
     """
-    Given the GPU base and num of devices needed (e.g. 12xL40S)
+    Given the GPU base and parallelism configuration (tp, pp, replicas),
+    filters instances where the GPU count matches the TP number.
     Returns list: [(vCPU count, Instance Type, Num of instances needed), ...]
     """
-    instances = quota_df[quota_df["gpu_base"] == gpu_base].copy()
+    # Filter by GPU base and GPU count matching TP
+    instances = quota_df[
+        (quota_df["gpu_base"] == gpu_base) & (quota_df["gpu_count"] == tp)
+    ].copy()
     if instances.empty:
-        return []   
+        return []
     packings = []
     for _, inst in instances.iterrows():
-        gpu_per = inst["gpu_count"]
-
-        num_inst = math.ceil(gpus_needed / gpu_per)
+        # Number of instances needed = replicas * pp
+        # (each instance has tp GPUs)
+        num_inst = replicas * pp
         vcpu_needed = int(num_inst * inst["vCPU"])
         packings.append((vcpu_needed, inst["Instance_Type"], num_inst))
 

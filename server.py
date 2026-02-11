@@ -461,6 +461,7 @@ def real_magic(request: Union[BatchedRequest, OnlineServingRequest]) -> MagicOut
         decision_id="mo-" + str(uuid.uuid4()),
         engine="vllm",
         instance_type="g6e.xlarge",
+        num_inst=1,
         tp_size=1,
         pp_size=1,
         replicas=1,

@@ -31,7 +31,7 @@ class AWSPlacementCandidate(BaseModel):
     tp: int
     pp: int
     replicas: int
-    gpus_needed: int
+    num_inst: int
     vcpu_needed: int
     instance_type: str
     runtime_hours: float
@@ -56,7 +56,7 @@ class AWSAllocation(VPCMagic):
 
     def decide(
         self, request: Union[BatchedRequest, OnlineServingRequest]
-    ) -> AWSPlacementCandidate:
+    ) -> MagicOutput:
         """Main decision function called by server"""
 
         if isinstance(request, BatchedRequest):
@@ -65,6 +65,7 @@ class AWSAllocation(VPCMagic):
                 decision_id=f"mo-{uuid.uuid4()}",
                 engine="vllm",
                 instance_type=candidate.instance_type,
+                num_inst=candidate.num_inst,
                 tp_size=candidate.tp,
                 pp_size=candidate.pp,
                 replicas=candidate.replicas,
@@ -283,9 +284,11 @@ class AWSAllocation(VPCMagic):
                     gpus_needed = replicas * tp * pp
 
                     # Packings sorted by vCPU (cheapest first)
-                    packings = get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed)
+                    packings = get_vcpu_count_from_gpu(
+                        quota_df, gpu_base, tp, pp, replicas
+                    )
 
-                    for vcpu, inst_type, _ in packings:
+                    for vcpu, inst_type, num_inst in packings:
                         # EARLY EXIT 1: if cheapest packing exceeds quota, skip rest
                         if vcpu > vcpu_quota:
                             break  # All remaining packings are more expensive
@@ -300,7 +303,7 @@ class AWSAllocation(VPCMagic):
                                     tp=tp,
                                     pp=pp,
                                     replicas=replicas,
-                                    gpus_needed=gpus_needed,
+                                    num_inst=num_inst,
                                     vcpu_needed=vcpu,
                                     instance_type=inst_type,
                                     runtime_hours=runtime_hours,
@@ -358,12 +361,13 @@ class AWSAllocation(VPCMagic):
 
         prompt_lines.append("Candidate configs:\n")
         for label, cfg in labeled:
+            total_gpus = cfg.tp * cfg.pp * cfg.replicas
             prompt_lines.append(
                 f"Plan {label}:\n"
                 f"- tp: {cfg.tp}\n"
                 f"- pp: {cfg.pp}\n"
                 f"- replicas: {cfg.replicas}\n"
-                f"- total GPUs: {cfg.gpus_needed}\n"
+                f"- total GPUs: {total_gpus}\n"
                 f"- predicted runtime: {cfg.runtime_hours:.2f} hours\n"
                 f"- GPU-hours: {cfg.gpu_time:.2f}\n\n"
             )
@@ -379,13 +383,16 @@ class AWSAllocation(VPCMagic):
             base_url="https://openrouter.ai/api/v1",
             api_key=openrouter_api_key,
         )
-        response = client.chat.completions.create(
-            model=model_id,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=64,
-            temperature=temperature,
-        )
-        text = response.choices[0].message.content.strip()
+
+        # TODO: Temp since I don't want to run OpenRouter calls
+        # response = client.chat.completions.create(
+        #     model=model_id,
+        #     messages=[{"role": "user", "content": prompt}],
+        #     max_tokens=64,
+        #     temperature=temperature,
+        # )
+        # text = response.choices[0].message.content.strip()
+        text = ""
         print(advisor_name, f": {text}")
 
         chosen_label = None
@@ -498,7 +505,7 @@ class AWSAllocation(VPCMagic):
             tp = cfg.tp
             pp = cfg.pp
             replicas = cfg.replicas
-            gpus_needed = cfg.gpus_needed
+            total_gpus = tp * pp * replicas
             instance_type = cfg.instance_type
             vcpu_needed = cfg.vcpu_needed
             runtime_hours = cfg.runtime_hours
@@ -509,7 +516,7 @@ class AWSAllocation(VPCMagic):
                 f"  - tp: {tp}\n"
                 f"  - pp: {pp}\n"
                 f"  - replicas: {replicas}\n"
-                f"  - total GPUs: {gpus_needed}\n"
+                f"  - total GPUs: {total_gpus}\n"
                 f"  - instance_type: {instance_type}\n"
                 f"  - vcpu_needed: {vcpu_needed}\n"
                 f"  - predicted runtime: {runtime_hours:.2f} hours\n"

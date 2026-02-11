@@ -6,14 +6,14 @@ resources:
   infra: aws
   disk_size: 100GB
   instance_type: p3.gxlarge
-  ports: 8001  # Expose port for observability
+  ports: 8001 # Expose port for observability
 
 file_mounts:
   /data:
     mode: MOUNT
     source: s3://tandemn_orca/test
 
-setup: | 
+setup: |
   export PYTHONHASHSEED=0
   set -euxo pipefail
   python3 -m pip install -U pip
@@ -24,12 +24,13 @@ setup: |
 
   # Install vLLM
   uv pip install "datasets" "requests"
+  uv pip install "transformers==4.57.6" # transformers > 5.0.0 breaks
   uv pip install "vllm==0.10.0" # old vllm
 
 run: |
   set -euxo pipefail
 
-  
+
   source .venv/bin/activate
 
   ~/sky_templates/ray/start_cluster

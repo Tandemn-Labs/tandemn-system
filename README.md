@@ -59,7 +59,7 @@ curl --request POST \
   "description": "Batch summarize support tickets",
   "task_type": "summarization",
   "task_priority": "high",
-  "model_name": "meta-llama/Meta-Llama-3-70B-Instruct",
+  "model_name": "Qwen/Qwen3-0.6B",
   "engine": "vllm",
   "quantization_bits": "8",
   "is_speculative_decode": true,
