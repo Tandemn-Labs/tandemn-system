@@ -120,7 +120,7 @@ class AWSAllocation(VPCMagic):
         # [Evaluate candidate]: LLM (Mimo)
         mimo_cfg = AWSAllocation.llm_choose_config_from_candidates(
             candidates=all_candidates,
-            model_id="z-ai/glm-4.5-air:free",
+            model_id="qwen/qwen3-next-80b-a3b-instruct:free",
             openrouter_api_key=self.openrouter_key,
             advisor_name="XiaomiMimoAdvisor",
             req=req,
@@ -135,7 +135,7 @@ class AWSAllocation(VPCMagic):
         # [Evaluate candidate]: LLM (Devstral)
         devstral_cfg = AWSAllocation.llm_choose_config_from_candidates(
             candidates=all_candidates,
-            model_id="nvidia/nemotron-3-nano-30b-a3b:free",
+            model_id="meta-llama/llama-3.3-70b-instruct:free",
             openrouter_api_key=self.openrouter_key,
             advisor_name="DevstralAdvisor",
             req=req,

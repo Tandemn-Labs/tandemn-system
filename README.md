@@ -53,7 +53,7 @@ curl --request POST \
   "user_id": "user-123",
   "input_file": "s3://tandemn-user-data/test.jsonl",
   "output_file": "output.txt",
-  "num_lines": 1000,
+  "num_lines": 100,
   "avg_input_tokens": 150,
   "avg_output_tokens": 200,
   "description": "Batch summarize support tickets",
@@ -65,7 +65,7 @@ curl --request POST \
   "is_speculative_decode": true,
   "is_PD_disaggregation": false,
   "slo_mode": "batch",
-  "slo_deadline_hours": 4,
+  "slo_deadline_hours": 48,
   "placement": "aws:us-east-1:g5-12xlarge"
 }'
 ```
