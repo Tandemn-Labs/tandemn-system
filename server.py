@@ -1,16 +1,22 @@
 from contextlib import asynccontextmanager
 import uuid
 import requests
+import subprocess
+import signal
+import atexit
 import sky
 from fastapi import FastAPI, Form
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.aws_magic import AWSAllocation
+from placement.roofline_magic import RooflineAWSAllocation
+from quota.region_selector import get_ordered_regions, get_instance_family, get_cached_quotas
 from storage.storage_server import storage_backend
 from tracking.tracking import JobRecord, JobSpec, JobState
 from utils.utils import split_uri, update_template, update_yaml_file
-from typing import Dict, Union, Optional, Literal
+from typing import Dict, Union, Optional, Literal, List, Tuple
 from threading import Lock
+import threading
 import time
 import re
 from dotenv import load_dotenv
@@ -21,20 +27,92 @@ load_dotenv()
 YAML_OUTPUT = "temp/output.yaml"
 OPENROUTER_API_KEY = os.environ.get("TD_OPENROUTER_KEY")
 
+# Solver selection: "roofline" (deterministic) or "llm" (3-advisor + C-PMI)
+PLACEMENT_SOLVER = os.environ.get("TD_PLACEMENT_SOLVER", "roofline").lower()
+
+# Optimization priority for roofline solver
+PLACEMENT_PRIORITY = os.environ.get("TD_PLACEMENT_PRIORITY", "cost_first").lower()
+
+# HuggingFace token for gated models
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
+
+def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_size: int) -> str:
+    """
+    Generate an informative directory name for job outputs.
+    Format: {model_short}/numreq_N-avginputlen_X-avgoutputlen_Y/{solver}-tpT-ppP-timestamp_YYYYMMDD-HHMMSS
+    Example: qwen72b/numreq_100-avginputlen_50-avgoutputlen_100/roofline-tp4-pp1-timestamp_20260215-143022
+    """
+    from datetime import datetime
+
+    # Shorten model name: "Qwen/Qwen2.5-72B-Instruct" -> "qwen72b"
+    model_name = request.model_name or "unknown"
+    # Extract key parts: remove provider prefix, get size
+    model_short = model_name.split("/")[-1].lower()  # "qwen2.5-72b-instruct"
+    # Extract size (e.g., "72b", "7b", "235b")
+    size_match = re.search(r'(\d+\.?\d*b)', model_short, re.IGNORECASE)
+    size = size_match.group(1).lower() if size_match else ""
+    # Get model family (first word before numbers/dashes)
+    family = re.split(r'[\d\-_.]', model_short)[0][:6]  # max 6 chars
+    model_short = f"{family}{size}" if size else family[:10]
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # Format: model/workload/{solver}-tp{T}-pp{P}-timestamp_{ts}
+    dirname = f"{model_short}/numreq_{request.num_lines}-avginputlen_{request.avg_input_tokens}-avgoutputlen_{request.avg_output_tokens}/{solver}-tp{tp_size}-pp{pp_size}-timestamp_{timestamp}"
+    return dirname
+
+
+class ClusterManager:
+    """Manages active SkyPilot clusters to prevent zombie instances."""
+
+    def __init__(self):
+        self.active_clusters: Dict[str, dict] = {}
+        self.lock = Lock()
+
+    def register(self, cluster_name: str, job_id: str):
+        with self.lock:
+            self.active_clusters[cluster_name] = {"job_id": job_id, "status": "active"}
+            print(f"[ClusterManager] Registered cluster: {cluster_name}")
+
+    def unregister(self, cluster_name: str):
+        with self.lock:
+            if cluster_name in self.active_clusters:
+                del self.active_clusters[cluster_name]
+                print(f"[ClusterManager] Unregistered cluster: {cluster_name}")
+
+    def terminate_cluster(self, cluster_name: str) -> bool:
+        try:
+            result = subprocess.run(
+                ["sky", "down", "-y", cluster_name],
+                capture_output=True, text=True, timeout=300
+            )
+            if result.returncode == 0:
+                self.unregister(cluster_name)
+                return True
+            return False
+        except Exception as e:
+            print(f"[ClusterManager] Error terminating {cluster_name}: {e}")
+            return False
+
+
+_cluster_manager = None
+
+
+def get_cluster_manager() -> ClusterManager:
+    global _cluster_manager
+    if _cluster_manager is None:
+        _cluster_manager = ClusterManager()
+    return _cluster_manager
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
     # Startup logic
+    # Solvers are now created per-request in submit_batch()
 
-    # Initialize AWSAllocation
-    print("[AWSAllocation] Starting up")
-    app.state.aws_allocation = AWSAllocation(
-        openrouter_key=OPENROUTER_API_KEY,
-        perfdb_dir="./perf_db",
-        aws_quota_csv="./quotas/aws_gpu_quota_by_region.csv",
-        k_nearest_model_size=5,
-    )
+    # Initialize cluster manager
+    app.state.cluster_manager = get_cluster_manager()
 
     yield
 
@@ -265,23 +343,63 @@ async def submit_batch(request: BatchedRequest):
     """
     Submit a batched inference job request.
 
-    Receives a BatchedRequest with job configuration and returns
-    confirmation of receipt.
+    The placement solver can be:
+    - "roofline": Deterministic roofline-based solver (default)
+    - "llm": LLM-based 3-advisor + C-PMI solver
     """
+    # Get multiple fallback solutions for retry logic
+    # Request field takes priority, then fall back to env var
+    use_solver = request.placement_solver or PLACEMENT_SOLVER
+    if use_solver == "roofline":
+        solver = RooflineAWSAllocation(
+            perfdb_dir="./perf_db",
+            aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
+            priority=PLACEMENT_PRIORITY,
+        )
+        all_configs = solver.process_batch_multi(request, top_k=5)
+        launch_config = all_configs[0] if all_configs else solver._fallback_config(request)
+        fallback_configs = all_configs[1:] if len(all_configs) > 1 else []
+    else:
+        # LLM-based solver (3-advisor + C-PMI)
+        openrouter_key = request.openrouter_api_key or OPENROUTER_API_KEY
+        model_tier = request.llm_advisor_tier or "free"
+        solver = AWSAllocation(
+            openrouter_key=openrouter_key,
+            perfdb_dir="./perf_db",
+            aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
+            k_nearest_model_size=5,
+            model_tier=model_tier,
+        )
+        launch_config = solver.decide(request)
+        fallback_configs = []
 
-    # launch_config = real_magic(request)
-    # print(launch_config)
+    print(f"[Placement] Using solver: {use_solver}")
+    print(f"[Placement] Primary: {launch_config.instance_type} TP={launch_config.tp_size} PP={launch_config.pp_size}")
+    if fallback_configs:
+        print(f"[Placement] Fallbacks: {len(fallback_configs)}")
 
-    # jt = app.state.job_tracker
-    # job_state = jt.build_job_state_batched(request, launch_config)
-    # jt.add(job_state)
-    # jt.update_status(launch_config.decision_id, "queued")
+    # Launch with fallback support
+    success, used_config = await sp_launch_vllm_batch_with_fallback(
+        request, launch_config, fallback_configs, solver=use_solver
+    )
 
-    aws_alloc_engine: AWSAllocation = app.state.aws_allocation
-    launch_config = aws_alloc_engine.decide(request)
-    print(launch_config)
-
-    await sp_launch_vllm_batch(request, launch_config)
+    if success:
+        return {
+            "status": "launched",
+            "job_id": used_config.decision_id,
+            "config": {
+                "instance_type": used_config.instance_type,
+                "tp_size": used_config.tp_size,
+                "pp_size": used_config.pp_size,
+            },
+            "message": f"Job submitted. Check progress at GET /job/{used_config.decision_id}",
+        }
+    else:
+        return {
+            "status": "error",
+            "job_id": launch_config.decision_id,
+            "message": "Failed to launch in all regions with all instance types",
+        }
 
 
 @app.post("/submit/online")
@@ -306,46 +424,170 @@ async def submit_online(request: OnlineServingRequest):
             }
 
 
-async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput):
-    replace_run_dict = replace_run_vllm(request, config)
+def download_output_from_s3(s3_path: str, job_dirname: str) -> Optional[str]:
+    """Download output file and metrics.csv from S3 to local filesystem."""
+    from pathlib import Path
+
+    # Use the informative job dirname for local storage
+    local_output_dir = Path(f"outputs/{job_dirname}")
+    local_output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download output.jsonl
+    filename = s3_path.split("/")[-1]
+    local_path = local_output_dir / filename
+
+    try:
+        print(f"[Download] Downloading {s3_path} to {local_path}...")
+        result = subprocess.run(
+            ["aws", "s3", "cp", s3_path, str(local_path)],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode != 0:
+            print(f"[Download] Failed to download output: {result.stderr}")
+            return None
+        print(f"[Download] Output saved: {local_path}")
+
+        # Download metrics.csv from same directory
+        s3_dir = "/".join(s3_path.split("/")[:-1])
+        metrics_s3_path = f"{s3_dir}/metrics.csv"
+        metrics_local_path = local_output_dir / "metrics.csv"
+
+        print(f"[Download] Downloading {metrics_s3_path}...")
+        metrics_result = subprocess.run(
+            ["aws", "s3", "cp", metrics_s3_path, str(metrics_local_path)],
+            capture_output=True, text=True, timeout=60
+        )
+        if metrics_result.returncode == 0:
+            print(f"[Download] Metrics saved: {metrics_local_path}")
+        else:
+            print(f"[Download] Metrics not found (may not exist yet)")
+
+        return str(local_path)
+    except Exception as e:
+        print(f"[Download] Error: {e}")
+        return None
+
+
+async def sp_launch_vllm_batch_with_fallback(
+    request: BatchedRequest,
+    primary_config: MagicOutput,
+    fallback_configs: list,
+    solver: str = "roofline",
+) -> Tuple[bool, MagicOutput]:
+    """Launch vLLM batch job with fallback to alternative instance types."""
+    all_configs = [primary_config] + fallback_configs
+
+    for i, config in enumerate(all_configs):
+        print(f"[Launch] Trying config {i+1}/{len(all_configs)}: {config.instance_type} TP={config.tp_size} PP={config.pp_size}")
+
+        try:
+            await sp_launch_vllm_batch(request, config, solver)
+            print(f"[Launch] Success with config {i+1}: {config.instance_type}")
+            return (True, config)
+
+        except Exception as e:
+            print(f"[Launch] Config {i+1} failed: {e}")
+            if i < len(all_configs) - 1:
+                print("[Launch] Trying next instance type...")
+                continue
+            else:
+                print(f"[Launch] All {len(all_configs)} configs failed")
+                return (False, primary_config)
+
+    return (False, primary_config)
+
+
+async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, solver: str = "roofline"):
+    # Generate informative job directory name
+    job_dirname = generate_job_dirname(request, solver, config.tp_size, config.pp_size)
+
+    # Pass job_dirname to template for output path
+    replace_run_dict = replace_run_vllm(request, config, job_dirname)
     run_string = update_template("templates/vllm_run", replace_run_dict)
 
-    dirname, _ = split_uri(request.input_file)
+    s3_base, _ = split_uri(request.input_file)
+    # S3 output path: s3://bucket/base/job_dirname/output.jsonl
+    s3_output_dir = f"{s3_base}/{job_dirname}"
+
+    hf_token = request.hf_token or HF_TOKEN or ""
+    num_nodes = config.pp_size * config.replicas
+
+    # Get quota-aware ordered regions
+    instance_family = get_instance_family(config.instance_type)
+    quotas = get_cached_quotas(instance_family)
+    ordered_regions = get_ordered_regions(
+        instance_type=config.instance_type,
+        num_nodes=num_nodes,
+        quotas=quotas,
+        prefer_spot=True,
+    )
+
+    # Build resources with any_of for fallback regions
+    if ordered_regions:
+        any_of_resources = []
+        for candidate in ordered_regions[:5]:
+            any_of_resources.append({
+                "region": candidate.region,
+                "instance_type": config.instance_type,
+                "use_spot": candidate.use_spot,
+                "disk_size": "300GB",
+                "ports": 8001,
+            })
+        print(f"[RegionSelector] Trying regions: {[(c.region, 'spot' if c.use_spot else 'on-demand') for c in ordered_regions[:5]]}")
+        resources_config = {"any_of": any_of_resources}
+    else:
+        resources_config = {
+            "infra": "aws",
+            "instance_type": config.instance_type,
+            "disk_size": "300GB",
+            "ports": 8001,
+        }
 
     replace_yaml = {
         "name": config.decision_id,
-        "num_nodes": config.pp_size * config.replicas,
-        "resources.instance_type": config.instance_type,
+        "num_nodes": num_nodes,
+        "resources": resources_config,
         "run": run_string,
-        "file_mounts./data.source": dirname,
+        "file_mounts./data.source": s3_base,  # Mount original dir (has input file)
+        "envs.HF_TOKEN": hf_token,
     }
     update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
 
-    task = sky.Task.from_yaml(YAML_OUTPUT)
-    result_id = sky.launch(task, cluster_name=config.decision_id, down=True)
-    job_id, handle = sky.stream_and_get(result_id, follow=True)
+    cm = get_cluster_manager()
+    cm.register(config.decision_id, config.decision_id)
 
-    # get the head IP
-    # head_ip = handle.head_ip
-    # endpoint_url = f"http://{head_ip}:8001/"
+    # Construct S3 output path for later download
+    output_s3_path = f"{s3_output_dir}/{request.output_file}"
+    print(f"[Job] Output will be saved to: {s3_output_dir}/")
 
-    # jt = get_job_tracker()
-    # jt.set_head_ip(config.decision_id, head_ip)
-    # jt.set_endpoint_url(config.decision_id, endpoint_url)
-    # jt.update_status(config.decision_id, "launching")
+    def monitor_and_download():
+        """Background thread: stream logs, then download output when done."""
+        try:
+            sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
+            print(f"[Job] {config.decision_id} completed. Downloading output...")
 
-    # threading.Thread(
-    #     target=poll_job_progress,
-    #     args=(config.decision_id, endpoint_url.rstrip("/"), request.num_lines or 1, jt),
-    #     daemon=False,
-    # ).start()
+            # Download output from S3 to local dir with same informative name
+            local_path = download_output_from_s3(output_s3_path, job_dirname)
+            if local_path:
+                print(f"[Job] Output saved to: {local_path}")
+            else:
+                print(f"[Job] Warning: Failed to download output from {output_s3_path}")
+        except Exception as e:
+            print(f"[Job] Error in monitor thread: {e}")
+        finally:
+            cm.unregister(config.decision_id)
 
-    # # sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
-    # threading.Thread(
-    #     target=sky.tail_logs,
-    #     kwargs={"cluster_name": config.decision_id, "job_id": job_id, "follow": True},
-    #     daemon=False,
-    # ).start()
+    try:
+        task = sky.Task.from_yaml(YAML_OUTPUT)
+        result_id = sky.launch(task, cluster_name=config.decision_id, down=True)
+        job_id, handle = sky.stream_and_get(result_id, follow=True)
+
+        # Stream logs in background and download when done
+        threading.Thread(target=monitor_and_download, daemon=True).start()
+
+    except Exception as e:
+        cm.unregister(config.decision_id)
+        raise Exception(f"Failed to launch cluster {config.decision_id}: {e}")
 
 
 async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutput):
@@ -420,17 +662,70 @@ def replace_run_vllm_online(request: OnlineServingRequest, config: MagicOutput):
     return replace
 
 
-def replace_run_vllm(request: BatchedRequest, config: MagicOutput):
+# Instance type to GPU name mapping
+INSTANCE_TO_GPU = {
+    # G6e instances (L40S)
+    "g6e.xlarge": "L40S", "g6e.2xlarge": "L40S", "g6e.4xlarge": "L40S",
+    "g6e.8xlarge": "L40S", "g6e.12xlarge": "L40S", "g6e.16xlarge": "L40S",
+    "g6e.24xlarge": "L40S", "g6e.48xlarge": "L40S",
+    # G6 instances (L4)
+    "g6.xlarge": "L4", "g6.2xlarge": "L4", "g6.4xlarge": "L4",
+    "g6.8xlarge": "L4", "g6.12xlarge": "L4", "g6.16xlarge": "L4",
+    "g6.24xlarge": "L4", "g6.48xlarge": "L4",
+    # G5 instances (A10G)
+    "g5.xlarge": "A10G", "g5.2xlarge": "A10G", "g5.4xlarge": "A10G",
+    "g5.8xlarge": "A10G", "g5.12xlarge": "A10G", "g5.16xlarge": "A10G",
+    "g5.24xlarge": "A10G", "g5.48xlarge": "A10G",
+    # P4 instances (A100)
+    "p4d.24xlarge": "A100", "p4de.24xlarge": "A100",
+    # P5 instances (H100)
+    "p5.48xlarge": "H100",
+    # P3 instances (V100)
+    "p3.2xlarge": "V100", "p3.8xlarge": "V100", "p3.16xlarge": "V100", "p3dn.24xlarge": "V100",
+}
+
+
+def replace_run_vllm(request: BatchedRequest, config: MagicOutput, job_dirname: str = "output"):
     replace = {}
 
     replace["model"] = request.model_name
     replace["tp"] = config.tp_size
     replace["pp"] = config.pp_size
 
+    # Calculate max_model_len:
+    # 1. If solver provides it (roofline), use it
+    # 2. Else if request has max_input/output_tokens, calculate from those
+    # 3. Else use "auto" (let vLLM figure it out)
+    if config.max_model_len:
+        replace["max_model_len"] = config.max_model_len
+    elif request.max_input_tokens and request.max_output_tokens:
+        # Use actual max lengths from request + 10% safety margin
+        calculated_len = int((request.max_input_tokens + request.max_output_tokens) * 1.1)
+        # Round up to nearest power of 2 for efficiency, clamp to reasonable range
+        calculated_len = max(1024, min(calculated_len, 131072))
+        replace["max_model_len"] = calculated_len
+        print(f"[Config] Calculated max_model_len={calculated_len} from max_input={request.max_input_tokens} + max_output={request.max_output_tokens}")
+    else:
+        replace["max_model_len"] = "auto"
+
     _, input_file = split_uri(request.input_file)
     output = request.output_file
     replace["input_file"] = "/data/" + input_file
-    replace["output_file"] = "/data/" + output
+    # Output goes to informative subdirectory: /data/{job_dirname}/output.jsonl
+    replace["output_file"] = f"/data/{job_dirname}/{output}"
+
+    # Infrastructure configuration for metrics tracking
+    replace["cloud"] = "aws"  # Currently only AWS supported
+    replace["instance_type"] = config.instance_type
+    replace["gpu_name"] = INSTANCE_TO_GPU.get(config.instance_type, "unknown")
+    replace["engine"] = request.engine or "vllm"
+    replace["quantization"] = request.quantization_bits or "none"
+
+    # Get vLLM-specific configs
+    vllm_cfg = request.vllm_specific_config
+    replace["max_num_seqs"] = vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 32
+    replace["dtype"] = "auto"  # vLLM auto-detects based on model
+    replace["kv_cache_dtype"] = vllm_cfg.kv_cache_dtype if vllm_cfg and vllm_cfg.kv_cache_dtype else "auto"
 
     if (
         request.vllm_specific_config is not None

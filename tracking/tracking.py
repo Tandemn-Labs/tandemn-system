@@ -140,3 +140,4 @@ class JobRecord:
     created_at: float = field(default_factory=time.time)
     last_updated_at: float = field(default_factory=time.time)
     head_ip: Optional[str] = None
+    output_s3_path: Optional[str] = None  # S3 path for output file download

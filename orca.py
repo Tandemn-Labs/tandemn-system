@@ -118,10 +118,15 @@ def find_best_perf_match_based_on_input_output_length(df, job_avg_input, job_avg
     )
     return df
 
-def get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed):
+def get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed, prefer_single_instance=False):
     """
     Given the GPU base, (example L40s), and the GPUs needed (eg 12, based on TP=4, PP=3),
     returns the vCPU Count for that given Instance Type (g4dn.12xlarge)
+
+    If prefer_single_instance=True, prioritize instances where num_inst=1.
+    This is important for TP>1 because tensor parallelism requires high-bandwidth
+    intra-node communication (NVLink/PCIe). PP can work inter-node since it only
+    passes activations between pipeline stages.
     """
     instances = quota_df[quota_df["gpu_base"] == gpu_base].copy()
     if instances.empty:
@@ -129,14 +134,16 @@ def get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed):
     packings = []
     for _, inst in instances.iterrows():
         gpu_per = inst["gpu_count"]
-        # if gpu_per > gpus_needed:
-        #     continue
-        
+
         num_inst = math.ceil(gpus_needed / gpu_per)
         vcpu_needed = int(num_inst * inst["vCPU"])
         packings.append((vcpu_needed, inst["Instance_Type"], num_inst))
-    
-    packings.sort(key=lambda x: x[0])
+
+    if prefer_single_instance:
+        # Sort by: (1) prefer single instance, (2) then by vCPU cost
+        packings.sort(key=lambda x: (x[2] > 1, x[0]))
+    else:
+        packings.sort(key=lambda x: x[0])
     return packings
 
 def enumerate_candidates(perf_file, quota_df, region, market, avg_input_tokens, avg_output_tokens, num_lines,
@@ -156,7 +163,7 @@ def enumerate_candidates(perf_file, quota_df, region, market, avg_input_tokens, 
     
     for tp in [1, 2, 4, 8]:
         for pp in [1, 2, 3, 4]:
-            # select the closest match with respect to 
+            # select the closest match with respect to
             hit = df[(df["tp"] == tp) & (df["pp"] == pp)]
 
             if hit.empty:
@@ -211,7 +218,12 @@ def enumerate_candidates(perf_file, quota_df, region, market, avg_input_tokens, 
                 gpus_needed = replicas * tp * pp
                 
                 # Packings sorted by vCPU (cheapest first)
-                packings = get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed)
+                # For TP>1, prefer single-instance (TP requires high-bandwidth intra-node comm)
+                # PP can work inter-node since it only passes activations between stages
+                packings = get_vcpu_count_from_gpu(
+                    quota_df, gpu_base, gpus_needed,
+                    prefer_single_instance=(tp > 1)
+                )
                 
                 found_any = False
                 for vcpu, inst_type, num_inst in packings:

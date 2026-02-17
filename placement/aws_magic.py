@@ -41,18 +41,33 @@ class AWSPlacementCandidate(BaseModel):
 class AWSAllocation(VPCMagic):
     """Implementation of VPCMagic for AWS"""
 
+    # LLM advisor model configurations
+    ADVISOR_MODELS = {
+        "free": {
+            "advisor1": ("google/gemini-2.0-flash-001", "GeminiAdvisor"),
+            "advisor2": ("deepseek/deepseek-r1", "DeepSeekR1Advisor"),
+        },
+        "paid": {
+            "advisor1": ("anthropic/claude-3.5-sonnet", "ClaudeAdvisor"),
+            "advisor2": ("deepseek/deepseek-chat", "DeepSeekAdvisor"),
+        },
+    }
+
     def __init__(
         self,
         openrouter_key,
         perfdb_dir="./perfdb",
         aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
         k_nearest_model_size=1,
+        model_tier="free",  # "free" or "paid"
     ):
         self.perfdb_dir = perfdb_dir
         self.aws_quota_csv = aws_quota_csv
         self.quota_df = load_aws_quota_csv(self.aws_quota_csv)
         self.k_nearest_model_size = k_nearest_model_size
         self.openrouter_key = openrouter_key
+        self.model_tier = model_tier if model_tier in self.ADVISOR_MODELS else "free"
+        print(f"[AWSAllocation] Using {self.model_tier} tier models")
 
     def decide(
         self, request: Union[BatchedRequest, OnlineServingRequest]
@@ -117,35 +132,38 @@ class AWSAllocation(VPCMagic):
         )
         plans.append(("Math", math_cfg))
 
-        # [Evaluate candidate]: LLM (Mimo)
-        mimo_cfg = AWSAllocation.llm_choose_config_from_candidates(
+        # [Evaluate candidate]: LLM Advisor 1
+        models = self.ADVISOR_MODELS[self.model_tier]
+        model1_id, advisor1_name = models["advisor1"]
+        advisor1_cfg = AWSAllocation.llm_choose_config_from_candidates(
             candidates=all_candidates,
-            model_id="qwen/qwen3-next-80b-a3b-instruct:free",
+            model_id=model1_id,
             openrouter_api_key=self.openrouter_key,
-            advisor_name="XiaomiMimoAdvisor",
+            advisor_name=advisor1_name,
             req=req,
             top_k=20,
         )
-        if mimo_cfg:
+        if advisor1_cfg:
             print(
-                f"[XiaomiMimo Advisor] Picks: tp={mimo_cfg.tp} pp={mimo_cfg.pp} r={mimo_cfg.replicas}"
+                f"[{advisor1_name}] Picks: tp={advisor1_cfg.tp} pp={advisor1_cfg.pp} r={advisor1_cfg.replicas}"
             )
-            plans.append(("XiaomiMimo", mimo_cfg))
+            plans.append((advisor1_name.replace("Advisor", ""), advisor1_cfg))
 
-        # [Evaluate candidate]: LLM (Devstral)
-        devstral_cfg = AWSAllocation.llm_choose_config_from_candidates(
+        # [Evaluate candidate]: LLM Advisor 2
+        model2_id, advisor2_name = models["advisor2"]
+        advisor2_cfg = AWSAllocation.llm_choose_config_from_candidates(
             candidates=all_candidates,
-            model_id="meta-llama/llama-3.3-70b-instruct:free",
+            model_id=model2_id,
             openrouter_api_key=self.openrouter_key,
-            advisor_name="DevstralAdvisor",
+            advisor_name=advisor2_name,
             req=req,
             top_k=20,
         )
-        if devstral_cfg:
+        if advisor2_cfg:
             print(
-                f"[Devstral Advisor] Picks: tp={devstral_cfg.tp} pp={devstral_cfg.pp} r={devstral_cfg.replicas}"
+                f"[{advisor2_name}] Picks: tp={advisor2_cfg.tp} pp={advisor2_cfg.pp} r={advisor2_cfg.replicas}"
             )
-            plans.append(("Devstral", devstral_cfg))
+            plans.append((advisor2_name.replace("Advisor", ""), advisor2_cfg))
 
         def load_c_pmi_model(model_name: str = "Qwen/Qwen3-0.6B"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -284,8 +302,10 @@ class AWSAllocation(VPCMagic):
                     gpus_needed = replicas * tp * pp
 
                     # Packings sorted by vCPU (cheapest first)
+                    # For TP>1, prefer single-instance (TP requires high-bandwidth intra-node comm)
+                    # PP can work inter-node since it only passes activations between stages
                     packings = get_vcpu_count_from_gpu(
-                        quota_df, gpu_base, tp, pp, replicas
+                        quota_df, gpu_base, gpus_needed, prefer_single_instance=(tp > 1)
                     )
 
                     for vcpu, inst_type, num_inst in packings:
@@ -379,21 +399,27 @@ class AWSAllocation(VPCMagic):
         prompt = "".join(prompt_lines)
 
         # OpenRouter client setup and calling
-        client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=openrouter_api_key,
-        )
+        if not openrouter_api_key:
+            print(f"[{advisor_name}] ERROR: No OpenRouter API key provided")
+            return None
 
-        # TODO: Temp since I don't want to run OpenRouter calls
-        # response = client.chat.completions.create(
-        #     model=model_id,
-        #     messages=[{"role": "user", "content": prompt}],
-        #     max_tokens=64,
-        #     temperature=temperature,
-        # )
-        # text = response.choices[0].message.content.strip()
-        text = ""
-        print(advisor_name, f": {text}")
+        try:
+            client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=openrouter_api_key,
+            )
+            response = client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=64,
+                temperature=temperature,
+            )
+            content = response.choices[0].message.content
+            text = content.strip() if content else ""
+            print(f"[{advisor_name}] Response: {repr(text)}")
+        except Exception as e:
+            print(f"[{advisor_name}] API Error: {e}")
+            return None
 
         chosen_label = None
         for label, _ in labeled:

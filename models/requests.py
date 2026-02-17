@@ -13,6 +13,8 @@ class BatchedRequest(BaseModel):
     num_lines: int # number of prompt lines in the file
     avg_input_tokens: int # estimated per line
     avg_output_tokens: int # estimated per line
+    max_input_tokens: Optional[int] = None  # max input length in file (for max_model_len calculation)
+    max_output_tokens: Optional[int] = None  # max expected output length
     # Get some parameters directly from the JobConfig
     description : str
     task_type : str
@@ -27,8 +29,12 @@ class BatchedRequest(BaseModel):
     placement : str
     # Placement solver selection: "roofline" (deterministic) or "llm" (3-advisor + C-PMI)
     placement_solver: Optional[Literal["roofline", "llm"]] = None
+    # LLM advisor model tier: "free" (Gemini, DeepSeek-R1) or "paid" (Claude, DeepSeek-chat)
+    llm_advisor_tier: Optional[Literal["free", "paid"]] = "free"
     # HuggingFace token for gated models (Llama, etc.)
     hf_token: Optional[str] = None
+    # OpenRouter API key for LLM-based placement solver
+    openrouter_api_key: Optional[str] = None
     # Only change the ModelSpecificCofig
     # right now its just vllm, but we can interject the parameters here
     vllm_specific_config: Optional[vLLMSpecificConfig] = None
