@@ -25,6 +25,78 @@ import os
 load_dotenv()
 ##### Global variables
 YAML_OUTPUT = "temp/output.yaml"
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count using chars/4 approximation."""
+    return max(1, len(text) // 4)
+
+
+def extract_prompt_text(entry: dict) -> str:
+    """Extract prompt text from OpenAI batch format entry."""
+    try:
+        messages = entry.get("body", {}).get("messages", [])
+        # Concatenate all message contents
+        return " ".join(msg.get("content", "") for msg in messages)
+    except (KeyError, TypeError):
+        return ""
+
+
+def parse_input_file_stats(input_file: str) -> tuple[int, int, int]:
+    """
+    Parse input file to extract real stats.
+
+    Args:
+        input_file: S3 URI (s3://bucket/path) or local path
+
+    Returns:
+        (num_lines, avg_input_tokens, max_input_tokens)
+    """
+    import json
+    import tempfile
+
+    # Download from S3 if needed
+    if input_file.startswith("s3://"):
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as tmp:
+            tmp_path = tmp.name
+        result = subprocess.run(
+            ["aws", "s3", "cp", input_file, tmp_path],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to download {input_file}: {result.stderr}")
+        file_path = tmp_path
+    else:
+        file_path = input_file
+
+    # Parse JSONL and calculate stats
+    token_counts = []
+    try:
+        with open(file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                prompt_text = extract_prompt_text(entry)
+                tokens = estimate_tokens(prompt_text)
+                token_counts.append(tokens)
+    finally:
+        # Clean up temp file if we created one
+        if input_file.startswith("s3://"):
+            import os
+            os.unlink(tmp_path)
+
+    if not token_counts:
+        raise ValueError(f"No valid entries found in {input_file}")
+
+    num_lines = len(token_counts)
+    avg_input_tokens = sum(token_counts) // num_lines
+    max_input_tokens = max(token_counts)
+
+    print(f"[InputParser] Parsed {num_lines} lines: avg_input={avg_input_tokens}, max_input={max_input_tokens}")
+
+    return num_lines, avg_input_tokens, max_input_tokens
 OPENROUTER_API_KEY = os.environ.get("TD_OPENROUTER_KEY")
 
 # Solver selection: "roofline" (deterministic) or "llm" (3-advisor + C-PMI)
@@ -56,7 +128,7 @@ def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_
     family = re.split(r'[\d\-_.]', model_short)[0][:6]  # max 6 chars
     model_short = f"{family}{size}" if size else family[:10]
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Format: model/workload/{solver}-tp{T}-pp{P}-timestamp_{ts}
     dirname = f"{model_short}/numreq_{request.num_lines}-avginputlen_{request.avg_input_tokens}-avgoutputlen_{request.avg_output_tokens}/{solver}-tp{tp_size}-pp{pp_size}-timestamp_{timestamp}"
@@ -347,6 +419,18 @@ async def submit_batch(request: BatchedRequest):
     - "roofline": Deterministic roofline-based solver (default)
     - "llm": LLM-based 3-advisor + C-PMI solver
     """
+    # Parse input file to get real stats (num_lines, avg_input_tokens, max_input_tokens)
+    num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(request.input_file)
+
+    # Update request with parsed values (these override any user-provided values)
+    request = request.model_copy(update={
+        "num_lines": num_lines,
+        "avg_input_tokens": avg_input_tokens,
+        "max_input_tokens": max_input_tokens,
+    })
+
+    print(f"[InputStats] num_lines={num_lines}, avg_input={avg_input_tokens}, max_input={max_input_tokens}")
+
     # Get multiple fallback solutions for retry logic
     # Request field takes priority, then fall back to env var
     use_solver = request.placement_solver or PLACEMENT_SOLVER
@@ -391,6 +475,11 @@ async def submit_batch(request: BatchedRequest):
                 "instance_type": used_config.instance_type,
                 "tp_size": used_config.tp_size,
                 "pp_size": used_config.pp_size,
+            },
+            "input_stats": {
+                "num_lines": num_lines,
+                "avg_input_tokens": avg_input_tokens,
+                "max_input_tokens": max_input_tokens,
             },
             "message": f"Job submitted. Check progress at GET /job/{used_config.decision_id}",
         }

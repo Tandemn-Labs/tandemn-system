@@ -10,10 +10,12 @@ class BatchedRequest(BaseModel):
     user_id: str
     input_file: str  # S3/local path to the file
     output_file: str  # local path to where the output will be saved
-    num_lines: int # number of prompt lines in the file
-    avg_input_tokens: int # estimated per line
-    avg_output_tokens: int # estimated per line
-    max_input_tokens: Optional[int] = None  # max input length in file (for max_model_len calculation)
+    # Input stats - extracted from input_file by server, but can be overridden
+    num_lines: Optional[int] = None  # number of prompt lines in the file (parsed from input_file)
+    avg_input_tokens: Optional[int] = None  # avg per line (parsed from input_file)
+    max_input_tokens: Optional[int] = None  # max input length (parsed from input_file)
+    # Output stats - must be provided by user (not in input file)
+    avg_output_tokens: int  # expected avg output per line
     max_output_tokens: Optional[int] = None  # max expected output length
     # Get some parameters directly from the JobConfig
     description : str
