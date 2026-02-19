@@ -200,6 +200,8 @@ KNOWN_ARCHITECTURES: Dict[str, ModelArchitecture] = {
     ),
 
     # ============ Qwen Family ============
+    # Note: Qwen2.5 models have max_position_embeddings=32768 (32K context)
+    # Some variants may support longer via RoPE scaling but base is 32K
     "qwen2-72b": ModelArchitecture(
         model_id="qwen2-72b",
         num_hidden_layers=80,
@@ -208,7 +210,7 @@ KNOWN_ARCHITECTURES: Dict[str, ModelArchitecture] = {
         num_attention_heads=64,
         num_kv_heads=8,
         vocab_size=152064,
-        max_position_embeddings=131072,
+        max_position_embeddings=32768,  # Qwen2.5-72B actual limit
     ),
     "qwen2-7b": ModelArchitecture(
         model_id="qwen2-7b",
@@ -218,7 +220,7 @@ KNOWN_ARCHITECTURES: Dict[str, ModelArchitecture] = {
         num_attention_heads=28,
         num_kv_heads=4,
         vocab_size=152064,
-        max_position_embeddings=131072,
+        max_position_embeddings=32768,  # Qwen2.5-7B actual limit
     ),
 
     # ============ Mistral Family ============

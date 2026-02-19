@@ -15,6 +15,10 @@ envs:
 envs:
   HF_TOKEN: null  # Will be replaced at runtime
   VLLM_USE_V1: "0"  # Disable v1 engine - has PP bugs and transformers compatibility issues
+  # CUDA initialization settings for A100/multi-GPU stability
+  CUDA_DEVICE_ORDER: "PCI_BUS_ID"  # Consistent GPU ordering
+  NCCL_ASYNC_ERROR_HANDLING: "1"  # Better error handling for multi-GPU
+  CUDA_LAUNCH_BLOCKING: "0"  # Keep async (1 for debugging only)
 
 file_mounts:
   /data:

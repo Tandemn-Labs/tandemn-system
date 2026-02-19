@@ -424,7 +424,7 @@ class PlacementSolverAdapter:
             tp_degree = homo_cfg.get("tp_degree", 1)
             pp_stages = homo_cfg.get("pp_stages", 1)
             try:
-                max_context = calculate_max_supported_context(
+                gpu_max_context = calculate_max_supported_context(
                     gpu_model=gpu_model,
                     num_layers=solver.config.num_decoder_layers,
                     layer_weight_gb=solver.config.layer_weight_memory_gb,
@@ -436,7 +436,10 @@ class PlacementSolverAdapter:
                     batch_size=input.batch_size,
                     bytes_per_element=solver.config.bytes_per_element,
                 )
-                logger.info(f"[SolverAdapter] Max supported context for {gpu_model} with TP={tp_degree}, PP={pp_stages}: {max_context}")
+                # Cap by model's max_position_embeddings (what the model actually supports)
+                model_max_context = solver.config.max_position_embeddings
+                max_context = min(gpu_max_context, model_max_context)
+                logger.info(f"[SolverAdapter] Max context: GPU supports {gpu_max_context}, model supports {model_max_context}, using {max_context}")
             except Exception as e:
                 logger.warning(f"[SolverAdapter] Failed to calculate max context: {e}, using default 8192")
                 max_context = 8192

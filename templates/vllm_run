@@ -4,6 +4,16 @@ source .venv/bin/activate
 # Disable vLLM v1 engine - has PP bugs and transformers compatibility issues
 export VLLM_USE_V1=0
 
+# CUDA initialization settings for multi-GPU stability (especially A100)
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export NCCL_ASYNC_ERROR_HANDLING=1
+
+# Initialize CUDA driver before spawning vLLM workers
+# This prevents "system not yet initialized" (error 802) race condition
+echo "Initializing CUDA driver..."
+nvidia-smi
+python3 -c "import torch; torch.cuda.init(); print('CUDA initialized:', torch.cuda.device_count(), 'GPUs')"
+
 # Manual Ray cluster setup (bypasses broken SkyPilot start_cluster script)
 RAY_PORT=6379
 

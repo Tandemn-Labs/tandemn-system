@@ -24,6 +24,13 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any
 
+# Initialize CUDA early to avoid "system not yet initialized" (error 802)
+# This must happen BEFORE vLLM imports spawn worker processes
+import torch
+if torch.cuda.is_available():
+    torch.cuda.init()
+    print(f"[BatchRunner] CUDA initialized early: {torch.cuda.device_count()} GPUs available")
+
 # Progress file for external monitoring
 PROGRESS_FILE = "/tmp/vllm_progress.json"
 
@@ -219,6 +226,19 @@ def main():
     # Track model loading time
     model_load_start = time.time()
 
+    # Get model's max supported context length from config
+    from transformers import AutoConfig
+    model_config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+    model_max_len = getattr(model_config, 'max_position_embeddings', None)
+    print(f"[BatchRunner] Model max_position_embeddings={model_max_len}")
+
+    # Cap max_model_len by model's supported context length
+    effective_max_model_len = args.max_model_len
+    if args.max_model_len is not None and model_max_len is not None:
+        if args.max_model_len > model_max_len:
+            print(f"[BatchRunner] WARNING: Requested max_model_len={args.max_model_len} exceeds model limit={model_max_len}, capping to {model_max_len}")
+            effective_max_model_len = model_max_len
+
     # Build engine args - only include max_model_len if explicitly set
     engine_kwargs = {
         "model": args.model,
@@ -229,9 +249,9 @@ def main():
         "trust_remote_code": True,
         "distributed_executor_backend": backend,
     }
-    if args.max_model_len is not None:
-        engine_kwargs["max_model_len"] = args.max_model_len
-        print(f"[BatchRunner] Using explicit max_model_len={args.max_model_len}")
+    if effective_max_model_len is not None:
+        engine_kwargs["max_model_len"] = effective_max_model_len
+        print(f"[BatchRunner] Using max_model_len={effective_max_model_len}")
     else:
         print("[BatchRunner] max_model_len not set, vLLM will auto-detect based on available memory")
 
@@ -253,30 +273,64 @@ def main():
     model_load_time = time.time() - model_load_start
     print(f"[BatchRunner] Model loaded in {model_load_time:.2f}s")
 
+    # Get max_model_len from engine config for prompt length validation
+    if use_async_engine:
+        max_model_len = llm.engine.model_config.max_model_len
+    else:
+        max_model_len = llm.llm_engine.model_config.max_model_len
+    print(f"[BatchRunner] max_model_len={max_model_len}")
+
     # Load input requests
     requests = load_requests(args.input)
     print(f"[BatchRunner] Loaded {len(requests)} requests from {args.input}")
 
-    # Prepare prompts and metadata
+    # Prepare prompts and metadata, filtering out prompts that are too long
     prompts = []
     request_metadata = []  # Store custom_id and sampling params per request
+    skipped_requests = []  # Track requests that were skipped due to length
 
     for req in requests:
-        custom_id = req.get("custom_id", f"req-{len(prompts)}")
+        custom_id = req.get("custom_id", f"req-{len(prompts) + len(skipped_requests)}")
         body = req.get("body", {})
         messages = body.get("messages", [])
 
+        # Extract sampling parameters from request
+        req_max_tokens = body.get("max_tokens", 256)
+        req_temperature = body.get("temperature", 0.7)
+
         # Format prompt using chat template
         prompt = format_chat_prompt(messages, tokenizer)
+
+        # Check prompt length (tokenize to count tokens)
+        prompt_tokens = tokenizer.encode(prompt)
+        prompt_len = len(prompt_tokens)
+
+        # Validate: input_len + max_output_tokens must fit within max_model_len
+        total_required = prompt_len + req_max_tokens
+        if total_required > max_model_len:
+            print(f"[BatchRunner] WARNING: Skipping request {custom_id} - "
+                  f"input({prompt_len}) + output({req_max_tokens}) = {total_required} > max_model_len({max_model_len})")
+            skipped_requests.append({
+                "custom_id": custom_id,
+                "prompt_len": prompt_len,
+                "max_tokens": req_max_tokens,
+                "total_required": total_required,
+                "max_model_len": max_model_len,
+                "error": f"input_len({prompt_len}) + max_tokens({req_max_tokens}) = {total_required} exceeds max_model_len({max_model_len})"
+            })
+            continue
+
         prompts.append(prompt)
 
-        # Extract sampling parameters
+        # Store sampling parameters per request
         request_metadata.append({
             "custom_id": custom_id,
-            "max_tokens": body.get("max_tokens", 256),
-            "temperature": body.get("temperature", 0.7),
+            "max_tokens": req_max_tokens,
+            "temperature": req_temperature,
             "model": body.get("model", args.model),
         })
+
+    print(f"[BatchRunner] {len(prompts)} prompts to process, {len(skipped_requests)} skipped (too long)")
 
     # Group requests by sampling params for efficient batching
     # For simplicity, use the most common params for all (vLLM handles this efficiently)
@@ -293,15 +347,21 @@ def main():
     write_progress(0, len(prompts), "running")
     generation_start_time = time.time()
 
-    if use_async_engine:
+    if len(prompts) == 0:
+        print("[BatchRunner] WARNING: No prompts to process (all skipped due to length)")
+        outputs = []
+        generation_time = 0
+    elif use_async_engine:
         # Use async generation for pipeline parallelism
         outputs = asyncio.run(run_async_generation(llm, prompts, sampling_params))
+        generation_time = time.time() - generation_start_time
+        print(f"[BatchRunner] Generation complete in {generation_time:.2f}s ({len(prompts)/generation_time:.1f} req/s)")
     else:
         # Use sync generation for TP-only
         outputs = llm.generate(prompts, sampling_params)
+        generation_time = time.time() - generation_start_time
+        print(f"[BatchRunner] Generation complete in {generation_time:.2f}s ({len(prompts)/generation_time:.1f} req/s)")
 
-    generation_time = time.time() - generation_start_time
-    print(f"[BatchRunner] Generation complete in {generation_time:.2f}s ({len(prompts)/generation_time:.1f} req/s)")
     write_progress(len(prompts), len(prompts), "completed")
 
     # Format results and collect token statistics
@@ -355,6 +415,27 @@ def main():
         }
         results.append(result)
 
+    # Add skipped requests as errors
+    for skipped in skipped_requests:
+        result = {
+            "id": f"vllm-skipped-{skipped['custom_id']}",
+            "custom_id": skipped["custom_id"],
+            "response": {
+                "status_code": 400,
+                "request_id": f"vllm-skipped-{skipped['custom_id']}",
+                "body": None
+            },
+            "error": {
+                "type": "context_length_exceeded",
+                "message": skipped["error"],
+                "input_tokens": skipped["prompt_len"],
+                "max_output_tokens": skipped["max_tokens"],
+                "total_required": skipped["total_required"],
+                "max_model_len": skipped["max_model_len"]
+            }
+        }
+        results.append(result)
+
     # Write output (create directory if needed)
     output_dir = os.path.dirname(args.output)
     if output_dir:
@@ -363,7 +444,7 @@ def main():
         for result in results:
             f.write(json.dumps(result) + "\n")
 
-    print(f"[BatchRunner] Wrote {len(results)} results to {args.output}")
+    print(f"[BatchRunner] Wrote {len(results)} results to {args.output} ({len(skipped_requests)} skipped)")
 
     # =========================================================================
     # Performance tracking - calculate and save metrics
@@ -387,18 +468,20 @@ def main():
         "generation_time_sec": generation_time,
 
         # === WORKLOAD METRICS ===
-        "num_requests": len(results),
-        # Input token statistics
+        "num_requests_total": len(results),
+        "num_requests_completed": len(results) - len(skipped_requests),
+        "num_requests_skipped": len(skipped_requests),
+        # Input token statistics (for completed requests only)
         "total_input_tokens": total_prompt_tokens,
-        "avg_input_tokens": total_prompt_tokens / len(results) if results else 0,
+        "avg_input_tokens": total_prompt_tokens / len(prompt_token_counts) if prompt_token_counts else 0,
         "p50_input_tokens": prompt_percentiles["p50"],
         "p90_input_tokens": prompt_percentiles["p90"],
         "p99_input_tokens": prompt_percentiles["p99"],
         "min_input_tokens": min(prompt_token_counts) if prompt_token_counts else 0,
         "max_input_tokens": max(prompt_token_counts) if prompt_token_counts else 0,
-        # Output token statistics
+        # Output token statistics (for completed requests only)
         "total_output_tokens": total_completion_tokens,
-        "avg_output_tokens": total_completion_tokens / len(results) if results else 0,
+        "avg_output_tokens": total_completion_tokens / len(completion_token_counts) if completion_token_counts else 0,
         "p50_output_tokens": completion_percentiles["p50"],
         "p90_output_tokens": completion_percentiles["p90"],
         "p99_output_tokens": completion_percentiles["p99"],
@@ -408,7 +491,7 @@ def main():
         "total_tokens": total_tokens,
 
         # === THROUGHPUT METRICS ===
-        "throughput_requests_per_sec": len(results) / generation_time if generation_time > 0 else 0,
+        "throughput_requests_per_sec": len(prompt_token_counts) / generation_time if generation_time > 0 else 0,
         "throughput_tokens_per_sec": total_tokens / generation_time if generation_time > 0 else 0,
         "throughput_output_tokens_per_sec": total_completion_tokens / generation_time if generation_time > 0 else 0,
 
