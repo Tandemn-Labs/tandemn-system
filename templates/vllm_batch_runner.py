@@ -24,12 +24,8 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any
 
-# Initialize CUDA early to avoid "system not yet initialized" (error 802)
-# This must happen BEFORE vLLM imports spawn worker processes
-import torch
-if torch.cuda.is_available():
-    torch.cuda.init()
-    print(f"[BatchRunner] CUDA initialized early: {torch.cuda.device_count()} GPUs available")
+# Note: CUDA is initialized by nvidia-smi in vllm_run script
+# Let vLLM handle torch CUDA initialization to avoid conflicts
 
 # Progress file for external monitoring
 PROGRESS_FILE = "/tmp/vllm_progress.json"
@@ -218,7 +214,11 @@ def main():
         print("[BatchRunner] PP>1 detected, using AsyncLLMEngine")
 
     # Determine executor backend
-    if args.pipeline_parallel_size > 1:
+    # Use Ray when any multi-GPU parallelism is needed.
+    # The "mp" (fork) backend crashes on vLLM 0.7.x because CUDA gets
+    # initialized during `from vllm import LLM` (platform detection),
+    # and forked children cannot re-initialize CUDA.
+    if args.pipeline_parallel_size > 1 or args.tensor_parallel_size > 1:
         backend = "ray"
     else:
         backend = "mp"

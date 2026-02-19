@@ -590,16 +590,20 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
     # Generate informative job directory name
     job_dirname = generate_job_dirname(request, solver, config.tp_size, config.pp_size)
 
-    # Pass job_dirname to template for output path
-    replace_run_dict = replace_run_vllm(request, config, job_dirname)
-    run_string = update_template("templates/vllm_run", replace_run_dict)
-
     s3_base, _ = split_uri(request.input_file)
     # S3 output path: s3://bucket/base/job_dirname/output.jsonl
     s3_output_dir = f"{s3_base}/{job_dirname}"
 
     hf_token = request.hf_token or HF_TOKEN or ""
     num_nodes = config.pp_size * config.replicas
+
+    # Select per-config template or fall back to generic
+    template_path = get_vllm_config_template(
+        model_name=request.model_name,
+        instance_type=config.instance_type,
+        tp=config.tp_size,
+        pp=config.pp_size,
+    )
 
     # Get quota-aware ordered regions
     instance_family = get_instance_family(config.instance_type)
@@ -632,15 +636,52 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
             "ports": 8001,
         }
 
-    replace_yaml = {
-        "name": config.decision_id,
-        "num_nodes": num_nodes,
-        "resources": resources_config,
-        "run": run_string,
-        "file_mounts./data.source": s3_base,  # Mount original dir (has input file)
-        "envs.HF_TOKEN": hf_token,
-    }
-    update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
+    # For per-config templates, we only need to replace minimal fields
+    # The template already has model, tp, pp, max_model_len baked in
+    if "vllm_configs" in template_path:
+        # Per-config template - minimal substitution
+        _, input_file = split_uri(request.input_file)
+        output_file = request.output_file
+        vllm_cfg = request.vllm_specific_config
+        max_num_seqs = vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 32
+
+        # Read template and substitute only dynamic fields
+        from pathlib import Path
+        template_content = Path(template_path).read_text()
+        template_content = template_content.replace("{input_file}", f"/data/{input_file}")
+        template_content = template_content.replace("{output_file}", f"/data/{job_dirname}/{output_file}")
+        template_content = template_content.replace("{max_num_seqs}", str(max_num_seqs))
+
+        # Write to temp file and parse as yaml
+        import yaml
+        yaml_data = yaml.safe_load(template_content)
+
+        # Update dynamic fields
+        yaml_data["name"] = config.decision_id
+        yaml_data["num_nodes"] = num_nodes
+        yaml_data["resources"] = resources_config
+        yaml_data["file_mounts"]["/data"]["source"] = s3_base
+        yaml_data["envs"]["HF_TOKEN"] = hf_token
+
+        # Write final yaml
+        from pathlib import Path
+        Path(YAML_OUTPUT).parent.mkdir(parents=True, exist_ok=True)
+        with open(YAML_OUTPUT, "w") as f:
+            yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+    else:
+        # Generic template - use old substitution method
+        replace_run_dict = replace_run_vllm(request, config, job_dirname)
+        run_string = update_template("templates/vllm_run", replace_run_dict)
+
+        replace_yaml = {
+            "name": config.decision_id,
+            "num_nodes": num_nodes,
+            "resources": resources_config,
+            "run": run_string,
+            "file_mounts./data.source": s3_base,
+            "envs.HF_TOKEN": hf_token,
+        }
+        update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
 
     cm = get_cluster_manager()
     cm.register(config.decision_id, config.decision_id)
@@ -772,6 +813,40 @@ INSTANCE_TO_GPU = {
     # P3 instances (V100)
     "p3.2xlarge": "V100", "p3.8xlarge": "V100", "p3.16xlarge": "V100", "p3dn.24xlarge": "V100",
 }
+
+
+def get_vllm_config_template(model_name: str, instance_type: str, tp: int, pp: int) -> str:
+    """
+    Get the per-config vLLM template path if it exists.
+
+    Template naming: vllm_{model}-{gpu}-tp{tp}-pp{pp}.yaml
+    Example: vllm_qwen2.5-72b-A100-tp8-pp1.yaml
+
+    Returns path to specific template if exists, otherwise returns generic template.
+    """
+    import os
+
+    # Normalize model name (e.g., "Qwen/Qwen2.5-72B-Instruct" -> "qwen2.5-72b")
+    model_short = model_name.lower()
+    if "/" in model_short:
+        model_short = model_short.split("/")[-1]
+    # Remove common suffixes
+    for suffix in ["-instruct", "-chat", "-base", "-hf"]:
+        model_short = model_short.replace(suffix, "")
+
+    # Get GPU name from instance type
+    gpu_name = INSTANCE_TO_GPU.get(instance_type, "unknown")
+
+    # Build template filename
+    template_name = f"vllm_{model_short}-{gpu_name}-tp{tp}-pp{pp}.yaml"
+    template_path = f"templates/vllm_configs/{template_name}"
+
+    if os.path.exists(template_path):
+        print(f"[Template] Using per-config template: {template_path}")
+        return template_path
+    else:
+        print(f"[Template] No specific template for {template_name}, using generic")
+        return "templates/vllm.yaml"
 
 
 def replace_run_vllm(request: BatchedRequest, config: MagicOutput, job_dirname: str = "output"):

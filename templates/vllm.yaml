@@ -40,24 +40,100 @@ setup: |
   # Pre-install Ray to work around SkyPilot bug (ray[default]==added parse error)
   uv pip install "ray[default]>=2.48.0"
 
-  # Install vLLM (uses transformers 5.x which removed all_special_tokens_extended)
-  uv pip install "vllm==0.10.0"
+  # ========================================================================
+  # CRITICAL: GPU-specific vLLM version selection
+  # ========================================================================
+  # A100 (p4d/p4de) has driver 535.x + CUDA 12.2 compatibility issues with vLLM 0.10.0
+  # L40S and other GPUs work fine with vLLM 0.10.0
+  #
+  # Detection by GPU type:
+  # - A100: Use vLLM 0.7.3 + PyTorch 2.5.1+cu121 (fixes CUDA 802 error)
+  # - Other GPUs: Use vLLM 0.10.0 (default)
+  # ========================================================================
+  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+  echo "Detected GPU: $GPU_NAME"
 
-  # Fix vLLM DisabledTqdm bug: duplicate 'disable' kwarg with newer huggingface_hub
-  # Patch the vLLM code directly to pop 'disable' from kwargs before passing to super().__init__
+  if [[ "$GPU_NAME" == *"A100"* ]]; then
+    echo "A100 detected: Using PyTorch cu121 + vLLM 0.7.3 for compatibility"
+
+    # Install PyTorch with CUDA 12.1 (works with A100 driver 535.x)
+    uv pip install --index-url https://download.pytorch.org/whl/cu121 \
+      "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1"
+
+    # Install vLLM 0.7.3 (compatible with torch 2.5.x)
+    uv pip install --index-strategy unsafe-best-match \
+      --extra-index-url https://download.pytorch.org/whl/cu121 "vllm==0.7.3"
+  else
+    echo "GPU $GPU_NAME: Using vLLM 0.10.0"
+    uv pip install "vllm==0.10.0"
+  fi
+
+  # Verify PyTorch CUDA
+  python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Available:', torch.cuda.is_available())"
+
   SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-  WEIGHT_UTILS="$SITE_PACKAGES/vllm/model_executor/model_loader/weight_utils.py"
-  sed -i 's/super().__init__(\*args, \*\*kwargs, disable=True)/kwargs.pop("disable", None); super().__init__(*args, **kwargs, disable=True)/' "$WEIGHT_UTILS"
-  echo "Patched vLLM DisabledTqdm"
+  VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
+  echo "Installed vLLM version: $VLLM_VERSION"
 
-  # Install the compatibility patch for Qwen tokenizers
-  # vLLM 0.10.0 uses all_special_tokens_extended which was removed in transformers 4.47+
+  # ========================================================================
+  # Apply patches - BOTH vLLM 0.7.x and 0.10.x need patches!
+  # Both versions install transformers 5.x which removed all_special_tokens_extended
+  # ========================================================================
+  echo "Applying vLLM patches for version $VLLM_VERSION..."
+
+  # Patch 1: Fix DisabledTqdm bug (only affects vLLM 0.10.x)
+  if [[ "$VLLM_VERSION" == 0.10.* ]]; then
+    WEIGHT_UTILS="$SITE_PACKAGES/vllm/model_executor/model_loader/weight_utils.py"
+    sed -i 's/super().__init__(\*args, \*\*kwargs, disable=True)/kwargs.pop("disable", None); super().__init__(*args, **kwargs, disable=True)/' "$WEIGHT_UTILS"
+    echo "Patched vLLM DisabledTqdm"
+  fi
+
+  # Patch 2: Install compatibility patch for all_special_tokens_extended (ALL versions need this)
+  # vLLM uses all_special_tokens_extended which was removed in transformers 4.47+
   cp ~/vllm_compat_patch.py "$SITE_PACKAGES/vllm_compat_patch.py"
   echo "import vllm_compat_patch" > "$SITE_PACKAGES/sitecustomize.py"
-  echo "Installed vLLM compatibility patch"
+  echo "Installed vLLM compatibility patch for transformers 5.x"
 
-  # Verify the patch works
+  # Verify vLLM works
   python3 -c "from vllm import LLM; print('vLLM import successful')"
+
+  # ========================================================================
+  # NVSwitch/NVLink verification for multi-GPU NVSwitch instances
+  # (p4d, p4de, p5 families — HGX A100/H100 with NVSwitch)
+  # ========================================================================
+  if systemctl list-units --type=service --all | grep -q nvidia-fabricmanager; then
+    echo "=== NVSwitch Instance Detected ==="
+
+    # 1. Fabric Manager must be running
+    if systemctl is-active --quiet nvidia-fabricmanager; then
+      echo "[NVSwitch] Fabric Manager: active"
+    else
+      echo "[NVSwitch] ERROR: Fabric Manager is NOT running. NVLink will not work."
+      echo "[NVSwitch] Attempting to start Fabric Manager..."
+      sudo systemctl start nvidia-fabricmanager
+      sleep 2
+      if systemctl is-active --quiet nvidia-fabricmanager; then
+        echo "[NVSwitch] Fabric Manager started successfully"
+      else
+        echo "[NVSwitch] FATAL: Fabric Manager failed to start. Check driver/fabricmanager version match."
+        systemctl status nvidia-fabricmanager --no-pager
+        exit 1
+      fi
+    fi
+
+    # 2. NVSwitch topology visible
+    echo "[NVSwitch] GPU topology:"
+    nvidia-smi topo -m
+    # Should show "NV12" between all GPU pairs (NVLink through NVSwitch)
+    # If you see "PHB" or "SYS" instead, Fabric Manager failed silently
+
+    # 3. NVLink active on all GPUs
+    echo "[NVSwitch] NVLink status:"
+    nvidia-smi nvlink -s
+    # Should show active links on all 8 GPUs
+  else
+    echo "=== Non-NVSwitch instance (PCIe GPUs) — skipping Fabric Manager check ==="
+  fi
 
 run: |
   set -euxo pipefail

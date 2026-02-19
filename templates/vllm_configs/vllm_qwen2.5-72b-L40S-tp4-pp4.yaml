@@ -1,0 +1,95 @@
+name: default-cluster
+
+num_nodes: 1
+
+resources:
+  cloud: aws
+  accelerators: L40S:8
+  disk_size: 300GB
+  ports: 8001
+
+envs:
+  HF_TOKEN: null
+  VLLM_USE_V1: "0"
+
+file_mounts:
+  /data:
+    mode: MOUNT
+    source: s3://tandemn_orca/test
+  ~/batch_runner.py: ./templates/vllm_batch_runner.py
+  ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py
+
+setup: |
+  export PYTHONHASHSEED=0
+  set -euxo pipefail
+
+  # Diagnostics
+  echo "=== System Diagnostics ==="
+  nvidia-smi
+  echo "=========================="
+
+  python3 -m pip install -U pip
+  python3 -m pip install -U uv
+
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+
+  # Pre-install Ray
+  uv pip install "ray[default]>=2.48.0"
+
+  # ========================================================================
+  # L40S has newer drivers (550+) that support CUDA 12.4
+  # Can use vLLM 0.10.0 with default PyTorch
+  # ========================================================================
+  echo "=== Installing vLLM 0.10.0 ==="
+  uv pip install "vllm==0.10.0"
+
+  # Apply vLLM 0.10.x patches
+  SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+
+  # Fix DisabledTqdm bug
+  WEIGHT_UTILS="$SITE_PACKAGES/vllm/model_executor/model_loader/weight_utils.py"
+  sed -i 's/super().__init__(\*args, \*\*kwargs, disable=True)/kwargs.pop("disable", None); super().__init__(*args, **kwargs, disable=True)/' "$WEIGHT_UTILS"
+  echo "Patched vLLM DisabledTqdm"
+
+  # Install compatibility patch for Qwen tokenizers
+  cp ~/vllm_compat_patch.py "$SITE_PACKAGES/vllm_compat_patch.py"
+  echo "import vllm_compat_patch" > "$SITE_PACKAGES/sitecustomize.py"
+  echo "Installed vLLM compatibility patch"
+
+  # Verify
+  python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda)"
+  python3 -c "from vllm import LLM; print('vLLM import successful')"
+
+run: |
+  set -euxo pipefail
+  source .venv/bin/activate
+
+  # Disable vLLM v1 engine
+  export VLLM_USE_V1=0
+
+  # Ray setup
+  RAY_PORT=6379
+  if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    ray start --head --port=$RAY_PORT --dashboard-host=0.0.0.0 --disable-usage-stats
+  else
+    HEAD_IP=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
+    for i in {1..60}; do
+      ray start --address="$HEAD_IP:$RAY_PORT" --disable-usage-stats 2>/dev/null && break
+      sleep 2
+    done
+  fi
+  ray status
+
+  if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    python ~/batch_runner.py \
+      -i {input_file} \
+      -o {output_file} \
+      --model Qwen/Qwen2.5-72B-Instruct \
+      -tp 4 \
+      -pp 4 \
+      --max-model-len 32768 \
+      --gpu-memory-utilization 0.90 \
+      --max-num-seqs {max_num_seqs} \
+      --hf-token "$HF_TOKEN"
+  fi
