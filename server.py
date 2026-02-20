@@ -639,25 +639,41 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
             "ports": 8001,
         }
 
-    # For per-config templates, we only need to replace minimal fields
-    # The template already has model, tp, pp, max_model_len baked in
+    # For per-config templates, substitute all placeholders
     if "vllm_configs" in template_path:
-        # Per-config template - minimal substitution
         _, input_file = split_uri(request.input_file)
         output_file = request.output_file
         vllm_cfg = request.vllm_specific_config
         max_num_seqs = vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 32
 
-        # Read template and substitute only dynamic fields
+        # Build substitution dict (same as generic template)
+        replace_dict = replace_run_vllm(request, config, job_dirname)
+
+        # Read template and substitute all placeholders
         from pathlib import Path
         template_content = Path(template_path).read_text()
-        template_content = template_content.replace("{input_file}", f"/data/{input_file}")
-        template_content = template_content.replace("{output_file}", f"/data/{job_dirname}/{output_file}")
-        template_content = template_content.replace("{max_num_seqs}", str(max_num_seqs))
+        for key, value in replace_dict.items():
+            template_content = template_content.replace("{" + key + "}", str(value))
 
         # Write to temp file and parse as yaml
         import yaml
         yaml_data = yaml.safe_load(template_content)
+
+        # Preserve image_id from template if specified (e.g., custom AMI for A100)
+        template_image_id = yaml_data.get("resources", {}).get("image_id")
+        template_region = yaml_data.get("resources", {}).get("region")
+
+        # If template has a specific image_id, use its region and don't do quota-based fallback
+        if template_image_id:
+            print(f"[Template] Using custom AMI: {template_image_id} in {template_region}")
+            resources_config = {
+                "cloud": "aws",
+                "accelerators": yaml_data["resources"].get("accelerators", f"A100:8"),
+                "disk_size": yaml_data["resources"].get("disk_size", "300GB"),
+                "ports": yaml_data["resources"].get("ports", 8001),
+                "image_id": template_image_id,
+                "region": template_region,
+            }
 
         # Update dynamic fields
         yaml_data["name"] = config.decision_id
@@ -822,7 +838,11 @@ def get_vllm_config_template(model_name: str, instance_type: str, tp: int, pp: i
     """
     Get the per-config vLLM template path if it exists.
 
-    Template naming: vllm_{model}-{gpu}-tp{tp}-pp{pp}.yaml
+    Template lookup order:
+    1. vllm_{model}-{gpu}-tp{tp}-pp{pp}.yaml  (specific model+config)
+    2. vllm_{gpu}.yaml                         (GPU-specific generic)
+    3. vllm.yaml                               (generic fallback)
+
     Example: vllm_qwen2.5-72b-A100-tp8-pp1.yaml
 
     Returns path to specific template if exists, otherwise returns generic template.
@@ -840,16 +860,23 @@ def get_vllm_config_template(model_name: str, instance_type: str, tp: int, pp: i
     # Get GPU name from instance type
     gpu_name = INSTANCE_TO_GPU.get(instance_type, "unknown")
 
-    # Build template filename
+    # 1. Check for specific model+config template
     template_name = f"vllm_{model_short}-{gpu_name}-tp{tp}-pp{pp}.yaml"
     template_path = f"templates/vllm_configs/{template_name}"
-
     if os.path.exists(template_path):
         print(f"[Template] Using per-config template: {template_path}")
         return template_path
-    else:
-        print(f"[Template] No specific template for {template_name}, using generic")
-        return "templates/vllm.yaml"
+
+    # 2. Check for GPU-specific generic template (e.g., vllm_A100.yaml)
+    gpu_template_name = f"vllm_{gpu_name}.yaml"
+    gpu_template_path = f"templates/vllm_configs/{gpu_template_name}"
+    if os.path.exists(gpu_template_path):
+        print(f"[Template] Using GPU-specific template: {gpu_template_path}")
+        return gpu_template_path
+
+    # 3. Fall back to generic template
+    print(f"[Template] No specific template for {template_name}, using generic")
+    return "templates/vllm.yaml"
 
 
 def replace_run_vllm(request: BatchedRequest, config: MagicOutput, job_dirname: str = "output"):

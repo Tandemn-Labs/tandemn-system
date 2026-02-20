@@ -13,6 +13,16 @@ Key features:
 - Saves performance metrics to CSV file alongside output
 """
 
+# =============================================================================
+# IMPORTANT: Import compatibility patch FIRST before any other imports
+# This patches transformers to restore all_special_tokens_extended attribute
+# that was removed in transformers 4.47+ but is still used by vLLM
+# =============================================================================
+try:
+    import vllm_compat_patch
+except ImportError:
+    pass  # Patch not available (running locally), skip
+
 import argparse
 import asyncio
 import csv
@@ -24,8 +34,7 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any
 
-# Note: CUDA is initialized by nvidia-smi in vllm_run script
-# Let vLLM handle torch CUDA initialization to avoid conflicts
+# Note: Let vLLM handle torch CUDA initialization to avoid conflicts
 
 # Progress file for external monitoring
 PROGRESS_FILE = "/tmp/vllm_progress.json"

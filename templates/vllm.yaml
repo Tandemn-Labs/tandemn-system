@@ -41,38 +41,18 @@ setup: |
   uv pip install "ray[default]>=2.48.0"
 
   # ========================================================================
-  # CRITICAL: GPU-specific vLLM version selection
+  # Install vLLM 0.10.0
   # ========================================================================
-  # A100 (p4d/p4de) has driver 535.x + CUDA 12.2 compatibility issues with vLLM 0.10.0
-  # L40S and other GPUs work fine with vLLM 0.10.0
-  #
-  # Detection by GPU type:
-  # - A100: Use vLLM 0.7.3 + PyTorch 2.5.1+cu121 (fixes CUDA 802 error)
-  # - Other GPUs: Use vLLM 0.10.0 (default)
+  # Note: A100 has a dedicated per-config template with custom AMI
+  # This generic template is for L40S and other GPUs that work with vLLM 0.10.0
   # ========================================================================
-  GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
-  echo "Detected GPU: $GPU_NAME"
-
-  if [[ "$GPU_NAME" == *"A100"* ]]; then
-    echo "A100 detected: Using PyTorch cu121 + vLLM 0.7.3 for compatibility"
-
-    # Install PyTorch with CUDA 12.1 (works with A100 driver 535.x)
-    uv pip install --index-url https://download.pytorch.org/whl/cu121 \
-      "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1"
-
-    # Install vLLM 0.7.3 (compatible with torch 2.5.x)
-    uv pip install --index-strategy unsafe-best-match \
-      --extra-index-url https://download.pytorch.org/whl/cu121 "vllm==0.7.3"
-  else
-    echo "GPU $GPU_NAME: Using vLLM 0.10.0"
-    uv pip install "vllm==0.10.0"
-  fi
+  echo "=== Installing vLLM 0.10.0 ==="
+  uv pip install "vllm==0.10.0"
 
   # Verify PyTorch CUDA
   python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Available:', torch.cuda.is_available())"
 
   SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-  VLLM_VERSION=$(python3 -c "import vllm; print(vllm.__version__)")
   echo "Installed vLLM version: $VLLM_VERSION"
 
   # ========================================================================

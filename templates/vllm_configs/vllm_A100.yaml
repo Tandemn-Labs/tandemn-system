@@ -90,10 +90,10 @@ run: |
     python ~/batch_runner.py \
       -i {input_file} \
       -o {output_file} \
-      --model Qwen/Qwen2.5-72B-Instruct \
-      -tp 8 \
-      -pp 1 \
-      --max-model-len 32768 \
+      --model {model} \
+      -tp {tp} \
+      -pp {pp} \
+      --max-model-len {max_model_len} \
       --gpu-memory-utilization 0.90 \
       --max-num-seqs {max_num_seqs} \
       --cloud {cloud} \
