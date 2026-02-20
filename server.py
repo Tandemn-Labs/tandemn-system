@@ -109,11 +109,11 @@ PLACEMENT_PRIORITY = os.environ.get("TD_PLACEMENT_PRIORITY", "cost_first").lower
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
 
-def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_size: int) -> str:
+def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_size: int, instance_type: str) -> str:
     """
     Generate an informative directory name for job outputs.
-    Format: {model_short}/numreq_N-avginputlen_X-avgoutputlen_Y/{solver}-tpT-ppP-timestamp_YYYYMMDD-HHMMSS
-    Example: qwen72b/numreq_100-avginputlen_50-avgoutputlen_100/roofline-tp4-pp1-timestamp_20260215-143022
+    Format: {model_short}/numreq_N-avginputlen_X-avgoutputlen_Y/{solver}-{gpu}-tpT-ppP-timestamp_YYYYMMDD-HHMMSS
+    Example: qwen72b/numreq_100-avginputlen_50-avgoutputlen_100/roofline-A100-tp4-pp1-timestamp_20260215-143022
     """
     from datetime import datetime
 
@@ -128,10 +128,13 @@ def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_
     family = re.split(r'[\d\-_.]', model_short)[0][:6]  # max 6 chars
     model_short = f"{family}{size}" if size else family[:10]
 
+    # Get GPU name from instance type
+    gpu_name = INSTANCE_TO_GPU.get(instance_type, "unknown")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Format: model/workload/{solver}-tp{T}-pp{P}-timestamp_{ts}
-    dirname = f"{model_short}/numreq_{request.num_lines}-avginputlen_{request.avg_input_tokens}-avgoutputlen_{request.avg_output_tokens}/{solver}-tp{tp_size}-pp{pp_size}-timestamp_{timestamp}"
+    # Format: model/workload/{solver}-{gpu}-tp{T}-pp{P}-{timestamp}
+    dirname = f"{model_short}/numreq_{request.num_lines}-avginputlen_{request.avg_input_tokens}-avgoutputlen_{request.avg_output_tokens}/{solver}-{gpu_name}-tp{tp_size}-pp{pp_size}-{timestamp}"
     return dirname
 
 
@@ -588,7 +591,7 @@ async def sp_launch_vllm_batch_with_fallback(
 
 async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, solver: str = "roofline"):
     # Generate informative job directory name
-    job_dirname = generate_job_dirname(request, solver, config.tp_size, config.pp_size)
+    job_dirname = generate_job_dirname(request, solver, config.tp_size, config.pp_size, config.instance_type)
 
     s3_base, _ = split_uri(request.input_file)
     # S3 output path: s3://bucket/base/job_dirname/output.jsonl
