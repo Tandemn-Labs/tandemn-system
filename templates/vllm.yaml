@@ -53,22 +53,17 @@ setup: |
   python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Available:', torch.cuda.is_available())"
 
   SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-  echo "Installed vLLM version: $VLLM_VERSION"
 
   # ========================================================================
-  # Apply patches - BOTH vLLM 0.7.x and 0.10.x need patches!
-  # Both versions install transformers 5.x which removed all_special_tokens_extended
+  # Apply patches for vLLM 0.10.0 + transformers 5.x
   # ========================================================================
-  echo "Applying vLLM patches for version $VLLM_VERSION..."
 
-  # Patch 1: Fix DisabledTqdm bug (only affects vLLM 0.10.x)
-  if [[ "$VLLM_VERSION" == 0.10.* ]]; then
-    WEIGHT_UTILS="$SITE_PACKAGES/vllm/model_executor/model_loader/weight_utils.py"
-    sed -i 's/super().__init__(\*args, \*\*kwargs, disable=True)/kwargs.pop("disable", None); super().__init__(*args, **kwargs, disable=True)/' "$WEIGHT_UTILS"
-    echo "Patched vLLM DisabledTqdm"
-  fi
+  # Patch 1: Fix DisabledTqdm bug (duplicate 'disable' kwarg)
+  WEIGHT_UTILS="$SITE_PACKAGES/vllm/model_executor/model_loader/weight_utils.py"
+  sed -i 's/super().__init__(\*args, \*\*kwargs, disable=True)/kwargs.pop("disable", None); super().__init__(*args, **kwargs, disable=True)/' "$WEIGHT_UTILS"
+  echo "Patched vLLM DisabledTqdm"
 
-  # Patch 2: Install compatibility patch for all_special_tokens_extended (ALL versions need this)
+  # Patch 2: Install compatibility patch for all_special_tokens_extended
   # vLLM uses all_special_tokens_extended which was removed in transformers 4.47+
   cp ~/vllm_compat_patch.py "$SITE_PACKAGES/vllm_compat_patch.py"
   echo "import vllm_compat_patch" > "$SITE_PACKAGES/sitecustomize.py"
