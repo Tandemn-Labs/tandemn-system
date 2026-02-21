@@ -11,6 +11,7 @@ resources:
 
 envs:
   HF_TOKEN: null  # Will be replaced at runtime
+  VLLM_NO_USAGE_STATS: "1"
 
 file_mounts:
   ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py

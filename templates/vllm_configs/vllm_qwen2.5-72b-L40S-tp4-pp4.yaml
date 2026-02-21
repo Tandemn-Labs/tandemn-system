@@ -11,6 +11,7 @@ resources:
 envs:
   HF_TOKEN: null
   VLLM_USE_V1: "0"
+  VLLM_NO_USAGE_STATS: "1"
 
 file_mounts:
   /data:
