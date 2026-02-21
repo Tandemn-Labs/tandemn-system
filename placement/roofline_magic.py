@@ -32,6 +32,20 @@ from utils.utils import load_aws_quota_csv, get_vcpu_count_from_gpu
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Reverse map: GPU type -> list of (instance_type, gpu_count)
+# Built from AWS_INSTANCE_TO_GPU at module level, sorted by ascending gpu_count.
+# ---------------------------------------------------------------------------
+def _build_gpu_type_to_instances(instance_map: Dict[str, tuple]) -> Dict[str, List[tuple]]:
+    """Build reverse map from GPU name to list of (instance_type, gpu_count)."""
+    rev: Dict[str, List[tuple]] = {}
+    for inst, (gpu_name, gpu_count) in instance_map.items():
+        rev.setdefault(gpu_name, []).append((inst, gpu_count))
+    for gpu_name in rev:
+        rev[gpu_name].sort(key=lambda x: x[1])
+    return rev
+
+
 # AWS instance type to GPU mapping
 AWS_INSTANCE_TO_GPU: Dict[str, tuple] = {
     # P5 instances (H100)
@@ -71,6 +85,161 @@ AWS_INSTANCE_TO_GPU: Dict[str, tuple] = {
     "g5.24xlarge": ("A10G", 4),
     "g5.48xlarge": ("A10G", 8),
 }
+
+# Reverse map built once at import time
+GPU_TYPE_TO_INSTANCES: Dict[str, List[tuple]] = _build_gpu_type_to_instances(AWS_INSTANCE_TO_GPU)
+
+
+def resolve_gpu_type_to_instance(gpu_type: str, min_gpus: int) -> tuple:
+    """
+    Find the smallest AWS instance with >= min_gpus of the given GPU type.
+
+    Args:
+        gpu_type: Normalized GPU name (e.g. "A100", "L40S")
+        min_gpus: Minimum number of GPUs required (tp * pp)
+
+    Returns:
+        (instance_type, gpu_count) tuple
+
+    Raises:
+        ValueError: If no matching instance exists
+    """
+    from placement.roofline.gpu_specs import normalize_gpu_type
+    gpu_type = normalize_gpu_type(gpu_type)
+
+    instances = GPU_TYPE_TO_INSTANCES.get(gpu_type)
+    if not instances:
+        raise ValueError(
+            f"No AWS instance found for GPU type '{gpu_type}'. "
+            f"Available GPU types: {sorted(GPU_TYPE_TO_INSTANCES.keys())}"
+        )
+
+    for inst, gpu_count in instances:
+        if gpu_count >= min_gpus:
+            return inst, gpu_count
+
+    max_count = instances[-1][1]
+    raise ValueError(
+        f"No AWS instance with >= {min_gpus} {gpu_type} GPUs. "
+        f"Max available: {max_count} GPUs on {instances[-1][0]}"
+    )
+
+
+def check_user_specified_feasibility(
+    model_name: str,
+    instance_type: str,
+    gpu_count: int,
+    tp: int,
+    pp: int,
+    avg_input_tokens: int,
+    avg_output_tokens: int,
+    batch_size: int = 32,
+) -> dict:
+    """
+    Validate a user-specified GPU/TP/PP config using LLM_placement_solver.
+
+    Uses evaluate_manual_placement() from LLMPlacementSolverWithTP for
+    accurate memory feasibility (activation memory, CUDA graphs, sampler,
+    allocator fragmentation) and throughput/cost estimation.
+
+    Returns:
+        dict with keys: feasible, reason, max_model_len, solution
+        On success, solution contains the full evaluate_manual_placement() output.
+    """
+    from placement.roofline.solver_adapter import PlacementSolverAdapter
+    from placement.roofline.gpu_specs import (
+        calculate_max_supported_context,
+        get_gpu_memory,
+        AWS_INSTANCE_GPU_MAP,
+    )
+
+    adapter = PlacementSolverAdapter(
+        gpu_pool={instance_type: 1},
+        cloud_provider="AWS",
+    )
+
+    try:
+        config_dir = adapter._get_config_dir(model_name)
+    except ValueError as e:
+        return {"feasible": False, "reason": str(e), "max_model_len": None, "solution": None}
+
+    # Build temp files (gpu_pool.csv, network_bandwidth.csv) same as normal solve path
+    try:
+        gpu_pool_file = adapter._write_gpu_pool_csv_temp()
+        network_bandwidth_file = adapter._generate_network_bandwidth_temp(gpu_pool_file)
+        cloud_specs_file = adapter.SOLVER_CONFIG_BASE + "/cloud_instances_specs.csv"
+
+        from solver import LLMPlacementSolverWithTP
+        solver = LLMPlacementSolverWithTP(
+            config_dir=config_dir,
+            sequence_length=avg_input_tokens,
+            output_length=avg_output_tokens,
+            workload_phase="aggregated",
+            min_batch_size=batch_size,
+            max_batch_size=batch_size,
+            cloud_provider="AWS",
+            skip_gurobi=True,
+            gpu_pool_file=gpu_pool_file,
+            network_bandwidth_file=network_bandwidth_file,
+            cloud_specs_file=cloud_specs_file,
+        )
+
+        # Build the gpu_type key the solver expects (instance_type#0)
+        solver_gpu_type = f"{instance_type}#0"
+
+        # Build placement dict for evaluate_manual_placement
+        num_layers = solver.config.num_decoder_layers
+        layers_per_stage = num_layers // pp
+        stages = []
+        for i in range(pp):
+            start = i * layers_per_stage + 1
+            end = (i + 1) * layers_per_stage
+            stages.append({
+                "gpu_type": solver_gpu_type,
+                "tp_degree": tp,
+                "start_layer": start,
+                "end_layer": end,
+            })
+
+        placement = {
+            "batch_size": batch_size,
+            "stages": stages,
+            "sequence_length": avg_input_tokens,
+            "output_length": avg_output_tokens,
+            "workload_phase": "aggregated",
+        }
+
+        solution = solver.evaluate_manual_placement(placement)
+
+        # Calculate max_model_len using gpu_specs
+        gpu_info = AWS_INSTANCE_GPU_MAP.get(instance_type, {})
+        gpu_model = gpu_info.get("gpu_model", "")
+        max_model_len = calculate_max_supported_context(
+            gpu_model=gpu_model,
+            num_layers=solver.config.num_decoder_layers,
+            layer_weight_gb=solver.config.layer_weight_memory_gb,
+            num_kv_heads=solver.config.num_kv_heads,
+            d_model=solver.config.d_model,
+            num_attention_heads=solver.config.num_attention_heads,
+            tp_degree=tp,
+            pp_stages=pp,
+            batch_size=batch_size,
+            bytes_per_element=solver.config.bytes_per_element,
+        )
+
+        return {
+            "feasible": True,
+            "reason": "",
+            "max_model_len": max_model_len,
+            "solution": solution,
+        }
+
+    except ValueError as e:
+        return {"feasible": False, "reason": str(e), "max_model_len": None, "solution": None}
+    except Exception as e:
+        return {"feasible": False, "reason": str(e), "max_model_len": None, "solution": None}
+    finally:
+        adapter._cleanup_temp_files()
 
 
 def quota_to_gpu_pool(

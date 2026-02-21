@@ -10,10 +10,18 @@ OPENROUTER_API_KEY="OPENROUTER_API_KEY_HERE"
 MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 # MODEL_NAME="Qwen/Qwen3-235B-A22B"
 
+# Placement solver: "roofline", "llm", or "user_specified"
 # placement_solver="llm"
-placement_solver="roofline"
+# placement_solver="roofline"
+placement_solver="user_specified"
 
 llm_advisor_tier="paid" # only used if placement_solver is "llm"
+
+# --- User-specified placement (only used when placement_solver="user_specified") ---
+gpu_type="L40S" # [A100, L40S, H100]
+tp_size=8 # tensor parallelism: 1, 2, 4, 8
+pp_size=1 # pipeline parallelism: 1, 2, 3, 4
+
 
 # input_file="s3://tandemn-orca/batch/input.jsonl"
 # input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_956-avgoutputlen_50.jsonl"
@@ -40,5 +48,32 @@ curl --request POST \
         "slo_deadline_hours": 1,
         "placement": "aws:us-east-1:auto",
         "hf_token": "'"${HF_TOKEN}"'",
-        "openrouter_api_key": "'"${OPENROUTER_API_KEY}"'"
+        "openrouter_api_key": "'"${OPENROUTER_API_KEY}"'",
+        "gpu_type": "'"${gpu_type:-}"'",
+        "tp_size": '"${tp_size:-null}"',
+        "pp_size": '"${pp_size:-null}"'
     }'
+
+# --- Example: user_specified (bypass solver, use A100 TP=8 PP=1) ---
+# curl --request POST \
+#     --url http://localhost:26336/submit/batch \
+#     --header 'content-type: application/json' \
+#     --data '{
+#         "placement_solver": "user_specified",
+#         "user_id": "test-user",
+#         "input_file": "s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_2926-avgoutputlen_100.jsonl",
+#         "output_file": "output.jsonl",
+#         "avg_output_tokens": 100,
+#         "max_output_tokens": 256,
+#         "description": "Qwen 72B on A100 user_specified",
+#         "task_type": "chat_completion",
+#         "task_priority": "high",
+#         "model_name": "Qwen/Qwen2.5-72B-Instruct",
+#         "engine": "vllm",
+#         "slo_mode": "batch",
+#         "slo_deadline_hours": 1,
+#         "placement": "aws:us-east-1:auto",
+#         "gpu_type": "A100",
+#         "tp_size": 8,
+#         "pp_size": 1
+#     }'

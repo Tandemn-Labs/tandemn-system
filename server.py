@@ -9,7 +9,7 @@ from fastapi import FastAPI, Form
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.aws_magic import AWSAllocation
-from placement.roofline_magic import RooflineAWSAllocation
+from placement.roofline_magic import RooflineAWSAllocation, resolve_gpu_type_to_instance, check_user_specified_feasibility
 from quota.region_selector import get_ordered_regions, get_instance_family, get_cached_quotas
 from storage.storage_server import storage_backend
 from tracking.tracking import JobRecord, JobSpec, JobState
@@ -446,7 +446,62 @@ async def submit_batch(request: BatchedRequest):
     # Get multiple fallback solutions for retry logic
     # Request field takes priority, then fall back to env var
     use_solver = request.placement_solver or PLACEMENT_SOLVER
-    if use_solver == "roofline":
+
+    if use_solver == "user_specified":
+        # ---------- User-specified path ----------
+        gpu_type = request.gpu_type
+        tp = request.tp_size or 1
+        pp = request.pp_size or 1
+
+        # Resolve GPU type to the smallest AWS instance with enough GPUs
+        try:
+            instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp * pp)
+        except ValueError as e:
+            return {"status": "error", "error_type": "invalid_placement", "message": str(e)}
+
+        # Run feasibility check via LLM_placement_solver
+        result = check_user_specified_feasibility(
+            model_name=request.model_name,
+            instance_type=instance_type,
+            gpu_count=gpu_count,
+            tp=tp,
+            pp=pp,
+            avg_input_tokens=request.avg_input_tokens,
+            avg_output_tokens=request.avg_output_tokens,
+        )
+
+        if not result["feasible"]:
+            return {
+                "status": "error",
+                "error_type": "infeasible_placement",
+                "message": f"Placement is not feasible: {result['reason']}",
+                "detail": {
+                    "gpu_type": gpu_type,
+                    "tp": tp,
+                    "pp": pp,
+                    "instance_type": instance_type,
+                },
+            }
+
+        # Build MagicOutput directly
+        launch_config = MagicOutput(
+            decision_id=f"mo-{uuid.uuid4()}",
+            engine=request.engine or "vllm",
+            instance_type=instance_type,
+            tp_size=tp,
+            pp_size=pp,
+            replicas=1,
+            max_model_len=result["max_model_len"],
+        )
+        fallback_configs = []
+
+        sol = result.get("solution") or {}
+        print(f"[Placement] user_specified: {instance_type} TP={tp} PP={pp} "
+              f"max_model_len={result['max_model_len']} "
+              f"throughput={sol.get('throughput_tokens_per_sec', 'N/A')} tok/s "
+              f"cost=${sol.get('cost_per_hour', 'N/A')}/hr")
+
+    elif use_solver == "roofline":
         solver = RooflineAWSAllocation(
             perfdb_dir="./perf_db",
             aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
