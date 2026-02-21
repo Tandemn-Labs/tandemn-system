@@ -109,11 +109,20 @@ PLACEMENT_PRIORITY = os.environ.get("TD_PLACEMENT_PRIORITY", "cost_first").lower
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
 
+def prefix_job_dirname(job_dirname: str, status: str) -> str:
+    """Prepend 'success-' or 'failed-' to the leaf directory of a job dirname."""
+    if "/" in job_dirname:
+        parent, leaf = job_dirname.rsplit("/", 1)
+        return f"{parent}/{status}-{leaf}"
+    return f"{status}-{job_dirname}"
+
+
 def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_size: int, instance_type: str) -> str:
     """
     Generate an informative directory name for job outputs.
-    Format: {model_short}/numreq_N-avginputlen_X-avgoutputlen_Y/{solver}-{gpu}-tpT-ppP-timestamp_YYYYMMDD-HHMMSS
-    Example: qwen72b/numreq_100-avginputlen_50-avgoutputlen_100/roofline-A100-tp4-pp1-timestamp_20260215-143022
+    Base format: {model_short}/numreq_N-avginputlen_X-avgoutputlen_Y/{solver}-{gpu}-tpT-ppP-YYYYMMDD_HHMMSS
+    After completion the leaf dir is prefixed with 'success-' or 'failed-'.
+    Example: qwen72b/numreq_100-avginputlen_50-avgoutputlen_100/success-roofline-A100-tp4-pp1-20260215_143022
     """
     from datetime import datetime
 
@@ -711,18 +720,42 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
 
     def monitor_and_download():
         """Background thread: stream logs, then download output when done."""
+        from pathlib import Path
         try:
             sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
             print(f"[Job] {config.decision_id} completed. Downloading output...")
 
-            # Download output from S3 to local dir with same informative name
+            # Download output from S3 to local dir (base name, no prefix yet)
             local_path = download_output_from_s3(output_s3_path, job_dirname)
-            if local_path:
-                print(f"[Job] Output saved to: {local_path}")
-            else:
-                print(f"[Job] Warning: Failed to download output from {output_s3_path}")
+
+            # Determine success: both output file and metrics.csv must exist
+            base_dir = Path(f"outputs/{job_dirname}")
+            is_success = (
+                local_path is not None
+                and base_dir.exists()
+                and (base_dir / "metrics.csv").exists()
+            )
+
+            # Rename dir with success-/failed- prefix
+            status = "success" if is_success else "failed"
+            prefixed_dirname = prefix_job_dirname(job_dirname, status)
+            target_dir = Path(f"outputs/{prefixed_dirname}")
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            base_dir.rename(target_dir)
+            print(f"[Job] {status.upper()}: outputs/{prefixed_dirname}")
+
         except Exception as e:
             print(f"[Job] Error in monitor thread: {e}")
+            # Ensure a failed- dir exists even if everything blew up
+            failed_dirname = prefix_job_dirname(job_dirname, "failed")
+            failed_dir = Path(f"outputs/{failed_dirname}")
+            base_dir = Path(f"outputs/{job_dirname}")
+            if base_dir.exists() and not failed_dir.exists():
+                failed_dir.parent.mkdir(parents=True, exist_ok=True)
+                base_dir.rename(failed_dir)
+            elif not failed_dir.exists():
+                failed_dir.mkdir(parents=True, exist_ok=True)
+            print(f"[Job] FAILED: outputs/{failed_dirname}")
         finally:
             cm.unregister(config.decision_id)
 
