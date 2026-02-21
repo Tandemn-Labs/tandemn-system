@@ -3,35 +3,33 @@
 endpoint="/submit/batch"
 # endpoint="/test/placement"
 
-HF_TOKEN="HF_TOKEN_HERE"
+HF_TOKEN="HF_TOKEN_HERE" # not neccessary if the model does not require it.
 OPENROUTER_API_KEY="OPENROUTER_API_KEY_HERE"
 
 # MODEL_NAME="meta-llama/Meta-Llama-3-70B-Instruct"
 MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 # MODEL_NAME="Qwen/Qwen3-235B-A22B"
-# MODEL_NAME="Qwen/Qwen2.5-A14B-Instruct"
-# MODEL_NAME="Qwen/Qwen2.5-32B-Instruct"
-# MODEL_NAME="Qwen/Qwen2.5-7B-Instruct"
 
-        # "llm_advisor_tier": "paid",
-        # "llm_advisor_tier": "free",
+# placement_solver="llm"
+placement_solver="roofline"
 
-        # "placement_solver": "llm",
-        # "placement_solver": "roofline",
+llm_advisor_tier="paid" # only used if placement_solver is "llm"
+
+# input_file="s3://tandemn-orca/batch/input.jsonl"
+# input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_956-avgoutputlen_50.jsonl"
+# input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_1604-avgoutputlen_100.jsonl"
+input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_2926-avgoutputlen_100.jsonl"
 
 curl --request POST \
     --url http://localhost:26336${endpoint} \
     --header 'content-type: application/json' \
     --data '{
-        "placement_solver": "llm",
-        "llm_advisor_tier": "paid",
+        "placement_solver": "'"${placement_solver}"'",
+        "llm_advisor_tier": "'"${llm_advisor_tier}"'",
         "user_id": "test-user",
-        "input_file": "s3://tandemn-orca/batch/input.jsonl",
+        "input_file": "'"${input_file}"'",
         "output_file": "output.jsonl",
-        "num_lines": 100,
-        "avg_input_tokens": 50,
         "avg_output_tokens": 100,
-        "max_input_tokens": 200,
         "max_output_tokens": 256,
         "description": "Qwen batch inference test",
         "task_type": "chat_completion",
