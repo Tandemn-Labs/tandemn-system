@@ -25,8 +25,8 @@ pp_size=1 # pipeline parallelism: 1, 2, 3, 4
 
 # input_file="s3://tandemn-orca/batch/input.jsonl"
 # input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_956-avgoutputlen_50.jsonl"
-# input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_1604-avgoutputlen_100.jsonl"
-input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_2926-avgoutputlen_100.jsonl"
+input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_1604-avgoutputlen_100.jsonl"
+# input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_2926-avgoutputlen_100.jsonl"
 
 curl --request POST \
     --url http://localhost:26336${endpoint} \
