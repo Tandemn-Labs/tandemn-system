@@ -18,7 +18,6 @@ Usage:
 """
 
 import uuid
-import math
 import logging
 from typing import Dict, List, Optional, Union
 
@@ -27,7 +26,7 @@ import pandas as pd
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.magic import VPCMagic
-from utils.utils import load_aws_quota_csv, get_vcpu_count_from_gpu
+from utils.utils import load_aws_quota_csv
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +35,9 @@ logger = logging.getLogger(__name__)
 # Reverse map: GPU type -> list of (instance_type, gpu_count)
 # Built from AWS_INSTANCE_TO_GPU at module level, sorted by ascending gpu_count.
 # ---------------------------------------------------------------------------
-def _build_gpu_type_to_instances(instance_map: Dict[str, tuple]) -> Dict[str, List[tuple]]:
+def _build_gpu_type_to_instances(
+    instance_map: Dict[str, tuple],
+) -> Dict[str, List[tuple]]:
     """Build reverse map from GPU name to list of (instance_type, gpu_count)."""
     rev: Dict[str, List[tuple]] = {}
     for inst, (gpu_name, gpu_count) in instance_map.items():
@@ -50,17 +51,14 @@ def _build_gpu_type_to_instances(instance_map: Dict[str, tuple]) -> Dict[str, Li
 AWS_INSTANCE_TO_GPU: Dict[str, tuple] = {
     # P5 instances (H100)
     "p5.48xlarge": ("H100", 8),
-
     # P4 instances (A100)
     "p4d.24xlarge": ("A100", 8),
     "p4de.24xlarge": ("A100", 8),
-
     # P3 instances (V100)
     "p3.2xlarge": ("V100", 1),
     "p3.8xlarge": ("V100", 4),
     "p3.16xlarge": ("V100", 8),
     "p3dn.24xlarge": ("V100", 8),
-
     # G6e instances (L40S)
     "g6e.xlarge": ("L40S", 1),
     "g6e.2xlarge": ("L40S", 1),
@@ -68,7 +66,6 @@ AWS_INSTANCE_TO_GPU: Dict[str, tuple] = {
     "g6e.12xlarge": ("L40S", 4),
     "g6e.24xlarge": ("L40S", 4),
     "g6e.48xlarge": ("L40S", 8),
-
     # G6 instances (L4)
     "g6.xlarge": ("L4", 1),
     "g6.2xlarge": ("L4", 1),
@@ -76,7 +73,6 @@ AWS_INSTANCE_TO_GPU: Dict[str, tuple] = {
     "g6.12xlarge": ("L4", 2),
     "g6.24xlarge": ("L4", 4),
     "g6.48xlarge": ("L4", 8),
-
     # G5 instances (A10G)
     "g5.xlarge": ("A10G", 1),
     "g5.2xlarge": ("A10G", 1),
@@ -87,7 +83,9 @@ AWS_INSTANCE_TO_GPU: Dict[str, tuple] = {
 }
 
 # Reverse map built once at import time
-GPU_TYPE_TO_INSTANCES: Dict[str, List[tuple]] = _build_gpu_type_to_instances(AWS_INSTANCE_TO_GPU)
+GPU_TYPE_TO_INSTANCES: Dict[str, List[tuple]] = _build_gpu_type_to_instances(
+    AWS_INSTANCE_TO_GPU
+)
 
 
 def resolve_gpu_type_to_instance(gpu_type: str, min_gpus: int) -> tuple:
@@ -105,6 +103,7 @@ def resolve_gpu_type_to_instance(gpu_type: str, min_gpus: int) -> tuple:
         ValueError: If no matching instance exists
     """
     from placement.roofline.gpu_specs import normalize_gpu_type
+
     gpu_type = normalize_gpu_type(gpu_type)
 
     instances = GPU_TYPE_TO_INSTANCES.get(gpu_type)
@@ -161,7 +160,12 @@ def check_user_specified_feasibility(
     try:
         config_dir = adapter._get_config_dir(model_name)
     except ValueError as e:
-        return {"feasible": False, "reason": str(e), "max_model_len": None, "solution": None}
+        return {
+            "feasible": False,
+            "reason": str(e),
+            "max_model_len": None,
+            "solution": None,
+        }
 
     # Build temp files (gpu_pool.csv, network_bandwidth.csv) same as normal solve path
     try:
@@ -170,6 +174,7 @@ def check_user_specified_feasibility(
         cloud_specs_file = adapter.SOLVER_CONFIG_BASE + "/cloud_instances_specs.csv"
 
         from solver import LLMPlacementSolverWithTP
+
         solver = LLMPlacementSolverWithTP(
             config_dir=config_dir,
             sequence_length=avg_input_tokens,
@@ -194,12 +199,14 @@ def check_user_specified_feasibility(
         for i in range(pp):
             start = i * layers_per_stage + 1
             end = (i + 1) * layers_per_stage
-            stages.append({
-                "gpu_type": solver_gpu_type,
-                "tp_degree": tp,
-                "start_layer": start,
-                "end_layer": end,
-            })
+            stages.append(
+                {
+                    "gpu_type": solver_gpu_type,
+                    "tp_degree": tp,
+                    "start_layer": start,
+                    "end_layer": end,
+                }
+            )
 
         placement = {
             "batch_size": batch_size,
@@ -235,9 +242,19 @@ def check_user_specified_feasibility(
         }
 
     except ValueError as e:
-        return {"feasible": False, "reason": str(e), "max_model_len": None, "solution": None}
+        return {
+            "feasible": False,
+            "reason": str(e),
+            "max_model_len": None,
+            "solution": None,
+        }
     except Exception as e:
-        return {"feasible": False, "reason": str(e), "max_model_len": None, "solution": None}
+        return {
+            "feasible": False,
+            "reason": str(e),
+            "max_model_len": None,
+            "solution": None,
+        }
     finally:
         adapter._cleanup_temp_files()
 
@@ -269,13 +286,20 @@ def quota_to_gpu_pool(
     # Exclude: p2 (K80), p3 small, g4ad (Radeon), g4dn small, g5 small, g6 small
     ALLOWED_INSTANCE_PREFIXES = [
         # High-end instances (A100, H100)
-        "p4d.", "p4de.", "p5.",
+        "p4d.",
+        "p4de.",
+        "p5.",
         # L40S instances (g6e) - good for LLMs
-        "g6e.12xlarge", "g6e.24xlarge", "g6e.48xlarge",
+        "g6e.12xlarge",
+        "g6e.24xlarge",
+        "g6e.48xlarge",
         # A10G instances (g5) - only multi-GPU variants
-        "g5.12xlarge", "g5.24xlarge", "g5.48xlarge",
+        "g5.12xlarge",
+        "g5.24xlarge",
+        "g5.48xlarge",
         # V100 large instances
-        "p3.16xlarge", "p3dn.",
+        "p3.16xlarge",
+        "p3dn.",
     ]
 
     gpu_pool = {}
@@ -291,8 +315,10 @@ def quota_to_gpu_pool(
             continue
 
         # Filter to only allowed instance types
-        is_allowed = any(instance_type.startswith(prefix) or instance_type == prefix
-                        for prefix in ALLOWED_INSTANCE_PREFIXES)
+        is_allowed = any(
+            instance_type.startswith(prefix) or instance_type == prefix
+            for prefix in ALLOWED_INSTANCE_PREFIXES
+        )
         if not is_allowed:
             continue
 
@@ -305,11 +331,15 @@ def quota_to_gpu_pool(
             continue
 
         # Calculate how many instances are allowed, capped to limit search space
-        instance_count = min(int(vcpu_quota / vcpu_per_instance), max_instances_per_type)
+        instance_count = min(
+            int(vcpu_quota / vcpu_per_instance), max_instances_per_type
+        )
         if instance_count > 0:
             gpu_pool[instance_type] = instance_count
 
-    logger.info(f"[Roofline] Filtered quota pool to {len(gpu_pool)} capable instance types")
+    logger.info(
+        f"[Roofline] Filtered quota pool to {len(gpu_pool)} capable instance types"
+    )
     return gpu_pool
 
 
@@ -361,6 +391,7 @@ class RooflineAWSAllocation(VPCMagic):
         """Get or create solver adapter."""
         if self._solver_adapter is None:
             from placement.roofline.solver_adapter import PlacementSolverAdapter
+
             self._solver_adapter = PlacementSolverAdapter(
                 gpu_pool=gpu_pool,
                 cloud_provider="AWS",
@@ -405,24 +436,30 @@ class RooflineAWSAllocation(VPCMagic):
             MagicOutput with allocation decision
         """
         logger.info(f"[Roofline] Processing batch request for model: {req.model_name}")
-        logger.info(f"[Roofline] Requests: {req.num_lines}, Tokens: {req.avg_input_tokens}in/{req.avg_output_tokens}out")
+        logger.info(
+            f"[Roofline] Requests: {req.num_lines}, Tokens: {req.avg_input_tokens}in/{req.avg_output_tokens}out"
+        )
         logger.info(f"[Roofline] SLO: {req.slo_deadline_hours} hours")
 
         # Get GPU pool from quota (if enabled)
         if self.use_quota_pool and not self.quota_df.empty:
             gpu_pool = quota_to_gpu_pool(self.quota_df, region, market)
-            logger.info(f"[Roofline] Available instances: {list(gpu_pool.keys())[:5]}...")
+            logger.info(
+                f"[Roofline] Available instances: {list(gpu_pool.keys())[:5]}..."
+            )
         else:
             # Use a small, fast default GPU pool for testing
             # Only includes modern GPUs capable of running large LLMs
             gpu_pool = {
-                "g6e.48xlarge": 2,   # 8x L40S (48GB each)
-                "g6e.12xlarge": 4,   # 4x L40S
-                "p4d.24xlarge": 2,   # 8x A100 (40GB)
+                "g6e.48xlarge": 2,  # 8x L40S (48GB each)
+                "g6e.12xlarge": 4,  # 4x L40S
+                "p4d.24xlarge": 2,  # 8x A100 (40GB)
                 "p4de.24xlarge": 1,  # 8x A100 (80GB)
-                "p5.48xlarge": 1,    # 8x H100
+                "p5.48xlarge": 1,  # 8x H100
             }
-            logger.info(f"[Roofline] Using fast default GPU pool: {list(gpu_pool.keys())}")
+            logger.info(
+                f"[Roofline] Using fast default GPU pool: {list(gpu_pool.keys())}"
+            )
 
         # Create solver input
         from placement.roofline.solver_adapter import (
@@ -450,9 +487,13 @@ class RooflineAWSAllocation(VPCMagic):
         # Log result
         logger.info("[Roofline] Solution found:")
         logger.info(f"  Instance: {result.instance_family} x {result.num_instances}")
-        logger.info(f"  GPU: {result.gpu_model}, TP={result.tp_degree}, PP={result.pp_stages}")
+        logger.info(
+            f"  GPU: {result.gpu_model}, TP={result.tp_degree}, PP={result.pp_stages}"
+        )
         logger.info(f"  Throughput: {result.throughput_tokens_per_sec:.0f} tokens/sec")
-        logger.info(f"  Cost: ${result.cost_per_hour:.2f}/hour, ${result.cost_per_million_tokens:.2f}/M tokens")
+        logger.info(
+            f"  Cost: ${result.cost_per_hour:.2f}/hour, ${result.cost_per_million_tokens:.2f}/M tokens"
+        )
         logger.info(f"  Max context: {result.max_supported_context} tokens")
 
         # Convert to MagicOutput
@@ -532,7 +573,9 @@ class RooflineAWSAllocation(VPCMagic):
         Returns:
             List of MagicOutput solutions sorted by cost (best first)
         """
-        logger.info(f"[Roofline] Processing batch request (multi) for model: {req.model_name}")
+        logger.info(
+            f"[Roofline] Processing batch request (multi) for model: {req.model_name}"
+        )
 
         # Get GPU pool from quota (if enabled)
         if self.use_quota_pool and not self.quota_df.empty:
@@ -575,7 +618,9 @@ class RooflineAWSAllocation(VPCMagic):
         for i, result in enumerate(results):
             data_parallel_replicas = max(1, result.num_instances // result.pp_stages)
             output = MagicOutput(
-                decision_id=f"{decision_id_base}-opt{i+1}" if i > 0 else decision_id_base,
+                decision_id=f"{decision_id_base}-opt{i + 1}"
+                if i > 0
+                else decision_id_base,
                 engine=req.engine or "vllm",
                 instance_type=result.instance_family,
                 replicas=data_parallel_replicas,
@@ -584,6 +629,8 @@ class RooflineAWSAllocation(VPCMagic):
                 max_model_len=result.max_supported_context,
             )
             outputs.append(output)
-            logger.info(f"[Roofline] Solution {i+1}: {result.instance_family} TP={result.tp_degree} PP={result.pp_stages} ${result.cost_per_million_tokens:.2f}/M")
+            logger.info(
+                f"[Roofline] Solution {i + 1}: {result.instance_family} TP={result.tp_degree} PP={result.pp_stages} ${result.cost_per_million_tokens:.2f}/M"
+            )
 
         return outputs

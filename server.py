@@ -2,19 +2,25 @@ from contextlib import asynccontextmanager
 import uuid
 import requests
 import subprocess
-import signal
-import atexit
 import sky
 from fastapi import FastAPI, Form
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.aws_magic import AWSAllocation
-from placement.roofline_magic import RooflineAWSAllocation, resolve_gpu_type_to_instance, check_user_specified_feasibility
-from quota.region_selector import get_ordered_regions, get_instance_family, get_cached_quotas
+from placement.roofline_magic import (
+    RooflineAWSAllocation,
+    resolve_gpu_type_to_instance,
+    check_user_specified_feasibility,
+)
+from quota.region_selector import (
+    get_ordered_regions,
+    get_instance_family,
+    get_cached_quotas,
+)
 from storage.storage_server import storage_backend
 from tracking.tracking import JobRecord, JobSpec, JobState
 from utils.utils import split_uri, update_template, update_yaml_file
-from typing import Dict, Union, Optional, Literal, List, Tuple
+from typing import Dict, List, Union, Optional, Literal, Tuple
 from threading import Lock
 import threading
 import time
@@ -42,7 +48,14 @@ def extract_prompt_text(entry: dict) -> str:
         return ""
 
 
-def parse_input_file_stats(input_file: str, model_name: str = None, top_k_tokenize: int = 100) -> tuple[int, int, int]:
+# A: Downloads the file once from S3 to wherever server is running + timeout
+# A: All prompts are extracted into program memory
+# A: tokenizer
+# D: aws CLI, S3 credentials
+# D: python - json, tempfile, transformers AutoTokenizer
+def parse_input_file_stats(
+    input_file: str, model_name: str = None, top_k_tokenize: int = 100
+) -> tuple[int, int, int]:
     """
     Parse input file to extract real stats.
 
@@ -63,11 +76,15 @@ def parse_input_file_stats(input_file: str, model_name: str = None, top_k_tokeni
 
     # Download from S3 if needed
     if input_file.startswith("s3://"):
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False
+        ) as tmp:
             tmp_path = tmp.name
         result = subprocess.run(
             ["aws", "s3", "cp", input_file, tmp_path],
-            capture_output=True, text=True, timeout=120
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to download {input_file}: {result.stderr}")
@@ -79,7 +96,7 @@ def parse_input_file_stats(input_file: str, model_name: str = None, top_k_tokeni
     prompt_texts = []
     char_estimates = []
     try:
-        with open(file_path, 'r') as f:
+        with open(file_path, "r") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -91,6 +108,7 @@ def parse_input_file_stats(input_file: str, model_name: str = None, top_k_tokeni
     finally:
         if input_file.startswith("s3://"):
             import os
+
             os.unlink(tmp_path)
 
     if not prompt_texts:
@@ -104,10 +122,15 @@ def parse_input_file_stats(input_file: str, model_name: str = None, top_k_tokeni
     if model_name and top_k_tokenize > 0:
         try:
             from transformers import AutoTokenizer
-            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name, trust_remote_code=True
+            )
 
             # Sort indices by character length descending, take top-K
-            sorted_indices = sorted(range(num_lines), key=lambda i: len(prompt_texts[i]), reverse=True)
+            sorted_indices = sorted(
+                range(num_lines), key=lambda i: len(prompt_texts[i]), reverse=True
+            )
             top_indices = sorted_indices[:top_k_tokenize]
 
             max_tokenized = 0
@@ -115,15 +138,23 @@ def parse_input_file_stats(input_file: str, model_name: str = None, top_k_tokeni
                 token_count = len(tokenizer.encode(prompt_texts[idx]))
                 max_tokenized = max(max_tokenized, token_count)
 
-            print(f"[InputParser] Tokenized top-{len(top_indices)} longest prompts: "
-                  f"max_input={max_tokenized} tokens (chars/4 estimate was {max(char_estimates)})")
+            print(
+                f"[InputParser] Tokenized top-{len(top_indices)} longest prompts: "
+                f"max_input={max_tokenized} tokens (chars/4 estimate was {max(char_estimates)})"
+            )
             max_input_tokens = max_tokenized
         except Exception as e:
-            print(f"[InputParser] WARNING: Tokenizer failed ({e}), using chars/4 estimate for max_input_tokens")
+            print(
+                f"[InputParser] WARNING: Tokenizer failed ({e}), using chars/4 estimate for max_input_tokens"
+            )
 
-    print(f"[InputParser] Parsed {num_lines} lines: avg_input={avg_input_tokens}, max_input={max_input_tokens}")
+    print(
+        f"[InputParser] Parsed {num_lines} lines: avg_input={avg_input_tokens}, max_input={max_input_tokens}"
+    )
 
     return num_lines, avg_input_tokens, max_input_tokens
+
+
 OPENROUTER_API_KEY = os.environ.get("TD_OPENROUTER_KEY")
 
 # Solver selection: "roofline" (deterministic) or "llm" (3-advisor + C-PMI)
@@ -144,7 +175,9 @@ def prefix_job_dirname(job_dirname: str, status: str) -> str:
     return f"{status}-{job_dirname}"
 
 
-def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_size: int, instance_type: str) -> str:
+def generate_job_dirname(
+    request: BatchedRequest, solver: str, tp_size: int, pp_size: int, instance_type: str
+) -> str:
     """
     Generate an informative directory name for job outputs.
     Base format: {model_short}/numreq_N-avginputlen_X-avgoutputlen_Y/{solver}-{gpu}-tpT-ppP-YYYYMMDD_HHMMSS
@@ -158,10 +191,10 @@ def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_
     # Extract key parts: remove provider prefix, get size
     model_short = model_name.split("/")[-1].lower()  # "qwen2.5-72b-instruct"
     # Extract size (e.g., "72b", "7b", "235b")
-    size_match = re.search(r'(\d+\.?\d*b)', model_short, re.IGNORECASE)
+    size_match = re.search(r"(\d+\.?\d*b)", model_short, re.IGNORECASE)
     size = size_match.group(1).lower() if size_match else ""
     # Get model family (first word before numbers/dashes)
-    family = re.split(r'[\d\-_.]', model_short)[0][:6]  # max 6 chars
+    family = re.split(r"[\d\-_.]", model_short)[0][:6]  # max 6 chars
     model_short = f"{family}{size}" if size else family[:10]
 
     # Get GPU name from instance type
@@ -196,7 +229,9 @@ class ClusterManager:
         try:
             result = subprocess.run(
                 ["sky", "down", "-y", cluster_name],
-                capture_output=True, text=True, timeout=300
+                capture_output=True,
+                text=True,
+                timeout=300,
             )
             if result.returncode == 0:
                 self.unregister(cluster_name)
@@ -449,6 +484,8 @@ async def quota_status():
     return {"status": "success", "quota_usage": summary.to_dict(orient="records")}
 
 
+# A: Stats on input file computed instead of from request
+# A: When to respond to user request (prob return early + observability)
 @app.post("/submit/batch")
 async def submit_batch(request: BatchedRequest):
     """
@@ -459,16 +496,22 @@ async def submit_batch(request: BatchedRequest):
     - "llm": LLM-based 3-advisor + C-PMI solver
     """
     # Parse input file to get real stats (num_lines, avg_input_tokens, max_input_tokens)
-    num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(request.input_file, model_name=request.model_name)
+    num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
+        request.input_file, model_name=request.model_name
+    )
 
     # Update request with parsed values (these override any user-provided values)
-    request = request.model_copy(update={
-        "num_lines": num_lines,
-        "avg_input_tokens": avg_input_tokens,
-        "max_input_tokens": max_input_tokens,
-    })
+    request = request.model_copy(
+        update={
+            "num_lines": num_lines,
+            "avg_input_tokens": avg_input_tokens,
+            "max_input_tokens": max_input_tokens,
+        }
+    )
 
-    print(f"[InputStats] num_lines={num_lines}, avg_input={avg_input_tokens}, max_input={max_input_tokens}")
+    print(
+        f"[InputStats] num_lines={num_lines}, avg_input={avg_input_tokens}, max_input={max_input_tokens}"
+    )
 
     # Get multiple fallback solutions for retry logic
     # Request field takes priority, then fall back to env var
@@ -484,7 +527,11 @@ async def submit_batch(request: BatchedRequest):
         try:
             instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp * pp)
         except ValueError as e:
-            return {"status": "error", "error_type": "invalid_placement", "message": str(e)}
+            return {
+                "status": "error",
+                "error_type": "invalid_placement",
+                "message": str(e),
+            }
 
         # Run feasibility check via LLM_placement_solver
         result = check_user_specified_feasibility(
@@ -511,22 +558,25 @@ async def submit_batch(request: BatchedRequest):
             }
 
         # Build MagicOutput directly
-        launch_config = MagicOutput(
-            decision_id=f"mo-{uuid.uuid4()}",
-            engine=request.engine or "vllm",
-            instance_type=instance_type,
-            tp_size=tp,
-            pp_size=pp,
-            replicas=1,
-            max_model_len=result["max_model_len"],
-        )
-        fallback_configs = []
+        configs = [
+            MagicOutput(
+                decision_id=f"mo-{uuid.uuid4()}",
+                engine=request.engine or "vllm",
+                instance_type=instance_type,
+                tp_size=tp,
+                pp_size=pp,
+                replicas=1,
+                max_model_len=result["max_model_len"],
+            )
+        ]
 
         sol = result.get("solution") or {}
-        print(f"[Placement] user_specified: {instance_type} TP={tp} PP={pp} "
-              f"max_model_len={result['max_model_len']} "
-              f"throughput={sol.get('throughput_tokens_per_sec', 'N/A')} tok/s "
-              f"cost=${sol.get('cost_per_hour', 'N/A')}/hr")
+        print(
+            f"[Placement] user_specified: {instance_type} TP={tp} PP={pp} "
+            f"max_model_len={result['max_model_len']} "
+            f"throughput={sol.get('throughput_tokens_per_sec', 'N/A')} tok/s "
+            f"cost=${sol.get('cost_per_hour', 'N/A')}/hr"
+        )
 
     elif use_solver == "roofline":
         solver = RooflineAWSAllocation(
@@ -534,9 +584,9 @@ async def submit_batch(request: BatchedRequest):
             aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
             priority=PLACEMENT_PRIORITY,
         )
-        all_configs = solver.process_batch_multi(request, top_k=5)
-        launch_config = all_configs[0] if all_configs else solver._fallback_config(request)
-        fallback_configs = all_configs[1:] if len(all_configs) > 1 else []
+        configs = solver.process_batch_multi(request, top_k=5)
+        if not configs:
+            configs = [solver._fallback_config(request)]
     else:
         # LLM-based solver (3-advisor + C-PMI)
         openrouter_key = request.openrouter_api_key or OPENROUTER_API_KEY
@@ -548,42 +598,43 @@ async def submit_batch(request: BatchedRequest):
             k_nearest_model_size=5,
             model_tier=model_tier,
         )
-        launch_config = solver.decide(request)
-        fallback_configs = []
+        configs = [solver.decide(request)]
 
     print(f"[Placement] Using solver: {use_solver}")
-    print(f"[Placement] Primary: {launch_config.instance_type} TP={launch_config.tp_size} PP={launch_config.pp_size}")
-    if fallback_configs:
-        print(f"[Placement] Fallbacks: {len(fallback_configs)}")
+    print(
+        f"[Placement] Primary: {configs[0].instance_type} TP={configs[0].tp_size} PP={configs[0].pp_size}"
+    )
+    if len(configs) > 1:
+        print(f"[Placement] Fallbacks: {len(configs) - 1}")
 
     # Pre-launch check: ensure max_model_len can accommodate the longest prompt
     max_output = request.max_output_tokens or request.avg_output_tokens
-    if launch_config.max_model_len is not None and max_input_tokens is not None:
+    if configs[0].max_model_len is not None and max_input_tokens is not None:
         required_context = max_input_tokens + max_output
-        if required_context > launch_config.max_model_len:
+        if required_context > configs[0].max_model_len:
             return {
                 "status": "error",
                 "error_type": "context_length_exceeded",
                 "message": (
                     f"Longest prompt ({max_input_tokens} tokens) + max_output ({max_output}) = "
-                    f"{required_context} exceeds max_model_len ({launch_config.max_model_len}) "
-                    f"for {launch_config.instance_type} TP={launch_config.tp_size} PP={launch_config.pp_size}. "
+                    f"{required_context} exceeds max_model_len ({configs[0].max_model_len}) "
+                    f"for {configs[0].instance_type} TP={configs[0].tp_size} PP={configs[0].pp_size}. "
                     f"Some requests would be skipped at runtime."
                 ),
                 "detail": {
                     "max_input_tokens": max_input_tokens,
                     "max_output_tokens": max_output,
                     "required_context": required_context,
-                    "max_model_len": launch_config.max_model_len,
-                    "instance_type": launch_config.instance_type,
-                    "tp_size": launch_config.tp_size,
-                    "pp_size": launch_config.pp_size,
+                    "max_model_len": configs[0].max_model_len,
+                    "instance_type": configs[0].instance_type,
+                    "tp_size": configs[0].tp_size,
+                    "pp_size": configs[0].pp_size,
                 },
             }
 
     # Launch with fallback support
     success, used_config = await sp_launch_vllm_batch_with_fallback(
-        request, launch_config, fallback_configs, solver=use_solver
+        request, configs, solver=use_solver
     )
 
     if success:
@@ -605,7 +656,7 @@ async def submit_batch(request: BatchedRequest):
     else:
         return {
             "status": "error",
-            "job_id": launch_config.decision_id,
+            "job_id": configs[0].decision_id,
             "message": "Failed to launch in all regions with all instance types",
         }
 
@@ -648,7 +699,9 @@ def download_output_from_s3(s3_path: str, job_dirname: str) -> Optional[str]:
         print(f"[Download] Downloading {s3_path} to {local_path}...")
         result = subprocess.run(
             ["aws", "s3", "cp", s3_path, str(local_path)],
-            capture_output=True, text=True, timeout=300
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         if result.returncode != 0:
             print(f"[Download] Failed to download output: {result.stderr}")
@@ -663,12 +716,14 @@ def download_output_from_s3(s3_path: str, job_dirname: str) -> Optional[str]:
         print(f"[Download] Downloading {metrics_s3_path}...")
         metrics_result = subprocess.run(
             ["aws", "s3", "cp", metrics_s3_path, str(metrics_local_path)],
-            capture_output=True, text=True, timeout=60
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         if metrics_result.returncode == 0:
             print(f"[Download] Metrics saved: {metrics_local_path}")
         else:
-            print(f"[Download] Metrics not found (may not exist yet)")
+            print("[Download] Metrics not found (may not exist yet)")
 
         return str(local_path)
     except Exception as e:
@@ -678,36 +733,37 @@ def download_output_from_s3(s3_path: str, job_dirname: str) -> Optional[str]:
 
 async def sp_launch_vllm_batch_with_fallback(
     request: BatchedRequest,
-    primary_config: MagicOutput,
-    fallback_configs: list,
+    configs: List[MagicOutput],
     solver: str = "roofline",
 ) -> Tuple[bool, MagicOutput]:
     """Launch vLLM batch job with fallback to alternative instance types."""
-    all_configs = [primary_config] + fallback_configs
-
-    for i, config in enumerate(all_configs):
-        print(f"[Launch] Trying config {i+1}/{len(all_configs)}: {config.instance_type} TP={config.tp_size} PP={config.pp_size}")
+    for i, config in enumerate(configs):
+        print(
+            f"[Launch] Trying config {i + 1}/{len(configs)}: {config.instance_type} TP={config.tp_size} PP={config.pp_size}"
+        )
 
         try:
             await sp_launch_vllm_batch(request, config, solver)
-            print(f"[Launch] Success with config {i+1}: {config.instance_type}")
+            print(f"[Launch] Success with config {i + 1}: {config.instance_type}")
             return (True, config)
 
         except Exception as e:
-            print(f"[Launch] Config {i+1} failed: {e}")
-            if i < len(all_configs) - 1:
+            print(f"[Launch] Config {i + 1} failed: {e}")
+            if i < len(configs) - 1:
                 print("[Launch] Trying next instance type...")
                 continue
             else:
-                print(f"[Launch] All {len(all_configs)} configs failed")
-                return (False, primary_config)
-
-    return (False, primary_config)
+                print(f"[Launch] All {len(configs)} configs failed")
+                return (False, configs[0])
 
 
-async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, solver: str = "roofline"):
+async def sp_launch_vllm_batch(
+    request: BatchedRequest, config: MagicOutput, solver: str = "roofline"
+):
     # Generate informative job directory name
-    job_dirname = generate_job_dirname(request, solver, config.tp_size, config.pp_size, config.instance_type)
+    job_dirname = generate_job_dirname(
+        request, solver, config.tp_size, config.pp_size, config.instance_type
+    )
 
     s3_base, _ = split_uri(request.input_file)
     # S3 output path: s3://bucket/base/job_dirname/output.jsonl
@@ -738,14 +794,18 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
     if ordered_regions:
         any_of_resources = []
         for candidate in ordered_regions[:5]:
-            any_of_resources.append({
-                "region": candidate.region,
-                "instance_type": config.instance_type,
-                "use_spot": candidate.use_spot,
-                "disk_size": "300GB",
-                "ports": 8001,
-            })
-        print(f"[RegionSelector] Trying regions: {[(c.region, 'spot' if c.use_spot else 'on-demand') for c in ordered_regions[:5]]}")
+            any_of_resources.append(
+                {
+                    "region": candidate.region,
+                    "instance_type": config.instance_type,
+                    "use_spot": candidate.use_spot,
+                    "disk_size": "300GB",
+                    "ports": 8001,
+                }
+            )
+        print(
+            f"[RegionSelector] Trying regions: {[(c.region, 'spot' if c.use_spot else 'on-demand') for c in ordered_regions[:5]]}"
+        )
         resources_config = {"any_of": any_of_resources}
     else:
         resources_config = {
@@ -757,22 +817,19 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
 
     # For per-config templates, substitute all placeholders
     if "vllm_configs" in template_path:
-        _, input_file = split_uri(request.input_file)
-        output_file = request.output_file
-        vllm_cfg = request.vllm_specific_config
-        max_num_seqs = vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 32
-
         # Build substitution dict (same as generic template)
         replace_dict = replace_run_vllm(request, config, job_dirname)
 
         # Read template and substitute all placeholders
         from pathlib import Path
+
         template_content = Path(template_path).read_text()
         for key, value in replace_dict.items():
             template_content = template_content.replace("{" + key + "}", str(value))
 
         # Write to temp file and parse as yaml
         import yaml
+
         yaml_data = yaml.safe_load(template_content)
 
         # Preserve image_id from template if specified (e.g., custom AMI for A100)
@@ -781,10 +838,12 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
 
         # If template has a specific image_id, use its region and don't do quota-based fallback
         if template_image_id:
-            print(f"[Template] Using custom AMI: {template_image_id} in {template_region}")
+            print(
+                f"[Template] Using custom AMI: {template_image_id} in {template_region}"
+            )
             resources_config = {
                 "cloud": "aws",
-                "accelerators": yaml_data["resources"].get("accelerators", f"A100:8"),
+                "accelerators": yaml_data["resources"].get("accelerators", "A100:8"),
                 "disk_size": yaml_data["resources"].get("disk_size", "300GB"),
                 "ports": yaml_data["resources"].get("ports", 8001),
                 "image_id": template_image_id,
@@ -800,6 +859,7 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
 
         # Write final yaml
         from pathlib import Path
+
         Path(YAML_OUTPUT).parent.mkdir(parents=True, exist_ok=True)
         with open(YAML_OUTPUT, "w") as f:
             yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
@@ -828,6 +888,7 @@ async def sp_launch_vllm_batch(request: BatchedRequest, config: MagicOutput, sol
     def monitor_and_download():
         """Background thread: stream logs, then download output when done."""
         from pathlib import Path
+
         try:
             sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
             print(f"[Job] {config.decision_id} completed. Downloading output...")
@@ -954,27 +1015,48 @@ def replace_run_vllm_online(request: OnlineServingRequest, config: MagicOutput):
 # Instance type to GPU name mapping
 INSTANCE_TO_GPU = {
     # G6e instances (L40S)
-    "g6e.xlarge": "L40S", "g6e.2xlarge": "L40S", "g6e.4xlarge": "L40S",
-    "g6e.8xlarge": "L40S", "g6e.12xlarge": "L40S", "g6e.16xlarge": "L40S",
-    "g6e.24xlarge": "L40S", "g6e.48xlarge": "L40S",
+    "g6e.xlarge": "L40S",
+    "g6e.2xlarge": "L40S",
+    "g6e.4xlarge": "L40S",
+    "g6e.8xlarge": "L40S",
+    "g6e.12xlarge": "L40S",
+    "g6e.16xlarge": "L40S",
+    "g6e.24xlarge": "L40S",
+    "g6e.48xlarge": "L40S",
     # G6 instances (L4)
-    "g6.xlarge": "L4", "g6.2xlarge": "L4", "g6.4xlarge": "L4",
-    "g6.8xlarge": "L4", "g6.12xlarge": "L4", "g6.16xlarge": "L4",
-    "g6.24xlarge": "L4", "g6.48xlarge": "L4",
+    "g6.xlarge": "L4",
+    "g6.2xlarge": "L4",
+    "g6.4xlarge": "L4",
+    "g6.8xlarge": "L4",
+    "g6.12xlarge": "L4",
+    "g6.16xlarge": "L4",
+    "g6.24xlarge": "L4",
+    "g6.48xlarge": "L4",
     # G5 instances (A10G)
-    "g5.xlarge": "A10G", "g5.2xlarge": "A10G", "g5.4xlarge": "A10G",
-    "g5.8xlarge": "A10G", "g5.12xlarge": "A10G", "g5.16xlarge": "A10G",
-    "g5.24xlarge": "A10G", "g5.48xlarge": "A10G",
+    "g5.xlarge": "A10G",
+    "g5.2xlarge": "A10G",
+    "g5.4xlarge": "A10G",
+    "g5.8xlarge": "A10G",
+    "g5.12xlarge": "A10G",
+    "g5.16xlarge": "A10G",
+    "g5.24xlarge": "A10G",
+    "g5.48xlarge": "A10G",
     # P4 instances (A100)
-    "p4d.24xlarge": "A100", "p4de.24xlarge": "A100",
+    "p4d.24xlarge": "A100",
+    "p4de.24xlarge": "A100",
     # P5 instances (H100)
     "p5.48xlarge": "H100",
     # P3 instances (V100)
-    "p3.2xlarge": "V100", "p3.8xlarge": "V100", "p3.16xlarge": "V100", "p3dn.24xlarge": "V100",
+    "p3.2xlarge": "V100",
+    "p3.8xlarge": "V100",
+    "p3.16xlarge": "V100",
+    "p3dn.24xlarge": "V100",
 }
 
 
-def get_vllm_config_template(model_name: str, instance_type: str, tp: int, pp: int) -> str:
+def get_vllm_config_template(
+    model_name: str, instance_type: str, tp: int, pp: int
+) -> str:
     """
     Get the per-config vLLM template path if it exists.
 
@@ -1019,7 +1101,9 @@ def get_vllm_config_template(model_name: str, instance_type: str, tp: int, pp: i
     return "templates/vllm.yaml"
 
 
-def replace_run_vllm(request: BatchedRequest, config: MagicOutput, job_dirname: str = "output"):
+def replace_run_vllm(
+    request: BatchedRequest, config: MagicOutput, job_dirname: str = "output"
+):
     replace = {}
 
     replace["model"] = request.model_name
@@ -1034,11 +1118,15 @@ def replace_run_vllm(request: BatchedRequest, config: MagicOutput, job_dirname: 
         replace["max_model_len"] = config.max_model_len
     elif request.max_input_tokens and request.max_output_tokens:
         # Use actual max lengths from request + 10% safety margin
-        calculated_len = int((request.max_input_tokens + request.max_output_tokens) * 1.1)
+        calculated_len = int(
+            (request.max_input_tokens + request.max_output_tokens) * 1.1
+        )
         # Round up to nearest power of 2 for efficiency, clamp to reasonable range
         calculated_len = max(1024, min(calculated_len, 131072))
         replace["max_model_len"] = calculated_len
-        print(f"[Config] Calculated max_model_len={calculated_len} from max_input={request.max_input_tokens} + max_output={request.max_output_tokens}")
+        print(
+            f"[Config] Calculated max_model_len={calculated_len} from max_input={request.max_input_tokens} + max_output={request.max_output_tokens}"
+        )
     else:
         replace["max_model_len"] = "auto"
 
@@ -1057,9 +1145,13 @@ def replace_run_vllm(request: BatchedRequest, config: MagicOutput, job_dirname: 
 
     # Get vLLM-specific configs
     vllm_cfg = request.vllm_specific_config
-    replace["max_num_seqs"] = vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 32
+    replace["max_num_seqs"] = (
+        vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 32
+    )
     replace["dtype"] = "auto"  # vLLM auto-detects based on model
-    replace["kv_cache_dtype"] = vllm_cfg.kv_cache_dtype if vllm_cfg and vllm_cfg.kv_cache_dtype else "auto"
+    replace["kv_cache_dtype"] = (
+        vllm_cfg.kv_cache_dtype if vllm_cfg and vllm_cfg.kv_cache_dtype else "auto"
+    )
 
     if (
         request.vllm_specific_config is not None

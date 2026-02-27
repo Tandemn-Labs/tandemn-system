@@ -16,7 +16,6 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +75,10 @@ INSTANCE_VCPUS: Dict[str, int] = {
 # Instance family to quota code mapping
 # G and VT instances share one quota, P instances have their own
 QUOTA_CODES = {
-    "g": "L-DB2E81BA",      # Running On-Demand G and VT instances
-    "g_spot": "L-3819A6DF", # Running Spot G and VT instances
-    "p": "L-417A185B",      # Running On-Demand P instances
-    "p_spot": "L-417A185B", # Running Spot P instances (same code, different quota)
+    "g": "L-DB2E81BA",  # Running On-Demand G and VT instances
+    "g_spot": "L-3819A6DF",  # Running Spot G and VT instances
+    "p": "L-417A185B",  # Running On-Demand P instances
+    "p_spot": "L-417A185B",  # Running Spot P instances (same code, different quota)
 }
 
 
@@ -102,6 +101,7 @@ def get_quota_code(instance_family: str, use_spot: bool) -> str:
 @dataclass
 class RegionQuota:
     """Quota information for a specific region."""
+
     region: str
     on_demand_vcpus: int
     spot_vcpus: int
@@ -116,16 +116,23 @@ def query_quota(region: str, quota_code: str) -> int:
     try:
         result = subprocess.run(
             [
-                "aws", "service-quotas", "get-service-quota",
-                "--service-code", "ec2",
-                "--quota-code", quota_code,
-                "--region", region,
-                "--query", "Quota.Value",
-                "--output", "text"
+                "aws",
+                "service-quotas",
+                "get-service-quota",
+                "--service-code",
+                "ec2",
+                "--quota-code",
+                quota_code,
+                "--region",
+                region,
+                "--query",
+                "Quota.Value",
+                "--output",
+                "text",
             ],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
         if result.returncode == 0:
             value = result.stdout.strip()
@@ -149,9 +156,7 @@ def get_all_quotas(instance_family: str = "g") -> Dict[str, RegionQuota]:
         on_demand = query_quota(region, on_demand_code)
         spot = query_quota(region, spot_code)
         quotas[region] = RegionQuota(
-            region=region,
-            on_demand_vcpus=on_demand,
-            spot_vcpus=spot
+            region=region, on_demand_vcpus=on_demand, spot_vcpus=spot
         )
         logger.info(f"[Quota] {region}: on-demand={on_demand}, spot={spot}")
 
@@ -161,11 +166,14 @@ def get_all_quotas(instance_family: str = "g") -> Dict[str, RegionQuota]:
 @dataclass
 class RegionCandidate:
     """A candidate region for cluster placement."""
+
     region: str
     use_spot: bool
     available_quota: int
 
-    def to_skypilot_resources(self, instance_type: str, disk_size: str = "300GB", ports: int = 8001) -> dict:
+    def to_skypilot_resources(
+        self, instance_type: str, disk_size: str = "300GB", ports: int = 8001
+    ) -> dict:
         """Convert to SkyPilot resources dict for any_of.
 
         Note: Don't specify 'infra' when using 'region' - region implies cloud.
@@ -222,22 +230,24 @@ def get_ordered_regions(
     for region, quota in quotas.items():
         # Check spot quota
         if quota.spot_vcpus >= required_vcpus:
-            candidates.append(RegionCandidate(
-                region=region,
-                use_spot=True,
-                available_quota=quota.spot_vcpus
-            ))
+            candidates.append(
+                RegionCandidate(
+                    region=region, use_spot=True, available_quota=quota.spot_vcpus
+                )
+            )
 
         # Check on-demand quota
         if quota.on_demand_vcpus >= required_vcpus:
-            candidates.append(RegionCandidate(
-                region=region,
-                use_spot=False,
-                available_quota=quota.on_demand_vcpus
-            ))
+            candidates.append(
+                RegionCandidate(
+                    region=region, use_spot=False, available_quota=quota.on_demand_vcpus
+                )
+            )
 
     if not candidates:
-        logger.warning(f"[RegionSelector] No regions have sufficient quota for {required_vcpus} vCPUs!")
+        logger.warning(
+            f"[RegionSelector] No regions have sufficient quota for {required_vcpus} vCPUs!"
+        )
         logger.warning("[RegionSelector] Consider requesting quota increases.")
         return []
 
@@ -250,10 +260,12 @@ def get_ordered_regions(
 
     candidates.sort(key=sort_key)
 
-    logger.info(f"[RegionSelector] Found {len(candidates)} viable region/market combinations:")
+    logger.info(
+        f"[RegionSelector] Found {len(candidates)} viable region/market combinations:"
+    )
     for i, c in enumerate(candidates[:5]):  # Show top 5
         market = "spot" if c.use_spot else "on-demand"
-        logger.info(f"  {i+1}. {c.region} ({market}) - {c.available_quota} vCPUs")
+        logger.info(f"  {i + 1}. {c.region} ({market}) - {c.available_quota} vCPUs")
 
     return candidates
 
@@ -325,13 +337,17 @@ def print_quota_summary():
     g_quotas = get_all_quotas("g")
     p_quotas = get_all_quotas("p")
 
-    print(f"{'Region':<15} {'G/VT On-Demand':>15} {'G/VT Spot':>12} {'P On-Demand':>12} {'P Spot':>10}")
+    print(
+        f"{'Region':<15} {'G/VT On-Demand':>15} {'G/VT Spot':>12} {'P On-Demand':>12} {'P Spot':>10}"
+    )
     print("-" * 70)
 
     for region in AWS_REGIONS:
         g = g_quotas.get(region, RegionQuota(region, 0, 0))
         p = p_quotas.get(region, RegionQuota(region, 0, 0))
-        print(f"{region:<15} {g.on_demand_vcpus:>15} {g.spot_vcpus:>12} {p.on_demand_vcpus:>12} {p.spot_vcpus:>10}")
+        print(
+            f"{region:<15} {g.on_demand_vcpus:>15} {g.spot_vcpus:>12} {p.on_demand_vcpus:>12} {p.spot_vcpus:>10}"
+        )
 
     print()
 

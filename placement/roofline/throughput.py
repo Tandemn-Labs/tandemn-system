@@ -10,8 +10,7 @@ Uses the roofline model to estimate throughput based on:
 Ported from: ../LLM_placement_solver/solver.py
 """
 
-import math
-from typing import Optional, Tuple
+from typing import Optional
 from dataclasses import dataclass
 
 from .gpu_specs import get_gpu_specs, get_ridge_point
@@ -20,6 +19,7 @@ from .gpu_specs import get_gpu_specs, get_ridge_point
 @dataclass
 class ThroughputResult:
     """Result of throughput calculation."""
+
     throughput_tokens_per_sec: float
     regime: str  # "COMPUTE_BOUND" or "MEMORY_BOUND"
     arithmetic_intensity: float
@@ -55,17 +55,17 @@ class ThroughputCalculator:
             Efficiency factor (0-1)
         """
         if batch_size >= 32:
-            return 1.0      # Optimal utilization
+            return 1.0  # Optimal utilization
         elif batch_size >= 16:
-            return 0.95     # Very good
+            return 0.95  # Very good
         elif batch_size >= 8:
-            return 0.90     # Good
+            return 0.90  # Good
         elif batch_size >= 4:
-            return 0.80     # Moderate
+            return 0.80  # Moderate
         elif batch_size >= 2:
-            return 0.65     # Poor
+            return 0.65  # Poor
         else:
-            return 0.50     # Very poor (batch=1)
+            return 0.50  # Very poor (batch=1)
 
     @staticmethod
     def calculate_arithmetic_intensity(
@@ -76,7 +76,7 @@ class ThroughputCalculator:
         d_hidden: int,
         bytes_per_element: int,
         tp_degree: int = 1,
-        phase: str = 'prefill',
+        phase: str = "prefill",
         num_attention_heads: Optional[int] = None,
         num_kv_heads: Optional[int] = None,
     ) -> float:
@@ -111,21 +111,28 @@ class ThroughputCalculator:
         kv_dim = num_kv_heads * d_head
 
         # === FLOPs Calculation (PHASE-AWARE) ===
-        if phase == 'prefill':
+        if phase == "prefill":
             # PREFILL: Process all tokens at once (O(n²) attention)
             flops_q = 2 * batch_size * seq_len * d_model * (d_model / tp_degree)
             flops_k = 2 * batch_size * seq_len * d_model * (kv_dim / tp_degree)
             flops_v = 2 * batch_size * seq_len * d_model * (kv_dim / tp_degree)
             flops_o = 2 * batch_size * seq_len * d_model * (d_model / tp_degree)
             flops_attn_proj = flops_q + flops_k + flops_v + flops_o
-            flops_attn_scores = 4 * batch_size * seq_len * seq_len * (d_model / tp_degree)  # O(n²)
+            flops_attn_scores = (
+                4 * batch_size * seq_len * seq_len * (d_model / tp_degree)
+            )  # O(n²)
             flops_attention = flops_attn_proj + flops_attn_scores
 
             # FFN for all tokens
-            flops_ffn = 2 * batch_size * seq_len * (
-                d_model * (d_hidden / tp_degree) +
-                d_model * (d_hidden / tp_degree) +
-                (d_hidden / tp_degree) * d_model
+            flops_ffn = (
+                2
+                * batch_size
+                * seq_len
+                * (
+                    d_model * (d_hidden / tp_degree)
+                    + d_model * (d_hidden / tp_degree)
+                    + (d_hidden / tp_degree) * d_model
+                )
             )
         else:  # decode
             # DECODE: Generate ONE token (O(n) attention to KV cache)
@@ -135,14 +142,21 @@ class ThroughputCalculator:
             flops_v = 2 * batch_size * 1 * d_model * (kv_dim / tp_degree)
             flops_o = 2 * batch_size * 1 * d_model * (d_model / tp_degree)
             flops_attn_proj = flops_q + flops_k + flops_v + flops_o
-            flops_attn_scores = 4 * batch_size * 1 * kv_cache_len * (d_model / tp_degree)  # O(n)
+            flops_attn_scores = (
+                4 * batch_size * 1 * kv_cache_len * (d_model / tp_degree)
+            )  # O(n)
             flops_attention = flops_attn_proj + flops_attn_scores
 
             # FFN for 1 token
-            flops_ffn = 2 * batch_size * 1 * (
-                d_model * (d_hidden / tp_degree) +
-                d_model * (d_hidden / tp_degree) +
-                (d_hidden / tp_degree) * d_model
+            flops_ffn = (
+                2
+                * batch_size
+                * 1
+                * (
+                    d_model * (d_hidden / tp_degree)
+                    + d_model * (d_hidden / tp_degree)
+                    + (d_hidden / tp_degree) * d_model
+                )
             )
 
         flops_per_layer = flops_attention + flops_ffn
@@ -151,29 +165,43 @@ class ThroughputCalculator:
         # === Memory Access Calculation (PHASE-AWARE) ===
         # Weights (divided by TP): same for both phases
         bytes_weights_per_layer = (
-            (2 * d_model * d_model) +                 # W_q, W_o
-            (2 * d_model * kv_dim) +                  # W_k, W_v (GQA/MQA aware)
-            (3 * d_model * d_hidden)                  # W_gate, W_up, W_down
-        ) * bytes_per_element / tp_degree
+            (
+                (2 * d_model * d_model)  # W_q, W_o
+                + (2 * d_model * kv_dim)  # W_k, W_v (GQA/MQA aware)
+                + (3 * d_model * d_hidden)  # W_gate, W_up, W_down
+            )
+            * bytes_per_element
+            / tp_degree
+        )
 
-        if phase == 'prefill':
+        if phase == "prefill":
             # KV cache being written
-            bytes_kv_cache_per_layer = 2 * batch_size * seq_len * kv_dim * bytes_per_element / tp_degree
+            bytes_kv_cache_per_layer = (
+                2 * batch_size * seq_len * kv_dim * bytes_per_element / tp_degree
+            )
             # Activations for all tokens
-            bytes_activations_per_layer = batch_size * seq_len * d_model * bytes_per_element
+            bytes_activations_per_layer = (
+                batch_size * seq_len * d_model * bytes_per_element
+            )
         else:  # decode
             # KV cache being READ (full cached context!)
             kv_cache_len = seq_len
-            bytes_kv_cache_per_layer = 2 * batch_size * kv_cache_len * kv_dim * bytes_per_element / tp_degree
+            bytes_kv_cache_per_layer = (
+                2 * batch_size * kv_cache_len * kv_dim * bytes_per_element / tp_degree
+            )
             # Activations for 1 token only
             bytes_activations_per_layer = batch_size * 1 * d_model * bytes_per_element
 
-        bytes_per_layer = bytes_weights_per_layer + bytes_kv_cache_per_layer + bytes_activations_per_layer
+        bytes_per_layer = (
+            bytes_weights_per_layer
+            + bytes_kv_cache_per_layer
+            + bytes_activations_per_layer
+        )
         total_bytes = bytes_per_layer * num_layers
 
         # Arithmetic Intensity = FLOPs / Bytes
         if total_bytes == 0:
-            return float('inf')
+            return float("inf")
 
         return total_flops / total_bytes
 
@@ -203,7 +231,7 @@ class ThroughputCalculator:
         tp_degree: int = 1,
         bytes_per_element: int = 2,
         nvlink_bw_gbps: float = 300.0,
-        phase: str = 'prefill',
+        phase: str = "prefill",
         output_length: int = 0,
         num_attention_heads: Optional[int] = None,
         num_kv_heads: Optional[int] = None,
@@ -238,20 +266,36 @@ class ThroughputCalculator:
             ThroughputResult with throughput and regime information
         """
         # Handle aggregated phase: compute prefill and decode separately, then combine
-        if phase == 'aggregated':
+        if phase == "aggregated":
             prefill_result = cls.calculate_throughput(
-                gpu_type=gpu_type, seq_len=seq_len, batch_size=batch_size,
-                num_layers=num_layers, d_model=d_model, d_hidden=d_hidden,
-                tp_degree=tp_degree, bytes_per_element=bytes_per_element,
-                nvlink_bw_gbps=nvlink_bw_gbps, phase='prefill', output_length=0,
-                num_attention_heads=num_attention_heads, num_kv_heads=num_kv_heads
+                gpu_type=gpu_type,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                num_layers=num_layers,
+                d_model=d_model,
+                d_hidden=d_hidden,
+                tp_degree=tp_degree,
+                bytes_per_element=bytes_per_element,
+                nvlink_bw_gbps=nvlink_bw_gbps,
+                phase="prefill",
+                output_length=0,
+                num_attention_heads=num_attention_heads,
+                num_kv_heads=num_kv_heads,
             )
             decode_result = cls.calculate_throughput(
-                gpu_type=gpu_type, seq_len=seq_len, batch_size=batch_size,
-                num_layers=num_layers, d_model=d_model, d_hidden=d_hidden,
-                tp_degree=tp_degree, bytes_per_element=bytes_per_element,
-                nvlink_bw_gbps=nvlink_bw_gbps, phase='decode', output_length=output_length,
-                num_attention_heads=num_attention_heads, num_kv_heads=num_kv_heads
+                gpu_type=gpu_type,
+                seq_len=seq_len,
+                batch_size=batch_size,
+                num_layers=num_layers,
+                d_model=d_model,
+                d_hidden=d_hidden,
+                tp_degree=tp_degree,
+                bytes_per_element=bytes_per_element,
+                nvlink_bw_gbps=nvlink_bw_gbps,
+                phase="decode",
+                output_length=output_length,
+                num_attention_heads=num_attention_heads,
+                num_kv_heads=num_kv_heads,
             )
 
             # Combine using request-level throughput model
@@ -260,15 +304,19 @@ class ThroughputCalculator:
                 decode_throughput=decode_result.throughput_tokens_per_sec,
                 seq_len=seq_len,
                 output_len=output_length,
-                interference_factor=interference_factor
+                interference_factor=interference_factor,
             )
 
             return ThroughputResult(
                 throughput_tokens_per_sec=aggregated_tps,
                 regime="AGGREGATED",
-                arithmetic_intensity=(prefill_result.arithmetic_intensity + decode_result.arithmetic_intensity) / 2,
+                arithmetic_intensity=(
+                    prefill_result.arithmetic_intensity
+                    + decode_result.arithmetic_intensity
+                )
+                / 2,
                 ridge_point=prefill_result.ridge_point,
-                bottleneck=f"Prefill: {prefill_result.bottleneck}, Decode: {decode_result.bottleneck}"
+                bottleneck=f"Prefill: {prefill_result.bottleneck}, Decode: {decode_result.bottleneck}",
             )
 
         # Get GPU specs
@@ -286,26 +334,40 @@ class ThroughputCalculator:
 
         # Calculate arithmetic intensity
         arithmetic_intensity = cls.calculate_arithmetic_intensity(
-            num_layers, batch_size, seq_len, d_model, d_hidden,
-            bytes_per_element, tp_degree, phase,
-            num_attention_heads, num_kv_heads
+            num_layers,
+            batch_size,
+            seq_len,
+            d_model,
+            d_hidden,
+            bytes_per_element,
+            tp_degree,
+            phase,
+            num_attention_heads,
+            num_kv_heads,
         )
 
         regime = cls.determine_regime(arithmetic_intensity, ridge_point)
 
         # === Compute FLOPs PER GPU (with TP, each GPU does less compute) ===
-        if phase == 'prefill':
+        if phase == "prefill":
             flops_q = 2 * batch_size * seq_len * d_model * (d_model / tp_degree)
             flops_k = 2 * batch_size * seq_len * d_model * (kv_dim / tp_degree)
             flops_v = 2 * batch_size * seq_len * d_model * (kv_dim / tp_degree)
             flops_o = 2 * batch_size * seq_len * d_model * (d_model / tp_degree)
             attn_proj_flops = flops_q + flops_k + flops_v + flops_o
-            attn_score_flops = 4 * batch_size * seq_len * seq_len * (d_model / tp_degree)
+            attn_score_flops = (
+                4 * batch_size * seq_len * seq_len * (d_model / tp_degree)
+            )
 
-            ffn_flops = 2 * batch_size * seq_len * (
-                d_model * (d_hidden / tp_degree) +
-                d_model * (d_hidden / tp_degree) +
-                (d_hidden / tp_degree) * d_model
+            ffn_flops = (
+                2
+                * batch_size
+                * seq_len
+                * (
+                    d_model * (d_hidden / tp_degree)
+                    + d_model * (d_hidden / tp_degree)
+                    + (d_hidden / tp_degree) * d_model
+                )
             )
         else:  # decode
             # Use average KV cache length for realistic estimation
@@ -319,61 +381,98 @@ class ThroughputCalculator:
             flops_v = 2 * batch_size * 1 * d_model * (kv_dim / tp_degree)
             flops_o = 2 * batch_size * 1 * d_model * (d_model / tp_degree)
             attn_proj_flops = flops_q + flops_k + flops_v + flops_o
-            attn_score_flops = 4 * batch_size * 1 * avg_kv_cache_len * (d_model / tp_degree)
+            attn_score_flops = (
+                4 * batch_size * 1 * avg_kv_cache_len * (d_model / tp_degree)
+            )
 
-            ffn_flops = 2 * batch_size * 1 * (
-                d_model * (d_hidden / tp_degree) +
-                d_model * (d_hidden / tp_degree) +
-                (d_hidden / tp_degree) * d_model
+            ffn_flops = (
+                2
+                * batch_size
+                * 1
+                * (
+                    d_model * (d_hidden / tp_degree)
+                    + d_model * (d_hidden / tp_degree)
+                    + (d_hidden / tp_degree) * d_model
+                )
             )
 
         flops_per_layer = attn_proj_flops + attn_score_flops + ffn_flops
         total_flops_per_gpu = num_layers * flops_per_layer
 
         # === Compute Memory Access PER GPU ===
-        weight_bytes = num_layers * (
-            (2 * d_model * (d_model / tp_degree)) +
-            (2 * d_model * (kv_dim / tp_degree)) +
-            (3 * d_model * (d_hidden / tp_degree))
-        ) * bytes_per_element
+        weight_bytes = (
+            num_layers
+            * (
+                (2 * d_model * (d_model / tp_degree))
+                + (2 * d_model * (kv_dim / tp_degree))
+                + (3 * d_model * (d_hidden / tp_degree))
+            )
+            * bytes_per_element
+        )
 
-        if phase == 'prefill':
-            activation_bytes = num_layers * batch_size * seq_len * d_model * bytes_per_element
-            kv_cache_bytes = num_layers * 2 * batch_size * seq_len * (kv_dim / tp_degree) * bytes_per_element
+        if phase == "prefill":
+            activation_bytes = (
+                num_layers * batch_size * seq_len * d_model * bytes_per_element
+            )
+            kv_cache_bytes = (
+                num_layers
+                * 2
+                * batch_size
+                * seq_len
+                * (kv_dim / tp_degree)
+                * bytes_per_element
+            )
         else:
             activation_bytes = num_layers * batch_size * 1 * d_model * bytes_per_element
             if output_length > 0:
                 avg_kv_cache_len = seq_len + (output_length - 1) / 2.0
             else:
                 avg_kv_cache_len = seq_len
-            kv_cache_bytes = num_layers * 2 * batch_size * avg_kv_cache_len * (kv_dim / tp_degree) * bytes_per_element
+            kv_cache_bytes = (
+                num_layers
+                * 2
+                * batch_size
+                * avg_kv_cache_len
+                * (kv_dim / tp_degree)
+                * bytes_per_element
+            )
 
         total_bytes_per_gpu = weight_bytes + activation_bytes + kv_cache_bytes
 
         # === Calculate BASE time ===
         if regime == "COMPUTE_BOUND":
-            base_time_per_batch = total_flops_per_gpu / (specs['tflops'] * 1e12 * specs['efficiency'])
+            base_time_per_batch = total_flops_per_gpu / (
+                specs["tflops"] * 1e12 * specs["efficiency"]
+            )
             bottleneck = "GPU Compute (TFLOPS)"
         else:
-            base_time_per_batch = total_bytes_per_gpu / (specs['mem_bw'] * 1e9 * specs['efficiency'])
+            base_time_per_batch = total_bytes_per_gpu / (
+                specs["mem_bw"] * 1e9 * specs["efficiency"]
+            )
             bottleneck = "Memory Bandwidth (GB/s)"
 
         # === TP Communication Overhead ===
-        if phase == 'prefill':
+        if phase == "prefill":
             activation_size_bytes = batch_size * seq_len * d_model * bytes_per_element
         else:
             activation_size_bytes = batch_size * 1 * d_model * bytes_per_element
 
-        comm_time_per_layer = 2 * activation_size_bytes / (nvlink_bw_gbps * 1e9) * (tp_degree - 1) / tp_degree
+        comm_time_per_layer = (
+            2
+            * activation_size_bytes
+            / (nvlink_bw_gbps * 1e9)
+            * (tp_degree - 1)
+            / tp_degree
+        )
         total_comm_time = num_layers * comm_time_per_layer
 
         # TP Efficiency Factor
         if tp_degree == 1:
             tp_efficiency = 1.0
         else:
-            additional_overhead = {
-                1: 0.00, 2: 0.05, 4: 0.10, 8: 0.15, 16: 0.20
-            }.get(tp_degree, 0.25)
+            additional_overhead = {1: 0.00, 2: 0.05, 4: 0.10, 8: 0.15, 16: 0.20}.get(
+                tp_degree, 0.25
+            )
             tp_efficiency = max(0.30, 1.0 - additional_overhead)
 
         # Apply TP efficiency
@@ -381,7 +480,7 @@ class ThroughputCalculator:
         total_time = time_per_batch + total_comm_time
 
         # Calculate throughput
-        if phase == 'prefill':
+        if phase == "prefill":
             tokens_per_batch = batch_size * seq_len
         else:
             tokens_per_batch = batch_size * 1
@@ -395,7 +494,7 @@ class ThroughputCalculator:
             regime=regime,
             arithmetic_intensity=arithmetic_intensity,
             ridge_point=ridge_point,
-            bottleneck=bottleneck
+            bottleneck=bottleneck,
         )
 
     @staticmethod
@@ -404,7 +503,7 @@ class ThroughputCalculator:
         decode_throughput: float,
         seq_len: int,
         output_len: int,
-        interference_factor: float = 0.80
+        interference_factor: float = 0.80,
     ) -> float:
         """
         Request-level throughput model for aggregated clusters.

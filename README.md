@@ -30,7 +30,7 @@ TD_OPENROUTER_KEY=[yourverynicekey]
 
 Other files you need:
 
-- AWS Quota CSV file in `~/.quotas/aws_gpu_quota_by_region.csv`
+- AWS Quota CSV file in `quota/aws_gpu_quota_by_region.csv`
 - Profiling files in `~/.perfdb/[GPU name]/files`
 
 ### Running things

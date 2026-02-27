@@ -1,9 +1,11 @@
+# Python
 __pycache__/
 .venv/
 
 temp/
 files/
-quotas/
 .env
 
+# Editor
 *.code-workspace
+.vscode/

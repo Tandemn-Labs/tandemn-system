@@ -36,7 +36,9 @@ from solver import LLMPlacementSolverWithTP
 logger = logging.getLogger(__name__)
 
 
-def load_supported_instances(cloud_specs_path: str, cloud_provider: str = "AWS") -> Set[str]:
+def load_supported_instances(
+    cloud_specs_path: str, cloud_provider: str = "AWS"
+) -> Set[str]:
     """
     Load the set of supported instance names from cloud_instances_specs.csv.
 
@@ -60,11 +62,12 @@ def load_supported_instances(cloud_specs_path: str, cloud_provider: str = "AWS")
 @dataclass
 class SolverInput:
     """Input parameters for the placement solver."""
+
     model_name: str
     sequence_length: int  # avg_input_tokens
-    output_length: int    # avg_output_tokens
-    total_tokens: int     # num_requests * (input + output)
-    slo_hours: float      # slo_deadline_hours
+    output_length: int  # avg_output_tokens
+    total_tokens: int  # num_requests * (input + output)
+    slo_hours: float  # slo_deadline_hours
 
     # Fixed parameters (per user requirements)
     workload_phase: str = "aggregated"
@@ -75,6 +78,7 @@ class SolverInput:
 @dataclass
 class SolverOutput:
     """Output from the placement solver."""
+
     success: bool
 
     # Placement configuration
@@ -128,36 +132,29 @@ class PlacementSolverAdapter:
         "meta-llama/llama-3-70b": "llama3-70b",
         "meta-llama/Meta-Llama-3-70B": "llama3-70b",
         "meta-llama/Meta-Llama-3-70B-Instruct": "llama3-70b",
-
         "llama-3-8b": "llama3-8b",
         "llama3-8b": "llama3-8b",
         "meta-llama/llama-3-8b": "llama3-8b",
         "meta-llama/Meta-Llama-3-8B": "llama3-8b",
         "meta-llama/Meta-Llama-3-8B-Instruct": "llama3-8b",
-
         # DeepSeek (same arch as Llama-3-70B for now)
         "deepseek-r1-70b": "llama3-70b",
         "deepseek-ai/deepseek-r1-70b": "llama3-70b",
         "deepseek-ai/DeepSeek-R1-Distill-Llama-70B": "llama3-70b",
-
         # Qwen 2.5 variants
         "qwen2.5-7b": "qwen2.5-7b",
         "Qwen/Qwen2.5-7B": "qwen2.5-7b",
         "Qwen/Qwen2.5-7B-Instruct": "qwen2.5-7b",
-
         "qwen2.5-32b": "qwen2.5-32b",
         "Qwen/Qwen2.5-32B": "qwen2.5-32b",
         "Qwen/Qwen2.5-32B-Instruct": "qwen2.5-32b",
-
         "qwen2.5-72b": "qwen2.5-72b",
         "Qwen/Qwen2.5-72B": "qwen2.5-72b",
         "Qwen/Qwen2.5-72B-Instruct": "qwen2.5-72b",
-
         # Qwen 2.5 MoE (57B total, 14B active)
         "qwen2.5-a14b": "qwen2.5-a14b",
         "Qwen/Qwen2.5-A14B": "qwen2.5-a14b",
         "Qwen/Qwen2.5-A14B-Instruct": "qwen2.5-a14b",
-
         # Qwen 3 MoE (235B total, 22B active)
         "qwen3-235b-a22b": "qwen3-235b-a22b",
         "Qwen/Qwen3-235B-A22B": "qwen3-235b-a22b",
@@ -206,7 +203,8 @@ class PlacementSolverAdapter:
 
         if not os.path.exists(config_dir):
             available = [
-                d for d in os.listdir(self.SOLVER_CONFIG_BASE)
+                d
+                for d in os.listdir(self.SOLVER_CONFIG_BASE)
                 if os.path.isdir(os.path.join(self.SOLVER_CONFIG_BASE, d))
                 and not d.startswith(".")
                 and d != "outdated"
@@ -240,7 +238,9 @@ class PlacementSolverAdapter:
             for instance, count in self.gpu_pool.items():
                 f.write(f"{instance},{count}\n")
 
-        logger.info(f"[SolverAdapter] Wrote temp gpu_pool.csv with {len(self.gpu_pool)} instance types")
+        logger.info(
+            f"[SolverAdapter] Wrote temp gpu_pool.csv with {len(self.gpu_pool)} instance types"
+        )
         return temp_path
 
     def _generate_network_bandwidth_temp(self, gpu_pool_path: str) -> str:
@@ -253,8 +253,12 @@ class PlacementSolverAdapter:
         Returns:
             Path to the generated temp network_bandwidth.csv
         """
-        cloud_specs_path = os.path.join(self.SOLVER_CONFIG_BASE, "cloud_instances_specs.csv")
-        generator_script = os.path.join(self.SOLVER_CONFIG_BASE, "generate_network_bandwidth.py")
+        cloud_specs_path = os.path.join(
+            self.SOLVER_CONFIG_BASE, "cloud_instances_specs.csv"
+        )
+        generator_script = os.path.join(
+            self.SOLVER_CONFIG_BASE, "generate_network_bandwidth.py"
+        )
 
         # Create temp file for output
         fd, temp_path = tempfile.mkstemp(suffix=".csv", prefix="network_bandwidth_")
@@ -265,10 +269,14 @@ class PlacementSolverAdapter:
         cmd = [
             sys.executable,
             generator_script,
-            "--gpu-pool", gpu_pool_path,
-            "--cloud-specs", cloud_specs_path,
-            "--output", temp_path,
-            "--cloud-provider", self.cloud_provider,
+            "--gpu-pool",
+            gpu_pool_path,
+            "--cloud-specs",
+            cloud_specs_path,
+            "--output",
+            temp_path,
+            "--cloud-provider",
+            self.cloud_provider,
         ]
 
         logger.info(f"[SolverAdapter] Generating network_bandwidth.csv to temp file...")
@@ -280,8 +288,12 @@ class PlacementSolverAdapter:
                 cwd=self.SOLVER_CONFIG_BASE,
             )
             if result.returncode != 0:
-                logger.error(f"[SolverAdapter] generate_network_bandwidth.py failed: {result.stderr}")
-                raise RuntimeError(f"Network bandwidth generation failed: {result.stderr}")
+                logger.error(
+                    f"[SolverAdapter] generate_network_bandwidth.py failed: {result.stderr}"
+                )
+                raise RuntimeError(
+                    f"Network bandwidth generation failed: {result.stderr}"
+                )
 
             logger.info(f"[SolverAdapter] {result.stdout.strip()}")
 
@@ -313,18 +325,26 @@ class PlacementSolverAdapter:
             # Prepare optional path arguments for solver
             gpu_pool_file = None
             network_bandwidth_file = None
-            cloud_specs_file = os.path.join(self.SOLVER_CONFIG_BASE, "cloud_instances_specs.csv")
+            cloud_specs_file = os.path.join(
+                self.SOLVER_CONFIG_BASE, "cloud_instances_specs.csv"
+            )
 
             # Handle custom GPU pool
             if self.gpu_pool:
                 # Filter to only supported instances (those in cloud_instances_specs.csv)
-                supported = load_supported_instances(cloud_specs_file, self.cloud_provider)
+                supported = load_supported_instances(
+                    cloud_specs_file, self.cloud_provider
+                )
 
                 if supported:
                     original_count = len(self.gpu_pool)
-                    self.gpu_pool = {k: v for k, v in self.gpu_pool.items() if k in supported}
+                    self.gpu_pool = {
+                        k: v for k, v in self.gpu_pool.items() if k in supported
+                    }
                     filtered_count = len(self.gpu_pool)
-                    logger.info(f"[SolverAdapter] Filtered GPU pool: {original_count} -> {filtered_count} instances (only those in cloud_instances_specs.csv)")
+                    logger.info(
+                        f"[SolverAdapter] Filtered GPU pool: {original_count} -> {filtered_count} instances (only those in cloud_instances_specs.csv)"
+                    )
 
                 if not self.gpu_pool:
                     return SolverOutput(
@@ -344,13 +364,17 @@ class PlacementSolverAdapter:
                         error_message="No supported instances in GPU pool after filtering",
                     )
 
-                logger.info(f"[SolverAdapter] Using custom GPU pool: {list(self.gpu_pool.keys())}")
+                logger.info(
+                    f"[SolverAdapter] Using custom GPU pool: {list(self.gpu_pool.keys())}"
+                )
 
                 # Write gpu_pool.csv to temp file
                 gpu_pool_file = self._write_gpu_pool_csv_temp()
 
                 # Generate network_bandwidth.csv to temp file
-                network_bandwidth_file = self._generate_network_bandwidth_temp(gpu_pool_file)
+                network_bandwidth_file = self._generate_network_bandwidth_temp(
+                    gpu_pool_file
+                )
 
             # Initialize solver with explicit paths (no chdir needed!)
             solver = LLMPlacementSolverWithTP(
@@ -401,10 +425,13 @@ class PlacementSolverAdapter:
             if assignments:
                 gpu_type_key = assignments[0].get("gpu_type", "")
                 # gpu_type is like "g6e.48xlarge#0", extract instance family
-                instance_family = gpu_type_key.split("#")[0] if "#" in gpu_type_key else gpu_type_key
+                instance_family = (
+                    gpu_type_key.split("#")[0] if "#" in gpu_type_key else gpu_type_key
+                )
 
                 # Look up GPU model from instance specs
                 from .gpu_specs import AWS_INSTANCE_GPU_MAP
+
                 gpu_info = AWS_INSTANCE_GPU_MAP.get(instance_family, {})
                 gpu_model = gpu_info.get("gpu_model", "L40S")
                 gpus_per_instance = gpu_info.get("num_gpus", 8)
@@ -421,6 +448,7 @@ class PlacementSolverAdapter:
             # Calculate max supported context length based on GPU memory
             # This is critical - vLLM pre-allocates KV cache for max_model_len
             from .gpu_specs import calculate_max_supported_context
+
             tp_degree = homo_cfg.get("tp_degree", 1)
             pp_stages = homo_cfg.get("pp_stages", 1)
             try:
@@ -439,9 +467,13 @@ class PlacementSolverAdapter:
                 # Cap by model's max_position_embeddings (what the model actually supports)
                 model_max_context = solver.config.max_position_embeddings
                 max_context = min(gpu_max_context, model_max_context)
-                logger.info(f"[SolverAdapter] Max context: GPU supports {gpu_max_context}, model supports {model_max_context}, using {max_context}")
+                logger.info(
+                    f"[SolverAdapter] Max context: GPU supports {gpu_max_context}, model supports {model_max_context}, using {max_context}"
+                )
             except Exception as e:
-                logger.warning(f"[SolverAdapter] Failed to calculate max context: {e}, using default 8192")
+                logger.warning(
+                    f"[SolverAdapter] Failed to calculate max context: {e}, using default 8192"
+                )
                 max_context = 8192
 
             return SolverOutput(
@@ -464,6 +496,7 @@ class PlacementSolverAdapter:
         except Exception as e:
             logger.error(f"[SolverAdapter] Error: {e}")
             import traceback
+
             logger.debug(traceback.format_exc())
             return SolverOutput(
                 success=False,
