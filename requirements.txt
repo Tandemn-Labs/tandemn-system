@@ -20,3 +20,5 @@ boto3
 
 # Config / data
 PyYAML
+
+gurobipy

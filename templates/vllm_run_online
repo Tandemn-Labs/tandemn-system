@@ -1,7 +1,26 @@
 set -euxo pipefail
 source .venv/bin/activate
 
-~/sky_templates/ray/start_cluster
+# Manual Ray cluster setup (bypasses broken SkyPilot start_cluster script)
+RAY_PORT=6379
+
+if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo "Starting Ray head node..."
+    ray start --head --port=$RAY_PORT --dashboard-host=0.0.0.0 --disable-usage-stats
+else
+    echo "Starting Ray worker node, connecting to head..."
+    HEAD_IP=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
+    for i in {{1..60}}; do
+        if ray start --address="$HEAD_IP:$RAY_PORT" --disable-usage-stats 2>/dev/null; then
+            echo "Connected to Ray head at $HEAD_IP:$RAY_PORT"
+            break
+        fi
+        echo "Waiting for Ray head... attempt $i/60"
+        sleep 2
+    done
+fi
+
+ray status
 
 if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
     echo "Starting vLLM server..."
@@ -10,6 +29,7 @@ if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
     --port {port} \
     -tp {tp} \
     -pp {pp} \
+    --hf-token "$HF_TOKEN" \
     {additional_params} > vllm.log 2>&1 &
     
     VLLM_PID=$!

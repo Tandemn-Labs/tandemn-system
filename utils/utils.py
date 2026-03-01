@@ -36,7 +36,9 @@ def update_yaml_file(
         else:
             data[key] = value
 
-    # Write the updated YAML back
+    # Write the updated YAML back (create parent directory if needed)
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
@@ -217,11 +219,18 @@ def sort_perf_entries_io_length(df, job_avg_input, job_avg_output):
     return df
 
 
-def get_vcpu_count_from_gpu(quota_df, gpu_base, tp, pp, replicas):
+def get_vcpu_count_from_gpu(
+    quota_df, gpu_base, gpus_needed, prefer_single_instance=False
+):
     """
     Given the GPU base and parallelism configuration (tp, pp, replicas),
     filters instances where the GPU count matches the TP number.
     Returns list: [(vCPU count, Instance Type, Num of instances needed), ...]
+
+    If prefer_single_instance=True, prioritize instances where num_inst=1.
+    This is important for TP>1 because tensor parallelism requires high-bandwidth
+    intra-node communication (NVLink/PCIe). PP can work inter-node since it only
+    passes activations between pipeline stages.
     """
     # Filter by GPU base and GPU count matching TP
     instances = quota_df[
@@ -237,5 +246,9 @@ def get_vcpu_count_from_gpu(quota_df, gpu_base, tp, pp, replicas):
         vcpu_needed = int(num_inst * inst["vCPU"])
         packings.append((vcpu_needed, inst["Instance_Type"], num_inst))
 
-    packings.sort(key=lambda x: x[0])
+    if prefer_single_instance:
+        # Sort by: (1) prefer single instance, (2) then by vCPU cost
+        packings.sort(key=lambda x: (x[2] > 1, x[0]))
+    else:
+        packings.sort(key=lambda x: x[0])
     return packings

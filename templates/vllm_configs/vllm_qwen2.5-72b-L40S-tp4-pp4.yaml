@@ -1,74 +1,96 @@
-name: online-cluster
+name: default-cluster
 
 num_nodes: 1
 
 resources:
-  infra: aws/us-east-1
-  use_spot: false  # Use on-demand for persistent serving
-  disk_size: 500GB
-  instance_type: p3.xlarge
-  ports: 8001  # Expose port
+  cloud: aws
+  accelerators: L40S:8
+  disk_size: 300GB
+  ports: 8001
 
 envs:
-  HF_TOKEN: null  # Will be replaced at runtime
+  HF_TOKEN: null
+  VLLM_USE_V1: "0"
   VLLM_NO_USAGE_STATS: "1"
 
 file_mounts:
+  /data:
+    mode: MOUNT
+    source: s3://tandemn_orca/test
+  ~/batch_runner.py: ./templates/vllm_batch_runner.py
   ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py
 
 setup: |
   export PYTHONHASHSEED=0
   set -euxo pipefail
+
+  # Diagnostics
+  echo "=== System Diagnostics ==="
+  nvidia-smi
+  echo "=========================="
+
   python3 -m pip install -U pip
   python3 -m pip install -U uv
 
   uv venv --python 3.12 --seed
   source .venv/bin/activate
 
-  # Pre-install Ray to work around SkyPilot bug (ray[default]==added parse error)
+  # Pre-install Ray
   uv pip install "ray[default]>=2.48.0"
 
-  # Install vLLM (uses transformers 5.x which removed all_special_tokens_extended)
+  # ========================================================================
+  # L40S has newer drivers (550+) that support CUDA 12.4
+  # Can use vLLM 0.10.0 with default PyTorch
+  # ========================================================================
+  echo "=== Installing vLLM 0.10.0 ==="
   uv pip install "vllm==0.10.0"
 
-  # Fix vLLM DisabledTqdm bug: duplicate 'disable' kwarg with newer huggingface_hub
-  # Patch the vLLM code directly to pop 'disable' from kwargs before passing to super().__init__
+  # Apply vLLM 0.10.x patches
   SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+
+  # Fix DisabledTqdm bug
   WEIGHT_UTILS="$SITE_PACKAGES/vllm/model_executor/model_loader/weight_utils.py"
   sed -i 's/super().__init__(\*args, \*\*kwargs, disable=True)/kwargs.pop("disable", None); super().__init__(*args, **kwargs, disable=True)/' "$WEIGHT_UTILS"
   echo "Patched vLLM DisabledTqdm"
 
-  # Install the compatibility patch for Qwen tokenizers
-  # vLLM 0.10.0 uses all_special_tokens_extended which was removed in transformers 4.47+
+  # Install compatibility patch for Qwen tokenizers
   cp ~/vllm_compat_patch.py "$SITE_PACKAGES/vllm_compat_patch.py"
   echo "import vllm_compat_patch" > "$SITE_PACKAGES/sitecustomize.py"
   echo "Installed vLLM compatibility patch"
 
-  # Verify the patch works
+  # Verify
+  python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda)"
   python3 -c "from vllm import LLM; print('vLLM import successful')"
 
 run: |
   set -euxo pipefail
   source .venv/bin/activate
 
-  # Manual Ray cluster setup (bypasses broken SkyPilot start_cluster script)
+  # Disable vLLM v1 engine
+  export VLLM_USE_V1=0
+
+  # Ray setup
   RAY_PORT=6379
   if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
-    echo "Starting Ray head node..."
     ray start --head --port=$RAY_PORT --dashboard-host=0.0.0.0 --disable-usage-stats
   else
-    echo "Starting Ray worker node..."
     HEAD_IP=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
     for i in {1..60}; do
-      if ray start --address="$HEAD_IP:$RAY_PORT" --disable-usage-stats 2>/dev/null; then
-        echo "Connected to Ray head"
-        break
-      fi
+      ray start --address="$HEAD_IP:$RAY_PORT" --disable-usage-stats 2>/dev/null && break
       sleep 2
     done
   fi
   ray status
 
   if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
-    echo "Starting vLLM server..."
+    python ~/batch_runner.py \
+      -i {input_file} \
+      -o {output_file} \
+      --model Qwen/Qwen2.5-72B-Instruct \
+      -tp 4 \
+      -pp 4 \
+      --max-model-len 32768 \
+      --gpu-memory-utilization 0.90 \
+      --max-num-seqs {max_num_seqs} \
+      --hf-token "$HF_TOKEN"
   fi

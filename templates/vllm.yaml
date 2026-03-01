@@ -4,15 +4,31 @@ num_nodes: 1
 
 resources:
   infra: aws
-  disk_size: 100GB
+  disk_size: 300GB
   instance_type: p3.gxlarge
   ports: 8001 # Expose port for observability
+
+envs:
+  HF_TOKEN: null  # Will be replaced at runtime
+  VLLM_USE_V1: "0"  # Disable v1 engine - has PP bugs and transformers compatibility issues
+
+envs:
+  HF_TOKEN: null  # Will be replaced at runtime
+  VLLM_USE_V1: "0"  # Disable v1 engine - has PP bugs and transformers compatibility issues
+  VLLM_NO_USAGE_STATS: "1"
+  # CUDA initialization settings for A100/multi-GPU stability
+  CUDA_DEVICE_ORDER: "PCI_BUS_ID"  # Consistent GPU ordering
+  NCCL_ASYNC_ERROR_HANDLING: "1"  # Better error handling for multi-GPU
+  CUDA_LAUNCH_BLOCKING: "0"  # Keep async (1 for debugging only)
 
 file_mounts:
   /data:
     mode: MOUNT
     source: s3://tandemn_orca/test
+  ~/batch_runner.py: ./templates/vllm_batch_runner.py
+  ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py
 
+setup: |
 setup: |
   export PYTHONHASHSEED=0
   set -euxo pipefail
@@ -22,19 +38,101 @@ setup: |
   uv venv --python 3.12 --seed
   source .venv/bin/activate
 
-  # Install vLLM
-  uv pip install "datasets" "requests"
-  uv pip install "transformers==4.57.6" # transformers > 5.0.0 breaks
-  uv pip install "vllm==0.10.0" # old vllm
+  # Pre-install Ray to work around SkyPilot bug (ray[default]==added parse error)
+  uv pip install "ray[default]>=2.48.0"
+
+  # ========================================================================
+  # Install vLLM 0.10.0
+  # ========================================================================
+  # Note: A100 has a dedicated per-config template with custom AMI
+  # This generic template is for L40S and other GPUs that work with vLLM 0.10.0
+  # ========================================================================
+  echo "=== Installing vLLM 0.10.0 ==="
+  uv pip install "vllm==0.10.0"
+
+  # Verify PyTorch CUDA
+  python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Available:', torch.cuda.is_available())"
+
+  SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+
+  # ========================================================================
+  # Apply patches for vLLM 0.10.0 + transformers 5.x
+  # ========================================================================
+
+  # Patch 1: Fix DisabledTqdm bug (duplicate 'disable' kwarg)
+  WEIGHT_UTILS="$SITE_PACKAGES/vllm/model_executor/model_loader/weight_utils.py"
+  sed -i 's/super().__init__(\*args, \*\*kwargs, disable=True)/kwargs.pop("disable", None); super().__init__(*args, **kwargs, disable=True)/' "$WEIGHT_UTILS"
+  echo "Patched vLLM DisabledTqdm"
+
+  # Patch 2: Install compatibility patch for all_special_tokens_extended
+  # vLLM uses all_special_tokens_extended which was removed in transformers 4.47+
+  cp ~/vllm_compat_patch.py "$SITE_PACKAGES/vllm_compat_patch.py"
+  echo "import vllm_compat_patch" > "$SITE_PACKAGES/sitecustomize.py"
+  echo "Installed vLLM compatibility patch for transformers 5.x"
+
+  # Verify vLLM works
+  python3 -c "from vllm import LLM; print('vLLM import successful')"
+
+  # ========================================================================
+  # NVSwitch/NVLink verification for multi-GPU NVSwitch instances
+  # (p4d, p4de, p5 families — HGX A100/H100 with NVSwitch)
+  # ========================================================================
+  if systemctl list-units --type=service --all | grep -q nvidia-fabricmanager; then
+    echo "=== NVSwitch Instance Detected ==="
+
+    # 1. Fabric Manager must be running
+    if systemctl is-active --quiet nvidia-fabricmanager; then
+      echo "[NVSwitch] Fabric Manager: active"
+    else
+      echo "[NVSwitch] ERROR: Fabric Manager is NOT running. NVLink will not work."
+      echo "[NVSwitch] Attempting to start Fabric Manager..."
+      sudo systemctl start nvidia-fabricmanager
+      sleep 2
+      if systemctl is-active --quiet nvidia-fabricmanager; then
+        echo "[NVSwitch] Fabric Manager started successfully"
+      else
+        echo "[NVSwitch] FATAL: Fabric Manager failed to start. Check driver/fabricmanager version match."
+        systemctl status nvidia-fabricmanager --no-pager
+        exit 1
+      fi
+    fi
+
+    # 2. NVSwitch topology visible
+    echo "[NVSwitch] GPU topology:"
+    nvidia-smi topo -m
+    # Should show "NV12" between all GPU pairs (NVLink through NVSwitch)
+    # If you see "PHB" or "SYS" instead, Fabric Manager failed silently
+
+    # 3. NVLink active on all GPUs
+    echo "[NVSwitch] NVLink status:"
+    nvidia-smi nvlink -s
+    # Should show active links on all 8 GPUs
+  else
+    echo "=== Non-NVSwitch instance (PCIe GPUs) — skipping Fabric Manager check ==="
+  fi
 
 run: |
   set -euxo pipefail
-
-
   source .venv/bin/activate
 
-  ~/sky_templates/ray/start_cluster
+  # Manual Ray cluster setup (bypasses broken SkyPilot start_cluster script)
+  RAY_PORT=6379
+  if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo "Starting Ray head node..."
+    ray start --head --port=$RAY_PORT --dashboard-host=0.0.0.0 --disable-usage-stats
+  else
+    echo "Starting Ray worker node..."
+    HEAD_IP=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
+    for i in {1..60}; do
+      if ray start --address="$HEAD_IP:$RAY_PORT" --disable-usage-stats 2>/dev/null; then
+        echo "Connected to Ray head"
+        break
+      fi
+      sleep 2
+    done
+  fi
+  ray status
 
   if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
-    echo hello
+    echo "Ready for batch job"
   fi
