@@ -7,21 +7,19 @@ HF_TOKEN="HF_TOKEN_HERE" # not neccessary if the model does not require it.
 OPENROUTER_API_KEY="OPENROUTER_API_KEY_HERE"
 
 # MODEL_NAME="meta-llama/Meta-Llama-3-70B-Instruct"
-MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
+# MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 # MODEL_NAME="Qwen/Qwen3-235B-A22B"
+MODEL_NAME="deepseek-ai/DeepSeek-R1-Distill-Llama-70B"
 
 # Placement solver: "roofline", "llm", or "user_specified"
 # placement_solver="llm"
 # placement_solver="roofline"
 placement_solver="user_specified"
-
-llm_advisor_tier="paid" # only used if placement_solver is "llm"
-
-# --- User-specified placement (only used when placement_solver="user_specified") ---
 gpu_type="L40S" # [A100, L40S, H100]
 tp_size=8 # tensor parallelism: 1, 2, 4, 8
-pp_size=1 # pipeline parallelism: 1, 2, 3, 4
+pp_size=2 # pipeline parallelism: 1, 2, 3, 4
 
+llm_advisor_tier="paid" # only used if placement_solver is "llm"
 
 # input_file="s3://tandemn-orca/batch/input.jsonl"
 # input_file="s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_956-avgoutputlen_50.jsonl"
@@ -51,7 +49,8 @@ curl --request POST \
         "openrouter_api_key": "'"${OPENROUTER_API_KEY}"'",
         "gpu_type": "'"${gpu_type:-}"'",
         "tp_size": '"${tp_size:-null}"',
-        "pp_size": '"${pp_size:-null}"'
+        "pp_size": '"${pp_size:-null}"',
+        "s3_models": true
     }'
 
 # --- Example: user_specified (bypass solver, use A100 TP=8 PP=1) ---
