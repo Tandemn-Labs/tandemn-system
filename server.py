@@ -833,7 +833,7 @@ async def sp_launch_vllm_batch(
     # S3 output path: s3://bucket/base/job_dirname/output.jsonl
     s3_output_dir = f"{s3_base}/{job_dirname}"
 
-    # Verify model exists in S3 before launching (fail fast with clear error)
+    # Verify model exists in S3; fall back to HuggingFace if unavailable
     if request.s3_models:
         s3_model_path = f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}/"
         s3_check = subprocess.run(
@@ -841,12 +841,13 @@ async def sp_launch_vllm_batch(
             capture_output=True, text=True,
         )
         if s3_check.returncode != 0 or not s3_check.stdout.strip():
-            close_job_logger(job_logger)
-            raise ValueError(
-                f"Model '{request.model_name}' not found at {s3_model_path}. "
-                f"Upload it first with upload_model_to_s3.py"
+            job_logger.warning(
+                f"[S3] Model '{request.model_name}' not found at {s3_model_path}. "
+                f"Falling back to HuggingFace download."
             )
-        job_logger.info(f"[S3] Verified model exists at {s3_model_path}")
+            request.s3_models = False
+        else:
+            job_logger.info(f"[S3] Verified model exists at {s3_model_path}")
 
     hf_token = request.hf_token or HF_TOKEN or ""
     num_nodes = config.pp_size * config.replicas
