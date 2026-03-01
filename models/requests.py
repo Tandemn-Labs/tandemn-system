@@ -51,6 +51,8 @@ class BatchedRequest(BaseModel):
             if self.pp_size is not None and self.pp_size not in {1, 2, 3, 4}:
                 raise ValueError(f"pp_size must be one of {{1, 2, 3, 4}}, got {self.pp_size}")
         return self
+    # Load model weights from S3 instead of HuggingFace (faster, requires prior upload)
+    s3_models: Optional[bool] = False
     # HuggingFace token for gated models (Llama, etc.)
     hf_token: Optional[str] = None
     # OpenRouter API key for LLM-based placement solver

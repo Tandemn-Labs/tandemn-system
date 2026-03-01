@@ -25,12 +25,46 @@ from threading import Lock
 import threading
 import time
 import re
+import logging
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 ##### Global variables
 YAML_OUTPUT = "temp/output.yaml"
+
+
+def setup_job_logger(job_id: str, log_file_path: str) -> logging.Logger:
+    """Create a named logger that writes to both console and a job-specific log file."""
+    logger = logging.getLogger(f"orca.job.{job_id}")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    # Console handler — INFO level, simple format (matches print() behavior)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(ch)
+
+    # File handler — DEBUG level, with timestamps
+    fh = logging.FileHandler(log_file_path)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(fh)
+
+    return logger
+
+
+def close_job_logger(logger: logging.Logger):
+    """Flush and close all handlers on the logger."""
+    for handler in logger.handlers[:]:
+        handler.flush()
+        handler.close()
+        logger.removeHandler(handler)
+
+# S3 model storage defaults (used with s3_models flag)
+S3_MODEL_BUCKET = "tandemn-model-shards"
+S3_MODEL_PREFIX = "hf-models"
 
 
 def estimate_tokens(text: str) -> int:
@@ -509,9 +543,12 @@ async def submit_batch(request: BatchedRequest):
         }
     )
 
-    print(
-        f"[InputStats] num_lines={num_lines}, avg_input={avg_input_tokens}, max_input={max_input_tokens}"
-    )
+    # Collect log messages before the job logger is created
+    early_messages = []
+
+    msg = f"[InputStats] num_lines={num_lines}, avg_input={avg_input_tokens}, max_input={max_input_tokens}"
+    print(msg)
+    early_messages.append(("INFO", msg))
 
     # Get multiple fallback solutions for retry logic
     # Request field takes priority, then fall back to env var
@@ -524,8 +561,9 @@ async def submit_batch(request: BatchedRequest):
         pp = request.pp_size or 1
 
         # Resolve GPU type to the smallest AWS instance with enough GPUs
+        # Each PP stage runs on a separate instance; each instance needs tp GPUs
         try:
-            instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp * pp)
+            instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp)
         except ValueError as e:
             return {
                 "status": "error",
@@ -571,12 +609,14 @@ async def submit_batch(request: BatchedRequest):
         ]
 
         sol = result.get("solution") or {}
-        print(
+        msg = (
             f"[Placement] user_specified: {instance_type} TP={tp} PP={pp} "
             f"max_model_len={result['max_model_len']} "
             f"throughput={sol.get('throughput_tokens_per_sec', 'N/A')} tok/s "
             f"cost=${sol.get('cost_per_hour', 'N/A')}/hr"
         )
+        print(msg)
+        early_messages.append(("INFO", msg))
 
     elif use_solver == "roofline":
         solver = RooflineAWSAllocation(
@@ -600,12 +640,16 @@ async def submit_batch(request: BatchedRequest):
         )
         configs = [solver.decide(request)]
 
-    print(f"[Placement] Using solver: {use_solver}")
-    print(
-        f"[Placement] Primary: {configs[0].instance_type} TP={configs[0].tp_size} PP={configs[0].pp_size}"
-    )
+    msg = f"[Placement] Using solver: {use_solver}"
+    print(msg)
+    early_messages.append(("INFO", msg))
+    msg = f"[Placement] Primary: {configs[0].instance_type} TP={configs[0].tp_size} PP={configs[0].pp_size}"
+    print(msg)
+    early_messages.append(("INFO", msg))
     if len(configs) > 1:
-        print(f"[Placement] Fallbacks: {len(configs) - 1}")
+        msg = f"[Placement] Fallbacks: {len(configs) - 1}"
+        print(msg)
+        early_messages.append(("INFO", msg))
 
     # Pre-launch check: ensure max_model_len can accommodate the longest prompt
     max_output = request.max_output_tokens or request.avg_output_tokens
@@ -634,7 +678,7 @@ async def submit_batch(request: BatchedRequest):
 
     # Launch with fallback support
     success, used_config = await sp_launch_vllm_batch_with_fallback(
-        request, configs, solver=use_solver
+        request, configs, solver=use_solver, early_messages=early_messages
     )
 
     if success:
@@ -683,9 +727,12 @@ async def submit_online(request: OnlineServingRequest):
             }
 
 
-def download_output_from_s3(s3_path: str, job_dirname: str) -> Optional[str]:
+def download_output_from_s3(s3_path: str, job_dirname: str, logger=None) -> Optional[str]:
     """Download output file and metrics.csv from S3 to local filesystem."""
     from pathlib import Path
+
+    _log = logger.info if logger else print
+    _log_err = logger.error if logger else print
 
     # Use the informative job dirname for local storage
     local_output_dir = Path(f"outputs/{job_dirname}")
@@ -696,7 +743,7 @@ def download_output_from_s3(s3_path: str, job_dirname: str) -> Optional[str]:
     local_path = local_output_dir / filename
 
     try:
-        print(f"[Download] Downloading {s3_path} to {local_path}...")
+        _log(f"[Download] Downloading {s3_path} to {local_path}...")
         result = subprocess.run(
             ["aws", "s3", "cp", s3_path, str(local_path)],
             capture_output=True,
@@ -704,16 +751,16 @@ def download_output_from_s3(s3_path: str, job_dirname: str) -> Optional[str]:
             timeout=300,
         )
         if result.returncode != 0:
-            print(f"[Download] Failed to download output: {result.stderr}")
+            _log_err(f"[Download] Failed to download output: {result.stderr}")
             return None
-        print(f"[Download] Output saved: {local_path}")
+        _log(f"[Download] Output saved: {local_path}")
 
         # Download metrics.csv from same directory
         s3_dir = "/".join(s3_path.split("/")[:-1])
         metrics_s3_path = f"{s3_dir}/metrics.csv"
         metrics_local_path = local_output_dir / "metrics.csv"
 
-        print(f"[Download] Downloading {metrics_s3_path}...")
+        _log(f"[Download] Downloading {metrics_s3_path}...")
         metrics_result = subprocess.run(
             ["aws", "s3", "cp", metrics_s3_path, str(metrics_local_path)],
             capture_output=True,
@@ -721,13 +768,13 @@ def download_output_from_s3(s3_path: str, job_dirname: str) -> Optional[str]:
             timeout=60,
         )
         if metrics_result.returncode == 0:
-            print(f"[Download] Metrics saved: {metrics_local_path}")
+            _log(f"[Download] Metrics saved: {metrics_local_path}")
         else:
-            print("[Download] Metrics not found (may not exist yet)")
+            _log("[Download] Metrics not found (may not exist yet)")
 
         return str(local_path)
     except Exception as e:
-        print(f"[Download] Error: {e}")
+        _log_err(f"[Download] Error: {e}")
         return None
 
 
@@ -735,15 +782,19 @@ async def sp_launch_vllm_batch_with_fallback(
     request: BatchedRequest,
     configs: List[MagicOutput],
     solver: str = "roofline",
+    early_messages: list = None,
 ) -> Tuple[bool, MagicOutput]:
     """Launch vLLM batch job with fallback to alternative instance types."""
+    if early_messages is None:
+        early_messages = []
+
     for i, config in enumerate(configs):
-        print(
-            f"[Launch] Trying config {i + 1}/{len(configs)}: {config.instance_type} TP={config.tp_size} PP={config.pp_size}"
-        )
+        msg = f"[Launch] Trying config {i + 1}/{len(configs)}: {config.instance_type} TP={config.tp_size} PP={config.pp_size}"
+        print(msg)
+        early_messages.append(("INFO", msg))
 
         try:
-            await sp_launch_vllm_batch(request, config, solver)
+            await sp_launch_vllm_batch(request, config, solver, early_messages=early_messages)
             print(f"[Launch] Success with config {i + 1}: {config.instance_type}")
             return (True, config)
 
@@ -758,16 +809,44 @@ async def sp_launch_vllm_batch_with_fallback(
 
 
 async def sp_launch_vllm_batch(
-    request: BatchedRequest, config: MagicOutput, solver: str = "roofline"
+    request: BatchedRequest, config: MagicOutput, solver: str = "roofline",
+    early_messages: list = None,
 ):
+    from pathlib import Path
+
     # Generate informative job directory name
     job_dirname = generate_job_dirname(
         request, solver, config.tp_size, config.pp_size, config.instance_type
     )
 
+    # Create output dir and job logger early
+    output_dir = Path(f"outputs/{job_dirname}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    job_logger = setup_job_logger(config.decision_id, str(output_dir / "job.log"))
+
+    # Flush early messages collected before logger existed
+    if early_messages:
+        for level, msg in early_messages:
+            getattr(job_logger, level.lower(), job_logger.info)(msg)
+
     s3_base, _ = split_uri(request.input_file)
     # S3 output path: s3://bucket/base/job_dirname/output.jsonl
     s3_output_dir = f"{s3_base}/{job_dirname}"
+
+    # Verify model exists in S3 before launching (fail fast with clear error)
+    if request.s3_models:
+        s3_model_path = f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}/"
+        s3_check = subprocess.run(
+            ["aws", "s3", "ls", s3_model_path],
+            capture_output=True, text=True,
+        )
+        if s3_check.returncode != 0 or not s3_check.stdout.strip():
+            close_job_logger(job_logger)
+            raise ValueError(
+                f"Model '{request.model_name}' not found at {s3_model_path}. "
+                f"Upload it first with upload_model_to_s3.py"
+            )
+        job_logger.info(f"[S3] Verified model exists at {s3_model_path}")
 
     hf_token = request.hf_token or HF_TOKEN or ""
     num_nodes = config.pp_size * config.replicas
@@ -778,6 +857,7 @@ async def sp_launch_vllm_batch(
         instance_type=config.instance_type,
         tp=config.tp_size,
         pp=config.pp_size,
+        logger=job_logger,
     )
 
     # Get quota-aware ordered regions
@@ -803,7 +883,7 @@ async def sp_launch_vllm_batch(
                     "ports": 8001,
                 }
             )
-        print(
+        job_logger.info(
             f"[RegionSelector] Trying regions: {[(c.region, 'spot' if c.use_spot else 'on-demand') for c in ordered_regions[:5]]}"
         )
         resources_config = {"any_of": any_of_resources}
@@ -818,10 +898,7 @@ async def sp_launch_vllm_batch(
     # For per-config templates, substitute all placeholders
     if "vllm_configs" in template_path:
         # Build substitution dict (same as generic template)
-        replace_dict = replace_run_vllm(request, config, job_dirname)
-
-        # Read template and substitute all placeholders
-        from pathlib import Path
+        replace_dict = replace_run_vllm(request, config, job_dirname, logger=job_logger)
 
         template_content = Path(template_path).read_text()
         for key, value in replace_dict.items():
@@ -838,7 +915,7 @@ async def sp_launch_vllm_batch(
 
         # If template has a specific image_id, use its region and don't do quota-based fallback
         if template_image_id:
-            print(
+            job_logger.info(
                 f"[Template] Using custom AMI: {template_image_id} in {template_region}"
             )
             resources_config = {
@@ -857,15 +934,21 @@ async def sp_launch_vllm_batch(
         yaml_data["file_mounts"]["/data"]["source"] = s3_base
         yaml_data["envs"]["HF_TOKEN"] = hf_token
 
-        # Write final yaml
-        from pathlib import Path
+        # Add S3 model weight mount if requested
+        if request.s3_models:
+            model_mount_path = f"/models/{request.model_name}"
+            yaml_data["file_mounts"][model_mount_path] = {
+                "source": f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}",
+                "mode": "COPY",
+            }
 
+        # Write final yaml
         Path(YAML_OUTPUT).parent.mkdir(parents=True, exist_ok=True)
         with open(YAML_OUTPUT, "w") as f:
             yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
     else:
         # Generic template - use old substitution method
-        replace_run_dict = replace_run_vllm(request, config, job_dirname)
+        replace_run_dict = replace_run_vllm(request, config, job_dirname, logger=job_logger)
         run_string = update_template("templates/vllm_run", replace_run_dict)
 
         replace_yaml = {
@@ -876,6 +959,15 @@ async def sp_launch_vllm_batch(
             "file_mounts./data.source": s3_base,
             "envs.HF_TOKEN": hf_token,
         }
+
+        # Add S3 model weight mount if requested
+        if request.s3_models:
+            model_mount_path = f"/models/{request.model_name}"
+            replace_yaml[f"file_mounts.{model_mount_path}.source"] = (
+                f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}"
+            )
+            replace_yaml[f"file_mounts.{model_mount_path}.mode"] = "COPY"
+
         update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
 
     cm = get_cluster_manager()
@@ -883,18 +975,16 @@ async def sp_launch_vllm_batch(
 
     # Construct S3 output path for later download
     output_s3_path = f"{s3_output_dir}/{request.output_file}"
-    print(f"[Job] Output will be saved to: {s3_output_dir}/")
+    job_logger.info(f"[Job] Output will be saved to: {s3_output_dir}/")
 
     def monitor_and_download():
         """Background thread: stream logs, then download output when done."""
-        from pathlib import Path
-
         try:
             sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
-            print(f"[Job] {config.decision_id} completed. Downloading output...")
+            job_logger.info(f"[Job] {config.decision_id} completed. Downloading output...")
 
             # Download output from S3 to local dir (base name, no prefix yet)
-            local_path = download_output_from_s3(output_s3_path, job_dirname)
+            local_path = download_output_from_s3(output_s3_path, job_dirname, logger=job_logger)
 
             # Determine success: both output file and metrics.csv must exist
             base_dir = Path(f"outputs/{job_dirname}")
@@ -909,33 +999,39 @@ async def sp_launch_vllm_batch(
             prefixed_dirname = prefix_job_dirname(job_dirname, status)
             target_dir = Path(f"outputs/{prefixed_dirname}")
             target_dir.parent.mkdir(parents=True, exist_ok=True)
+            job_logger.info(f"[Job] {status.upper()}: outputs/{prefixed_dirname}")
+            close_job_logger(job_logger)
             base_dir.rename(target_dir)
-            print(f"[Job] {status.upper()}: outputs/{prefixed_dirname}")
 
         except Exception as e:
-            print(f"[Job] Error in monitor thread: {e}")
+            job_logger.error(f"[Job] Error in monitor thread: {e}")
             # Ensure a failed- dir exists even if everything blew up
             failed_dirname = prefix_job_dirname(job_dirname, "failed")
             failed_dir = Path(f"outputs/{failed_dirname}")
             base_dir = Path(f"outputs/{job_dirname}")
+            job_logger.info(f"[Job] FAILED: outputs/{failed_dirname}")
+            close_job_logger(job_logger)
             if base_dir.exists() and not failed_dir.exists():
                 failed_dir.parent.mkdir(parents=True, exist_ok=True)
                 base_dir.rename(failed_dir)
             elif not failed_dir.exists():
                 failed_dir.mkdir(parents=True, exist_ok=True)
-            print(f"[Job] FAILED: outputs/{failed_dirname}")
         finally:
             cm.unregister(config.decision_id)
 
     try:
+        job_logger.info(f"[SkyPilot] Launching cluster {config.decision_id}...")
         task = sky.Task.from_yaml(YAML_OUTPUT)
         result_id = sky.launch(task, cluster_name=config.decision_id, down=True)
         job_id, handle = sky.stream_and_get(result_id, follow=True)
+        job_logger.info(f"[SkyPilot] Launch complete. job_id={job_id}")
 
         # Stream logs in background and download when done
         threading.Thread(target=monitor_and_download, daemon=True).start()
 
     except Exception as e:
+        job_logger.error(f"[SkyPilot] Failed to launch cluster {config.decision_id}: {e}")
+        close_job_logger(job_logger)
         cm.unregister(config.decision_id)
         raise Exception(f"Failed to launch cluster {config.decision_id}: {e}")
 
@@ -1055,7 +1151,7 @@ INSTANCE_TO_GPU = {
 
 
 def get_vllm_config_template(
-    model_name: str, instance_type: str, tp: int, pp: int
+    model_name: str, instance_type: str, tp: int, pp: int, logger=None
 ) -> str:
     """
     Get the per-config vLLM template path if it exists.
@@ -1070,6 +1166,8 @@ def get_vllm_config_template(
     Returns path to specific template if exists, otherwise returns generic template.
     """
     import os
+
+    _log = logger.info if logger else print
 
     # Normalize model name (e.g., "Qwen/Qwen2.5-72B-Instruct" -> "qwen2.5-72b")
     model_short = model_name.lower()
@@ -1086,27 +1184,31 @@ def get_vllm_config_template(
     template_name = f"vllm_{model_short}-{gpu_name}-tp{tp}-pp{pp}.yaml"
     template_path = f"templates/vllm_configs/{template_name}"
     if os.path.exists(template_path):
-        print(f"[Template] Using per-config template: {template_path}")
+        _log(f"[Template] Using per-config template: {template_path}")
         return template_path
 
     # 2. Check for GPU-specific generic template (e.g., vllm_A100.yaml)
     gpu_template_name = f"vllm_{gpu_name}.yaml"
     gpu_template_path = f"templates/vllm_configs/{gpu_template_name}"
     if os.path.exists(gpu_template_path):
-        print(f"[Template] Using GPU-specific template: {gpu_template_path}")
+        _log(f"[Template] Using GPU-specific template: {gpu_template_path}")
         return gpu_template_path
 
     # 3. Fall back to generic template
-    print(f"[Template] No specific template for {template_name}, using generic")
+    _log(f"[Template] No specific template for {template_name}, using generic")
     return "templates/vllm.yaml"
 
 
 def replace_run_vllm(
-    request: BatchedRequest, config: MagicOutput, job_dirname: str = "output"
+    request: BatchedRequest, config: MagicOutput, job_dirname: str = "output",
+    logger=None,
 ):
     replace = {}
 
-    replace["model"] = request.model_name
+    if request.s3_models:
+        replace["model"] = f"/models/{request.model_name}"
+    else:
+        replace["model"] = request.model_name
     replace["tp"] = config.tp_size
     replace["pp"] = config.pp_size
 
@@ -1124,7 +1226,8 @@ def replace_run_vllm(
         # Round up to nearest power of 2 for efficiency, clamp to reasonable range
         calculated_len = max(1024, min(calculated_len, 131072))
         replace["max_model_len"] = calculated_len
-        print(
+        _log = logger.info if logger else print
+        _log(
             f"[Config] Calculated max_model_len={calculated_len} from max_input={request.max_input_tokens} + max_output={request.max_output_tokens}"
         )
     else:
@@ -1182,7 +1285,6 @@ def real_magic(request: Union[BatchedRequest, OnlineServingRequest]) -> MagicOut
         decision_id="mo-" + str(uuid.uuid4()),
         engine="vllm",
         instance_type="g6e.xlarge",
-        num_inst=1,
         tp_size=1,
         pp_size=1,
         replicas=1,
