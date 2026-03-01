@@ -153,7 +153,7 @@ def check_user_specified_feasibility(
     )
 
     adapter = PlacementSolverAdapter(
-        gpu_pool={instance_type: 1},
+        gpu_pool={instance_type: pp},
         cloud_provider="AWS",
     )
 
@@ -187,12 +187,11 @@ def check_user_specified_feasibility(
             gpu_pool_file=gpu_pool_file,
             network_bandwidth_file=network_bandwidth_file,
             cloud_specs_file=cloud_specs_file,
+            skip_solve_init=True,
         )
 
-        # Build the gpu_type key the solver expects (instance_type#0)
-        solver_gpu_type = f"{instance_type}#0"
-
         # Build placement dict for evaluate_manual_placement
+        # Each PP stage runs on a separate instance (#0, #1, ...)
         num_layers = solver.config.num_decoder_layers
         layers_per_stage = num_layers // pp
         stages = []
@@ -201,7 +200,7 @@ def check_user_specified_feasibility(
             end = (i + 1) * layers_per_stage
             stages.append(
                 {
-                    "gpu_type": solver_gpu_type,
+                    "gpu_type": f"{instance_type}#{i}",
                     "tp_degree": tp,
                     "start_layer": start,
                     "end_layer": end,

@@ -80,7 +80,6 @@ class AWSAllocation(VPCMagic):
                 decision_id=f"mo-{uuid.uuid4()}",
                 engine="vllm",
                 instance_type=candidate.instance_type,
-                num_inst=candidate.num_inst,
                 tp_size=candidate.tp,
                 pp_size=candidate.pp,
                 replicas=candidate.replicas,
