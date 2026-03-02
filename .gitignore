@@ -6,6 +6,9 @@ temp/
 files/
 .env
 
+# input/output data
+*jsonl
+
 # Editor
 *.code-workspace
 .vscode/
