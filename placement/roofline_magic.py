@@ -132,7 +132,8 @@ def check_user_specified_feasibility(
     pp: int,
     avg_input_tokens: int,
     avg_output_tokens: int,
-    batch_size: int = 32,
+    max_input_tokens: int = 0,
+    max_output_tokens: int = 0,
 ) -> dict:
     """
     Validate a user-specified GPU/TP/PP config using LLM_placement_solver.
@@ -141,6 +142,10 @@ def check_user_specified_feasibility(
     accurate memory feasibility (activation memory, CUDA graphs, sampler,
     allocator fragmentation) and throughput/cost estimation.
 
+    Args:
+        max_input_tokens: Max input tokens in workload (0 = use avg)
+        max_output_tokens: Max output tokens in workload (0 = use avg)
+
     Returns:
         dict with keys: feasible, reason, max_model_len, solution
         On success, solution contains the full evaluate_manual_placement() output.
@@ -148,7 +153,6 @@ def check_user_specified_feasibility(
     from placement.roofline.solver_adapter import PlacementSolverAdapter
     from placement.roofline.gpu_specs import (
         calculate_max_supported_context,
-        get_gpu_memory,
         AWS_INSTANCE_GPU_MAP,
     )
 
@@ -180,14 +184,16 @@ def check_user_specified_feasibility(
             sequence_length=avg_input_tokens,
             output_length=avg_output_tokens,
             workload_phase="aggregated",
-            min_batch_size=batch_size,
-            max_batch_size=batch_size,
+            min_batch_size=1,
+            max_batch_size=1,
             cloud_provider="AWS",
             skip_gurobi=True,
             gpu_pool_file=gpu_pool_file,
             network_bandwidth_file=network_bandwidth_file,
             cloud_specs_file=cloud_specs_file,
             skip_solve_init=True,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
         )
 
         # Build placement dict for evaluate_manual_placement
@@ -208,7 +214,7 @@ def check_user_specified_feasibility(
             )
 
         placement = {
-            "batch_size": batch_size,
+            "batch_size": 1,
             "stages": stages,
             "sequence_length": avg_input_tokens,
             "output_length": avg_output_tokens,
@@ -217,7 +223,7 @@ def check_user_specified_feasibility(
 
         solution = solver.evaluate_manual_placement(placement)
 
-        # Calculate max_model_len using gpu_specs
+        # Calculate max_model_len using gpu_specs (1 sequence)
         gpu_info = AWS_INSTANCE_GPU_MAP.get(instance_type, {})
         gpu_model = gpu_info.get("gpu_model", "")
         max_model_len = calculate_max_supported_context(
@@ -229,7 +235,6 @@ def check_user_specified_feasibility(
             num_attention_heads=solver.config.num_attention_heads,
             tp_degree=tp,
             pp_stages=pp,
-            batch_size=batch_size,
             bytes_per_element=solver.config.bytes_per_element,
         )
 
@@ -385,6 +390,8 @@ class RooflineAWSAllocation(VPCMagic):
 
         # Lazy-load solver adapter
         self._solver_adapter = None
+        # Last solver log (populated after each solve call, regardless of success/failure)
+        self.last_solve_log = ""
 
     def _get_solver_adapter(self, gpu_pool: Optional[Dict[str, int]] = None):
         """Get or create solver adapter."""
@@ -466,17 +473,29 @@ class RooflineAWSAllocation(VPCMagic):
             create_solver_input_from_request,
         )
 
+        # Extract vLLM config params (defaults match vLLM defaults)
+        vllm_cfg = getattr(req, 'vllm_specific_config', None)
+        max_num_seqs = (vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256)
+        max_num_batched_tokens = (getattr(vllm_cfg, 'max_num_batched_tokens', None) or 16384) if vllm_cfg else 16384
+        gpu_memory_utilization = (getattr(vllm_cfg, 'gpu_memory_utilization', None) or 0.90) if vllm_cfg else 0.90
+
         solver_input = create_solver_input_from_request(
             model_name=req.model_name,
             avg_input_tokens=req.avg_input_tokens,
             avg_output_tokens=req.avg_output_tokens,
             num_requests=req.num_lines,
             slo_deadline_hours=req.slo_deadline_hours,
+            max_input_tokens=req.max_input_tokens or 0,
+            max_output_tokens=req.max_output_tokens or 0,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+            gpu_memory_utilization=gpu_memory_utilization,
         )
 
         # Run solver
         adapter = self._get_solver_adapter(gpu_pool)
         result = adapter.solve(solver_input)
+        self.last_solve_log = result.solve_log
 
         if not result.success:
             logger.warning(f"[Roofline] Solver failed: {result.error_message}")
@@ -498,7 +517,7 @@ class RooflineAWSAllocation(VPCMagic):
         # Convert to MagicOutput
         # Note: solver's num_instances is TOTAL nodes (already includes PP stages)
         # replicas = num_instances / pp_stages = number of data-parallel pipeline replicas
-        # num_nodes in server.py = replicas * pp_size, so we need replicas to be correct
+        # num_nodes = num_instances * replicas (solver computes instances_needed correctly)
         data_parallel_replicas = max(1, result.num_instances // result.pp_stages)
         return MagicOutput(
             decision_id=f"gangmuk-{uuid.uuid4()}",
@@ -508,6 +527,7 @@ class RooflineAWSAllocation(VPCMagic):
             tp_size=result.tp_degree,
             pp_size=result.pp_stages,
             max_model_len=result.max_supported_context,
+            num_instances=result.num_instances,
         )
 
     def _fallback_config(self, req: BatchedRequest) -> MagicOutput:
@@ -594,17 +614,34 @@ class RooflineAWSAllocation(VPCMagic):
             create_solver_input_from_request,
         )
 
+        # Extract vLLM config params (defaults match vLLM defaults)
+        vllm_cfg = getattr(req, 'vllm_specific_config', None)
+        max_num_seqs = (vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256)
+        max_num_batched_tokens = (getattr(vllm_cfg, 'max_num_batched_tokens', None) or 16384) if vllm_cfg else 16384
+        gpu_memory_utilization = (getattr(vllm_cfg, 'gpu_memory_utilization', None) or 0.90) if vllm_cfg else 0.90
+
         solver_input = create_solver_input_from_request(
             model_name=req.model_name,
             avg_input_tokens=req.avg_input_tokens,
             avg_output_tokens=req.avg_output_tokens,
             num_requests=req.num_lines,
             slo_deadline_hours=req.slo_deadline_hours,
+            max_input_tokens=req.max_input_tokens or 0,
+            max_output_tokens=req.max_output_tokens or 0,
+            max_num_seqs=max_num_seqs,
+            max_num_batched_tokens=max_num_batched_tokens,
+            gpu_memory_utilization=gpu_memory_utilization,
         )
 
         # Run solver for multiple solutions
         adapter = self._get_solver_adapter(gpu_pool)
         results = adapter.solve_multi(solver_input, top_k=top_k)
+
+        # Store solve log from first result (solve_multi calls solve internally)
+        if results:
+            self.last_solve_log = results[0].solve_log
+        else:
+            self.last_solve_log = ""
 
         if not results:
             logger.warning("[Roofline] No solutions found, returning fallback")
@@ -626,6 +663,7 @@ class RooflineAWSAllocation(VPCMagic):
                 tp_size=result.tp_degree,
                 pp_size=result.pp_stages,
                 max_model_len=result.max_supported_context,
+                num_instances=result.num_instances,
             )
             outputs.append(output)
             logger.info(

@@ -69,9 +69,20 @@ class SolverInput:
     total_tokens: int  # num_requests * (input + output)
     slo_hours: float  # slo_deadline_hours
 
+    # Max token limits for feasibility checking (0 = use avg as fallback)
+    max_input_tokens: int = 0
+    max_output_tokens: int = 0
+
+    # vLLM scheduler parameter: max concurrent sequences (decode batch size)
+    max_num_seqs: int = 256
+
+    # vLLM max_num_batched_tokens: max tokens per prefill iteration (0 = fall back to max_model_len)
+    max_num_batched_tokens: int = 16384
+    # vLLM gpu_memory_utilization: fraction of GPU memory for model/KV cache
+    gpu_memory_utilization: float = 0.90
+
     # Fixed parameters (per user requirements)
     workload_phase: str = "aggregated"
-    batch_size: int = 32
     optimization_priority: str = "cost_first"
 
 
@@ -87,7 +98,7 @@ class SolverOutput:
     tp_degree: int
     pp_stages: int
     layers_per_stage: int
-    batch_size: int
+    max_concurrent_sequences: int  # derived from KV pool, replaces static batch_size
 
     # Performance metrics
     throughput_tokens_per_sec: float
@@ -105,6 +116,9 @@ class SolverOutput:
 
     # Error info (if success=False)
     error_message: str = ""
+
+    # Solver log: full solving process output (always populated)
+    solve_log: str = ""
 
     # Rank in sorted solutions (1 = best)
     rank: int = 1
@@ -155,6 +169,10 @@ class PlacementSolverAdapter:
         "qwen2.5-a14b": "qwen2.5-a14b",
         "Qwen/Qwen2.5-A14B": "qwen2.5-a14b",
         "Qwen/Qwen2.5-A14B-Instruct": "qwen2.5-a14b",
+        # Qwen 3 dense
+        "qwen3-32b": "qwen3-32b",
+        "Qwen/Qwen3-32B": "qwen3-32b",
+        "Qwen/Qwen3-32B-Instruct": "qwen3-32b",
         # Qwen 3 MoE (235B total, 22B active)
         "qwen3-235b-a22b": "qwen3-235b-a22b",
         "Qwen/Qwen3-235B-A22B": "qwen3-235b-a22b",
@@ -354,7 +372,7 @@ class PlacementSolverAdapter:
                         tp_degree=0,
                         pp_stages=0,
                         layers_per_stage=0,
-                        batch_size=0,
+                        max_concurrent_sequences=0,
                         throughput_tokens_per_sec=0,
                         cost_per_hour=0,
                         cost_per_million_tokens=0,
@@ -382,14 +400,19 @@ class PlacementSolverAdapter:
                 sequence_length=input.sequence_length,
                 output_length=input.output_length,
                 workload_phase=input.workload_phase,
-                min_batch_size=input.batch_size,
-                max_batch_size=input.batch_size,
+                min_batch_size=1,  # batch_size no longer meaningful; kept for MILP compat
+                max_batch_size=1,
                 cloud_provider=self.cloud_provider,
                 skip_gurobi=True,  # Use homogeneous solver (no Gurobi needed)
                 # Pass explicit paths (None = use solver defaults)
                 gpu_pool_file=gpu_pool_file,
                 network_bandwidth_file=network_bandwidth_file,
                 cloud_specs_file=cloud_specs_file,
+                max_input_tokens=input.max_input_tokens,
+                max_output_tokens=input.max_output_tokens,
+                max_num_seqs=input.max_num_seqs,
+                max_num_batched_tokens=input.max_num_batched_tokens,
+                gpu_memory_utilization=input.gpu_memory_utilization,
             )
 
             # Solve using homogeneous solver (fast enumeration)
@@ -403,7 +426,7 @@ class PlacementSolverAdapter:
                     tp_degree=0,
                     pp_stages=0,
                     layers_per_stage=0,
-                    batch_size=0,
+                    max_concurrent_sequences=0,
                     throughput_tokens_per_sec=0,
                     cost_per_hour=0,
                     cost_per_million_tokens=0,
@@ -411,6 +434,7 @@ class PlacementSolverAdapter:
                     gpus_per_instance=0,
                     total_gpus=0,
                     error_message="No valid placement found",
+                    solve_log=getattr(solver, 'solve_log', ''),
                 )
 
             sol = solver.solution
@@ -445,36 +469,17 @@ class PlacementSolverAdapter:
             if throughput > 0:
                 cost_per_million = (cost_per_hour / (throughput * 3600)) * 1_000_000
 
-            # Calculate max supported context length based on GPU memory
-            # This is critical - vLLM pre-allocates KV cache for max_model_len
-            from .gpu_specs import calculate_max_supported_context
-
+            # Use solver's own max_model_len (consistent memory model, no dual calculation)
             tp_degree = homo_cfg.get("tp_degree", 1)
             pp_stages = homo_cfg.get("pp_stages", 1)
-            try:
-                gpu_max_context = calculate_max_supported_context(
-                    gpu_model=gpu_model,
-                    num_layers=solver.config.num_decoder_layers,
-                    layer_weight_gb=solver.config.layer_weight_memory_gb,
-                    num_kv_heads=solver.config.num_kv_heads,
-                    d_model=solver.config.d_model,
-                    num_attention_heads=solver.config.num_attention_heads,
-                    tp_degree=tp_degree,
-                    pp_stages=pp_stages,
-                    batch_size=input.batch_size,
-                    bytes_per_element=solver.config.bytes_per_element,
-                )
-                # Cap by model's max_position_embeddings (what the model actually supports)
-                model_max_context = solver.config.max_position_embeddings
-                max_context = min(gpu_max_context, model_max_context)
-                logger.info(
-                    f"[SolverAdapter] Max context: GPU supports {gpu_max_context}, model supports {model_max_context}, using {max_context}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[SolverAdapter] Failed to calculate max context: {e}, using default 8192"
-                )
-                max_context = 8192
+            max_context = min(
+                sol.get('max_model_len', 8192),
+                solver.config.max_position_embeddings
+            )
+            logger.info(
+                f"[SolverAdapter] Max context from solver: {sol.get('max_model_len', 'N/A')}, "
+                f"model max: {solver.config.max_position_embeddings}, using {max_context}"
+            )
 
             return SolverOutput(
                 success=True,
@@ -483,7 +488,7 @@ class PlacementSolverAdapter:
                 tp_degree=tp_degree,
                 pp_stages=homo_cfg.get("pp_stages", 1),
                 layers_per_stage=homo_cfg.get("layers_per_stage", 0),
-                batch_size=sol.get("batch_size", input.batch_size),
+                max_concurrent_sequences=sol.get("max_concurrent_sequences", 1),
                 throughput_tokens_per_sec=throughput,
                 cost_per_hour=cost_per_hour,
                 cost_per_million_tokens=cost_per_million,
@@ -491,6 +496,7 @@ class PlacementSolverAdapter:
                 gpus_per_instance=gpus_per_instance,
                 total_gpus=homo_cfg.get("instances_used", 1) * gpus_per_instance,
                 max_supported_context=max_context,
+                solve_log=getattr(solver, 'solve_log', ''),
             )
 
         except Exception as e:
@@ -498,6 +504,12 @@ class PlacementSolverAdapter:
             import traceback
 
             logger.debug(traceback.format_exc())
+            # Try to get solve_log even on exception (solver may have been partially created)
+            _log = ''
+            try:
+                _log = getattr(solver, 'solve_log', '')
+            except Exception:
+                pass
             return SolverOutput(
                 success=False,
                 instance_family="",
@@ -505,7 +517,7 @@ class PlacementSolverAdapter:
                 tp_degree=0,
                 pp_stages=0,
                 layers_per_stage=0,
-                batch_size=0,
+                max_concurrent_sequences=0,
                 throughput_tokens_per_sec=0,
                 cost_per_hour=0,
                 cost_per_million_tokens=0,
@@ -513,6 +525,7 @@ class PlacementSolverAdapter:
                 gpus_per_instance=0,
                 total_gpus=0,
                 error_message=str(e),
+                solve_log=_log,
             )
         finally:
             self._cleanup_temp_files()
@@ -550,6 +563,11 @@ def create_solver_input_from_request(
     avg_output_tokens: int,
     num_requests: int,
     slo_deadline_hours: float,
+    max_input_tokens: int = 0,
+    max_output_tokens: int = 0,
+    max_num_seqs: int = 256,
+    max_num_batched_tokens: int = 16384,
+    gpu_memory_utilization: float = 0.90,
 ) -> SolverInput:
     """
     Create SolverInput from Orca BatchedRequest fields.
@@ -560,6 +578,11 @@ def create_solver_input_from_request(
         avg_output_tokens: Average output tokens per request
         num_requests: Total number of requests (num_lines)
         slo_deadline_hours: SLO deadline in hours
+        max_input_tokens: Maximum input tokens in workload (0 = use avg)
+        max_output_tokens: Maximum output tokens in workload (0 = use avg)
+        max_num_seqs: vLLM max_num_seqs scheduler parameter (decode batch size)
+        max_num_batched_tokens: vLLM max tokens per prefill iteration (0 = fall back to max_model_len)
+        gpu_memory_utilization: vLLM gpu_memory_utilization (0.0-1.0)
 
     Returns:
         SolverInput ready for solver
@@ -570,8 +593,12 @@ def create_solver_input_from_request(
         output_length=avg_output_tokens,
         total_tokens=num_requests * (avg_input_tokens + avg_output_tokens),
         slo_hours=slo_deadline_hours,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        gpu_memory_utilization=gpu_memory_utilization,
         # Fixed per user requirements
         workload_phase="aggregated",
-        batch_size=32,
         optimization_priority="cost_first",
     )

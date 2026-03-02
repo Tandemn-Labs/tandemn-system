@@ -227,15 +227,16 @@ def calculate_max_supported_context(
     num_attention_heads: int,
     tp_degree: int = 1,
     pp_stages: int = 1,
-    batch_size: int = 32,
     bytes_per_element: int = 2,
     gpu_utilization: float = 0.85,
 ) -> int:
     """
-    Calculate maximum context length a GPU can support given model config.
+    Calculate maximum context length a GPU can support for 1 sequence.
 
-    This is critical for setting vLLM's --max-model-len to avoid OOM at startup.
-    vLLM pre-allocates KV cache for max_model_len, so we need to know what fits.
+    This computes the max context for a single sequence, which is what vLLM
+    needs for --max-model-len. The KV pool determines how many sequences can
+    run concurrently, but max-model-len only needs to fit the longest single
+    sequence.
 
     Args:
         gpu_model: GPU type (e.g., "L40S", "A100")
@@ -246,7 +247,6 @@ def calculate_max_supported_context(
         num_attention_heads: Number of attention heads
         tp_degree: Tensor parallelism degree
         pp_stages: Pipeline parallelism stages (layers split across stages)
-        batch_size: Batch size for KV cache calculation
         bytes_per_element: 2 for FP16, 4 for FP32
         gpu_utilization: Fraction of GPU memory to use (default 0.85 for safety)
 
@@ -277,16 +277,15 @@ def calculate_max_supported_context(
     if kv_available_gb <= 0:
         return 1024  # Minimum fallback - config is memory constrained
 
-    # KV cache calculation:
-    # Per layer on this GPU: 2 * batch * seq_len * (kv_dim / tp) * bytes_per_element
+    # KV cache calculation for 1 sequence:
+    # Per layer on this GPU: 2 * 1 * seq_len * (kv_dim / tp) * bytes_per_element
     # kv_dim = num_kv_heads * head_dim
     # head_dim = d_model / num_attention_heads
     head_dim = d_model / num_attention_heads
     kv_dim = num_kv_heads * head_dim
 
-    # Bytes per token per layer for KV cache (K and V)
-    # Note: KV cache is also sharded by TP
-    kv_bytes_per_token_per_layer = 2 * batch_size * (kv_dim / tp_degree) * bytes_per_element
+    # Bytes per token per layer for KV cache (K and V) for 1 sequence
+    kv_bytes_per_token_per_layer = 2 * (kv_dim / tp_degree) * bytes_per_element
 
     # Total KV bytes per token across layers ON THIS GPU (layers_per_gpu, not all layers)
     kv_bytes_per_token = kv_bytes_per_token_per_layer * layers_per_gpu
