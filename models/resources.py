@@ -11,3 +11,12 @@ class MagicOutput(BaseModel):
     pp_size: int
     replicas: int
     max_model_len: Optional[int] = None  # Max context length for vLLM --max-model-len
+    num_instances: Optional[int] = None  # Total instances needed (from solver). Overrides pp_size*replicas when set.
+
+    @property
+    def num_nodes(self) -> int:
+        """Total SkyPilot nodes needed. Uses solver's num_instances if available,
+        otherwise falls back to pp_size * replicas (1 PP stage per node)."""
+        if self.num_instances is not None:
+            return self.num_instances * self.replicas
+        return self.pp_size * self.replicas

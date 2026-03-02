@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import math
 import uuid
 import requests
 import subprocess
@@ -560,8 +561,7 @@ async def submit_batch(request: BatchedRequest):
         tp = request.tp_size or 1
         pp = request.pp_size or 1
 
-        # Resolve GPU type to the smallest AWS instance with enough GPUs
-        # Each PP stage runs on a separate instance; each instance needs tp GPUs
+        # Resolve GPU type to the smallest AWS instance with enough GPUs for TP
         try:
             instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp)
         except ValueError as e:
@@ -580,6 +580,8 @@ async def submit_batch(request: BatchedRequest):
             pp=pp,
             avg_input_tokens=request.avg_input_tokens,
             avg_output_tokens=request.avg_output_tokens,
+            max_input_tokens=request.max_input_tokens or 0,
+            max_output_tokens=request.max_output_tokens or 0,
         )
 
         if not result["feasible"]:
@@ -596,6 +598,8 @@ async def submit_batch(request: BatchedRequest):
             }
 
         # Build MagicOutput directly
+        partitions_per_inst = gpu_count // tp
+        num_instances = math.ceil(pp / partitions_per_inst)
         configs = [
             MagicOutput(
                 decision_id=f"mo-{uuid.uuid4()}",
@@ -605,6 +609,7 @@ async def submit_batch(request: BatchedRequest):
                 pp_size=pp,
                 replicas=1,
                 max_model_len=result["max_model_len"],
+                num_instances=num_instances,
             )
         ]
 
@@ -627,6 +632,10 @@ async def submit_batch(request: BatchedRequest):
         configs = solver.process_batch_multi(request, top_k=5)
         if not configs:
             configs = [solver._fallback_config(request)]
+        # Capture solver log for the job log file (always, regardless of success)
+        if getattr(solver, 'last_solve_log', ''):
+            for line in solver.last_solve_log.splitlines():
+                early_messages.append(("INFO", f"[Solver] {line}"))
     else:
         # LLM-based solver (3-advisor + C-PMI)
         openrouter_key = request.openrouter_api_key or OPENROUTER_API_KEY
@@ -703,6 +712,163 @@ async def submit_batch(request: BatchedRequest):
             "job_id": configs[0].decision_id,
             "message": "Failed to launch in all regions with all instance types",
         }
+
+
+@app.post("/test/placement")
+async def test_placement(request: BatchedRequest):
+    """
+    Run placement logic only (no cloud deployment).
+
+    Accepts the same BatchedRequest as /submit/batch but only runs the solver
+    and returns the placement decision(s) with performance/cost estimates.
+    """
+    # Parse input file to get real stats
+    num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
+        request.input_file, model_name=request.model_name
+    )
+
+    request = request.model_copy(
+        update={
+            "num_lines": num_lines,
+            "avg_input_tokens": avg_input_tokens,
+            "max_input_tokens": max_input_tokens,
+        }
+    )
+
+    use_solver = request.placement_solver or PLACEMENT_SOLVER
+    solver_log = ""
+
+    if use_solver == "user_specified":
+        gpu_type = request.gpu_type
+        tp = request.tp_size or 1
+        pp = request.pp_size or 1
+
+        try:
+            instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp)
+        except ValueError as e:
+            return {
+                "status": "error",
+                "error_type": "invalid_placement",
+                "message": str(e),
+            }
+
+        result = check_user_specified_feasibility(
+            model_name=request.model_name,
+            instance_type=instance_type,
+            gpu_count=gpu_count,
+            tp=tp,
+            pp=pp,
+            avg_input_tokens=request.avg_input_tokens,
+            avg_output_tokens=request.avg_output_tokens,
+            max_input_tokens=request.max_input_tokens or 0,
+            max_output_tokens=request.max_output_tokens or 0,
+        )
+
+        if not result["feasible"]:
+            return {
+                "status": "error",
+                "error_type": "infeasible_placement",
+                "message": f"Placement is not feasible: {result['reason']}",
+                "detail": {
+                    "gpu_type": gpu_type,
+                    "tp": tp,
+                    "pp": pp,
+                    "instance_type": instance_type,
+                },
+            }
+
+        partitions_per_inst = gpu_count // tp
+        num_instances = math.ceil(pp / partitions_per_inst)
+        sol = result.get("solution") or {}
+        configs = [
+            {
+                "instance_type": instance_type,
+                "gpu_type": gpu_type,
+                "tp_size": tp,
+                "pp_size": pp,
+                "num_instances": num_instances,
+                "max_model_len": result["max_model_len"],
+                "throughput_tokens_per_sec": sol.get("throughput_tokens_per_sec"),
+                "cost_per_hour": sol.get("cost_per_hour"),
+                "cost_per_million_tokens": sol.get("cost_per_million_tokens"),
+            }
+        ]
+
+    elif use_solver == "roofline":
+        solver = RooflineAWSAllocation(
+            perfdb_dir="./perf_db",
+            aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
+            priority=PLACEMENT_PRIORITY,
+        )
+        magic_outputs = solver.process_batch_multi(request, top_k=5)
+        solver_log = getattr(solver, "last_solve_log", "")
+        if not magic_outputs:
+            magic_outputs = [solver._fallback_config(request)]
+
+        configs = []
+        for mo in magic_outputs:
+            configs.append(
+                {
+                    "instance_type": mo.instance_type,
+                    "gpu_type": INSTANCE_TO_GPU.get(mo.instance_type, "unknown"),
+                    "tp_size": mo.tp_size,
+                    "pp_size": mo.pp_size,
+                    "num_instances": mo.num_instances or mo.num_nodes,
+                    "max_model_len": mo.max_model_len,
+                }
+            )
+    else:
+        # LLM-based solver
+        openrouter_key = request.openrouter_api_key or OPENROUTER_API_KEY
+        model_tier = request.llm_advisor_tier or "free"
+        solver = AWSAllocation(
+            openrouter_key=openrouter_key,
+            perfdb_dir="./perf_db",
+            aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
+            k_nearest_model_size=5,
+            model_tier=model_tier,
+        )
+        mo = solver.decide(request)
+        configs = [
+            {
+                "instance_type": mo.instance_type,
+                "gpu_type": INSTANCE_TO_GPU.get(mo.instance_type, "unknown"),
+                "tp_size": mo.tp_size,
+                "pp_size": mo.pp_size,
+                "num_instances": mo.num_instances or mo.num_nodes,
+                "max_model_len": mo.max_model_len,
+            }
+        ]
+
+    # Context length check
+    max_output = request.max_output_tokens or request.avg_output_tokens
+    context_warning = None
+    if configs and configs[0].get("max_model_len") and max_input_tokens:
+        required_context = max_input_tokens + max_output
+        if required_context > configs[0]["max_model_len"]:
+            context_warning = (
+                f"Longest prompt ({max_input_tokens} tokens) + max_output ({max_output}) = "
+                f"{required_context} exceeds max_model_len ({configs[0]['max_model_len']})"
+            )
+
+    response = {
+        "status": "ok",
+        "solver": use_solver,
+        "input_stats": {
+            "num_lines": num_lines,
+            "avg_input_tokens": avg_input_tokens,
+            "max_input_tokens": max_input_tokens,
+        },
+        "placements": configs,
+    }
+    if context_warning:
+        response["context_warning"] = context_warning
+    if solver_log:
+        response["solver_log"] = solver_log
+        with open("solver.log", "w") as f:
+            f.write(solver_log)
+
+    return response
 
 
 @app.post("/submit/online")
@@ -850,7 +1016,7 @@ async def sp_launch_vllm_batch(
             job_logger.info(f"[S3] Verified model exists at {s3_model_path}")
 
     hf_token = request.hf_token or HF_TOKEN or ""
-    num_nodes = config.pp_size * config.replicas
+    num_nodes = config.num_nodes
 
     # Select per-config template or fall back to generic
     template_path = get_vllm_config_template(
@@ -1044,7 +1210,7 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
 
     replace_yaml = {
         "name": config.decision_id,
-        "num_nodes": config.pp_size * config.replicas,
+        "num_nodes": config.num_nodes,
         "resources.instance_type": config.instance_type,
         "resources.ports": "8001",
         "run": run_string,
@@ -1250,7 +1416,7 @@ def replace_run_vllm(
     # Get vLLM-specific configs
     vllm_cfg = request.vllm_specific_config
     replace["max_num_seqs"] = (
-        vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 32
+        vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256
     )
     replace["dtype"] = "auto"  # vLLM auto-detects based on model
     replace["kv_cache_dtype"] = (
