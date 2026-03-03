@@ -81,6 +81,9 @@ class SolverInput:
     # vLLM gpu_memory_utilization: fraction of GPU memory for model/KV cache
     gpu_memory_utilization: float = 0.90
 
+    # Solver log level (None = info)
+    log_level: str = "info"
+
     # Fixed parameters (per user requirements)
     workload_phase: str = "aggregated"
     optimization_priority: str = "cost_first"
@@ -336,7 +339,24 @@ class PlacementSolverAdapter:
         Returns:
             SolverOutput with placement configuration
         """
+        _solver_debug_handler = None
         try:
+            # Set solver log level based on request
+            solver_logger = logging.getLogger("solver")
+            _level_map = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING}
+            _requested_level = _level_map.get(input.log_level.lower(), logging.INFO)
+            solver_logger.setLevel(_requested_level)
+
+            # If debug requested, add a temporary console handler so debug lines
+            # are printed (the root handler from basicConfig filters at INFO).
+            if _requested_level == logging.DEBUG:
+                _solver_debug_handler = logging.StreamHandler()
+                _solver_debug_handler.setLevel(logging.DEBUG)
+                _solver_debug_handler.setFormatter(
+                    logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+                solver_logger.addHandler(_solver_debug_handler)
+                solver_logger.propagate = False  # Avoid duplicate INFO lines from root
+
             config_dir = self._get_config_dir(input.model_name)
             logger.info(f"[SolverAdapter] Using config: {config_dir}")
 
@@ -528,6 +548,12 @@ class PlacementSolverAdapter:
                 solve_log=_log,
             )
         finally:
+            # Restore solver logger to INFO (default) so debug doesn't leak to next request
+            solver_logger = logging.getLogger("solver")
+            solver_logger.setLevel(logging.INFO)
+            solver_logger.propagate = True
+            if _solver_debug_handler:
+                solver_logger.removeHandler(_solver_debug_handler)
             self._cleanup_temp_files()
 
     def solve_multi(self, input: SolverInput, top_k: int = 5) -> List[SolverOutput]:
@@ -568,6 +594,7 @@ def create_solver_input_from_request(
     max_num_seqs: int = 256,
     max_num_batched_tokens: int = 16384,
     gpu_memory_utilization: float = 0.90,
+    log_level: str = "info",
 ) -> SolverInput:
     """
     Create SolverInput from Orca BatchedRequest fields.
@@ -583,6 +610,7 @@ def create_solver_input_from_request(
         max_num_seqs: vLLM max_num_seqs scheduler parameter (decode batch size)
         max_num_batched_tokens: vLLM max tokens per prefill iteration (0 = fall back to max_model_len)
         gpu_memory_utilization: vLLM gpu_memory_utilization (0.0-1.0)
+        log_level: Solver log level ("debug", "info", "warning")
 
     Returns:
         SolverInput ready for solver
@@ -598,6 +626,7 @@ def create_solver_input_from_request(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         gpu_memory_utilization=gpu_memory_utilization,
+        log_level=log_level,
         # Fixed per user requirements
         workload_phase="aggregated",
         optimization_priority="cost_first",

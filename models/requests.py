@@ -57,6 +57,8 @@ class BatchedRequest(BaseModel):
     hf_token: Optional[str] = None
     # OpenRouter API key for LLM-based placement solver
     openrouter_api_key: Optional[str] = None
+    # Solver log level: "debug", "info", "warning" (default: "info")
+    log_level: Optional[str] = None
     # Only change the ModelSpecificCofig
     # right now its just vllm, but we can interject the parameters here
     vllm_specific_config: Optional[vLLMSpecificConfig] = None

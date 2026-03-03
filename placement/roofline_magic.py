@@ -479,6 +479,8 @@ class RooflineAWSAllocation(VPCMagic):
         max_num_batched_tokens = (getattr(vllm_cfg, 'max_num_batched_tokens', None) or 16384) if vllm_cfg else 16384
         gpu_memory_utilization = (getattr(vllm_cfg, 'gpu_memory_utilization', None) or 0.90) if vllm_cfg else 0.90
 
+        log_level = getattr(req, 'log_level', None) or "info"
+
         solver_input = create_solver_input_from_request(
             model_name=req.model_name,
             avg_input_tokens=req.avg_input_tokens,
@@ -490,6 +492,7 @@ class RooflineAWSAllocation(VPCMagic):
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
             gpu_memory_utilization=gpu_memory_utilization,
+            log_level=log_level,
         )
 
         # Run solver
@@ -620,6 +623,8 @@ class RooflineAWSAllocation(VPCMagic):
         max_num_batched_tokens = (getattr(vllm_cfg, 'max_num_batched_tokens', None) or 16384) if vllm_cfg else 16384
         gpu_memory_utilization = (getattr(vllm_cfg, 'gpu_memory_utilization', None) or 0.90) if vllm_cfg else 0.90
 
+        log_level = getattr(req, 'log_level', None) or "info"
+
         solver_input = create_solver_input_from_request(
             model_name=req.model_name,
             avg_input_tokens=req.avg_input_tokens,
@@ -631,6 +636,7 @@ class RooflineAWSAllocation(VPCMagic):
             max_num_seqs=max_num_seqs,
             max_num_batched_tokens=max_num_batched_tokens,
             gpu_memory_utilization=gpu_memory_utilization,
+            log_level=log_level,
         )
 
         # Run solver for multiple solutions
