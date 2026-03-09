@@ -32,7 +32,7 @@ class S3BigStorageBackend(StorageBackend):
     def __init__(self):
         self.aws_region = os.getenv("AWS_REGION", "us-east-2")
         boto_config = Config(signature_version="s3v4")
-        print("running in region: ", self.aws_region)
+        # print("running in region: ", self.aws_region)
         self.s3_client = boto3.client(
             "s3", region_name=self.aws_region, config=boto_config
         )
@@ -69,14 +69,14 @@ class S3BigStorageBackend(StorageBackend):
         """
         if remote_path.startswith("s3://"):
             uri_bucket, key = split_uri(remote_path)
-            bucket_name = uri_bucket.split('://')[1]
+            bucket_name = uri_bucket.split("://")[1]
             return bucket_name, key
         # For non-URI paths, we need a bucket name - this should come from remote_path
         # If it's not a full URI, we can't determine the bucket, so raise an error
         raise ValueError(
             f"remote_path must be a full S3 URI (s3://bucket/key) or include bucket information. Got: {remote_path}"
         )
-    
+
     def _get_key(self, remote_path: str, user: str) -> str:
         """Deprecated: Use _get_bucket_and_key instead. Kept for backward compatibility."""
         _, key = self._get_bucket_and_key(remote_path)
@@ -167,7 +167,7 @@ class S3BigStorageBackend(StorageBackend):
         except ClientError as e:
             logger.error(f"Error streaming data from S3: {e}")
             raise
-    
+
     async def list_files(self, prefix: str, user: str) -> List[str]:
         return ""
 

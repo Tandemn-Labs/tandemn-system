@@ -63,6 +63,7 @@ def close_job_logger(logger: logging.Logger):
         handler.close()
         logger.removeHandler(handler)
 
+
 # S3 model storage defaults (used with s3_models flag)
 S3_MODEL_BUCKET = "tandemn-model-shards"
 S3_MODEL_PREFIX = "hf-models"
@@ -156,8 +157,9 @@ def parse_input_file_stats(
     max_input_tokens = max(char_estimates)  # fallback if tokenizer unavailable
     if model_name and top_k_tokenize > 0:
         try:
-            from transformers import AutoTokenizer
+            from transformers import AutoTokenizer, logging as hf_logging
 
+            hf_logging.set_verbosity_error()  # Suppress warn msgs about hf key
             tokenizer = AutoTokenizer.from_pretrained(
                 model_name, trust_remote_code=True
             )
@@ -633,7 +635,7 @@ async def submit_batch(request: BatchedRequest):
         if not configs:
             configs = [solver._fallback_config(request)]
         # Capture solver log for the job log file (always, regardless of success)
-        if getattr(solver, 'last_solve_log', ''):
+        if getattr(solver, "last_solve_log", ""):
             for line in solver.last_solve_log.splitlines():
                 early_messages.append(("INFO", f"[Solver] {line}"))
     else:
@@ -893,7 +895,9 @@ async def submit_online(request: OnlineServingRequest):
             }
 
 
-def download_output_from_s3(s3_path: str, job_dirname: str, logger=None) -> Optional[str]:
+def download_output_from_s3(
+    s3_path: str, job_dirname: str, logger=None
+) -> Optional[str]:
     """Download output file and metrics.csv from S3 to local filesystem."""
     from pathlib import Path
 
@@ -960,7 +964,9 @@ async def sp_launch_vllm_batch_with_fallback(
         early_messages.append(("INFO", msg))
 
         try:
-            await sp_launch_vllm_batch(request, config, solver, early_messages=early_messages)
+            await sp_launch_vllm_batch(
+                request, config, solver, early_messages=early_messages
+            )
             print(f"[Launch] Success with config {i + 1}: {config.instance_type}")
             return (True, config)
 
@@ -975,7 +981,9 @@ async def sp_launch_vllm_batch_with_fallback(
 
 
 async def sp_launch_vllm_batch(
-    request: BatchedRequest, config: MagicOutput, solver: str = "roofline",
+    request: BatchedRequest,
+    config: MagicOutput,
+    solver: str = "roofline",
     early_messages: list = None,
 ):
     from pathlib import Path
@@ -1001,10 +1009,13 @@ async def sp_launch_vllm_batch(
 
     # Verify model exists in S3; fall back to HuggingFace if unavailable
     if request.s3_models:
-        s3_model_path = f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}/"
+        s3_model_path = (
+            f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}/"
+        )
         s3_check = subprocess.run(
             ["aws", "s3", "ls", s3_model_path],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if s3_check.returncode != 0 or not s3_check.stdout.strip():
             job_logger.warning(
@@ -1115,7 +1126,9 @@ async def sp_launch_vllm_batch(
             yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
     else:
         # Generic template - use old substitution method
-        replace_run_dict = replace_run_vllm(request, config, job_dirname, logger=job_logger)
+        replace_run_dict = replace_run_vllm(
+            request, config, job_dirname, logger=job_logger
+        )
         run_string = update_template("templates/vllm_run", replace_run_dict)
 
         replace_yaml = {
@@ -1148,10 +1161,14 @@ async def sp_launch_vllm_batch(
         """Background thread: stream logs, then download output when done."""
         try:
             sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
-            job_logger.info(f"[Job] {config.decision_id} completed. Downloading output...")
+            job_logger.info(
+                f"[Job] {config.decision_id} completed. Downloading output..."
+            )
 
             # Download output from S3 to local dir (base name, no prefix yet)
-            local_path = download_output_from_s3(output_s3_path, job_dirname, logger=job_logger)
+            local_path = download_output_from_s3(
+                output_s3_path, job_dirname, logger=job_logger
+            )
 
             # Determine success: both output file and metrics.csv must exist
             base_dir = Path(f"outputs/{job_dirname}")
@@ -1197,7 +1214,9 @@ async def sp_launch_vllm_batch(
         threading.Thread(target=monitor_and_download, daemon=True).start()
 
     except Exception as e:
-        job_logger.error(f"[SkyPilot] Failed to launch cluster {config.decision_id}: {e}")
+        job_logger.error(
+            f"[SkyPilot] Failed to launch cluster {config.decision_id}: {e}"
+        )
         close_job_logger(job_logger)
         cm.unregister(config.decision_id)
         raise Exception(f"Failed to launch cluster {config.decision_id}: {e}")
@@ -1367,7 +1386,9 @@ def get_vllm_config_template(
 
 
 def replace_run_vllm(
-    request: BatchedRequest, config: MagicOutput, job_dirname: str = "output",
+    request: BatchedRequest,
+    config: MagicOutput,
+    job_dirname: str = "output",
     logger=None,
 ):
     replace = {}

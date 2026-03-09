@@ -21,4 +21,5 @@ boto3
 # Config / data
 PyYAML
 
-gurobipy
+# Solver dependencies (swap this line to use a different solver)
+-r LLM_placement_solver/requirements.txt

@@ -8,7 +8,9 @@ files/
 
 # input/output data
 *jsonl
+*.log
 
 # Editor
 *.code-workspace
 .vscode/
+.cursor/
