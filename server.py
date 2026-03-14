@@ -275,7 +275,7 @@ async def submit_batch(request: BatchedRequest):
 
     elif use_solver == "roofline":
         solver = RooflineAWSAllocation(
-            perfdb_dir="./perf_db",
+            perfdb_dir="./data/perf_db",
             aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
             priority=PLACEMENT_PRIORITY,
         )
@@ -450,7 +450,7 @@ async def test_placement(request: BatchedRequest):
 
     elif use_solver == "roofline":
         solver = RooflineAWSAllocation(
-            perfdb_dir="./perf_db",
+            perfdb_dir="./data/perf_db",
             aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
             priority=PLACEMENT_PRIORITY,
         )
