@@ -71,6 +71,10 @@ def close_job_logger(logger: logging.Logger):
 S3_MODEL_BUCKET = "tandemn-model-shards"
 S3_MODEL_PREFIX = "hf-models"
 
+# S3 bucket for user uploads (workloads, inputs)
+S3_UPLOAD_BUCKET = os.getenv("S3_UPLOAD_BUCKET", "tandemn-orca")
+S3_UPLOAD_PREFIX = os.getenv("S3_UPLOAD_PREFIX", "uploads")
+
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count using chars/4 approximation."""
@@ -1594,11 +1598,17 @@ async def presign_download(user: str, remote_path: str, expires: int = 600):
 
 @app.post("/storage/upload")
 async def upload_file_to_storage(
-    file: UploadFile = File(...), remote_path: str = Form(...), user: str = Form(...)
+    file: UploadFile = File(...), remote_path: str = Form(None), user: str = Form("default")
 ):
-    """Upload a file to storage backend using streaming via temp file."""
+    """Upload a file to storage backend using streaming via temp file.
+    If remote_path is omitted, the server auto-generates an S3 URI under S3_UPLOAD_BUCKET/S3_UPLOAD_PREFIX."""
     try:
-        logger.info(f"Uploading file for user {user} to {remote_path}")
+        if not remote_path:
+            filename = file.filename or f"upload_{int(time.time())}"
+            remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{int(time.time())}_{filename}"
+        elif not remote_path.startswith("s3://"):
+            remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{remote_path}"
+        print(f"[Storage] Uploading file for user {user} to {remote_path}")
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             chunk_size = CHUNK_SIZE_MB
             while True:
@@ -1609,7 +1619,7 @@ async def upload_file_to_storage(
             tmp_path = tmp_file.name
         storage_uri = await storage_backend.upload_file(tmp_path, remote_path, user)
         os.unlink(tmp_path)
-        logger.info(f"Successfully uploaded file to {storage_uri}")
+        print(f"[Storage] Successfully uploaded file to {storage_uri}")
         return {
             "status": "success",
             "storage_uri": storage_uri,
@@ -1618,7 +1628,7 @@ async def upload_file_to_storage(
             "filename": file.filename,
         }
     except Exception as e:
-        logger.error(f"Error uploading file: {e}")
+        print(f"[Storage] Error uploading file: {e}")
         raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
 
 
@@ -1626,7 +1636,7 @@ async def upload_file_to_storage(
 async def list_user_files(user: str, prefix: str = ""):
     """List all files for a user in their storage space."""
     try:
-        logger.info(f"Listing files for user {user} with prefix '{prefix}'")
+        print(f"[Storage] Listing files for user {user} with prefix '{prefix}'")
         files = await storage_backend.list_files(prefix, user)
         return {
             "status": "success",
@@ -1636,7 +1646,7 @@ async def list_user_files(user: str, prefix: str = ""):
             "count": len(files),
         }
     except Exception as e:
-        logger.error(f"Error listing files: {e}")
+        print(f"[Storage] Error listing files: {e}")
         raise HTTPException(status_code=500, detail=f"Error listing files: {str(e)}")
 
 
@@ -1644,7 +1654,7 @@ async def list_user_files(user: str, prefix: str = ""):
 async def download_file_from_storage(user: str, file_path: str):
     """Download a file from storage backend using streaming."""
     try:
-        logger.info(f"Downloading file {file_path} for user {user}")
+        print(f"[Storage] Downloading file {file_path} for user {user}")
         filename = file_path.split("/")[-1] or "download"
 
         async def file_stream_iterator():
@@ -1657,7 +1667,7 @@ async def download_file_from_storage(user: str, file_path: str):
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except Exception as e:
-        logger.error(f"Error downloading file: {e}")
+        print(f"[Storage] Error downloading file: {e}")
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 
@@ -1665,7 +1675,7 @@ async def download_file_from_storage(user: str, file_path: str):
 async def delete_file_from_storage(user: str, file_path: str):
     """Delete a file from storage backend."""
     try:
-        logger.info(f"Deleting file {file_path} for user {user}")
+        print(f"[Storage] Deleting file {file_path} for user {user}")
         success = await storage_backend.delete_file(file_path, user)
         if success:
             return {
@@ -1679,7 +1689,7 @@ async def delete_file_from_storage(user: str, file_path: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting file: {e}")
+        print(f"[Storage] Error deleting file: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
 
 
@@ -1695,7 +1705,7 @@ async def check_file_exists(user: str, file_path: str):
             "exists": exists,
         }
     except Exception as e:
-        logger.error(f"Error checking file existence: {e}")
+        print(f"[Storage] Error checking file existence: {e}")
         raise HTTPException(status_code=500, detail=f"Error checking file: {str(e)}")
 
 

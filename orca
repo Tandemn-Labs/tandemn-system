@@ -134,13 +134,13 @@ def api(method, path, **kwargs):
 
 
 def upload_to_server(local_path: str, user: str = "orca-cli") -> str:
-    """Upload a local file to S3 via the server's storage endpoint. Returns S3 URI."""
+    """Upload a local file to S3 via the server's storage endpoint. Returns S3 URI.
+    Server decides the S3 bucket/path — CLI just sends the file."""
     basename = os.path.basename(local_path)
-    remote_path = f"orca-cli/{int(time.time())}_{basename}"
     with open(local_path, "rb") as f:
         resp = api("post", "/storage/upload",
                     files={"file": (basename, f)},
-                    data={"remote_path": remote_path, "user": user})
+                    data={"user": user})
     if resp.status_code != 200:
         print(f"\n  {RED}Upload failed:{RESET} {resp.text}")
         sys.exit(1)
@@ -165,25 +165,29 @@ def cmd_deploy(args):
 
     model_name = args.model_name
     input_file = args.input_file
+    is_s3 = input_file.startswith("s3://")
 
-    if not os.path.exists(input_file):
+    if not is_s3 and not os.path.exists(input_file):
         print(f"\n  {RED}Error:{RESET} Input file not found: {input_file}")
         sys.exit(1)
 
     # ── Phase 1: Parse input ─────────────────────────────────────────────
-    step("Parsing input file...")
-    stats = parse_input_file(input_file)
-    print()
-    lines = [
-        f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
-        f"{DIM}Model:{RESET}      {c(model_name, WHITE+BOLD)}",
-        f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
-        f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
-        f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
-        f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
-        f"{DIM}SLO:{RESET}        {args.slo} hours",
-    ]
-    print(box(lines, title="WORKLOAD"))
+    if is_s3:
+        step("Using S3 input (stats parsed by server)...")
+    else:
+        step("Parsing input file...")
+        stats = parse_input_file(input_file)
+        print()
+        lines = [
+            f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
+            f"{DIM}Model:{RESET}      {c(model_name, WHITE+BOLD)}",
+            f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
+            f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
+            f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
+            f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
+            f"{DIM}SLO:{RESET}        {args.slo} hours",
+        ]
+        print(box(lines, title="WORKLOAD"))
 
     # ── Phase 2: Upload input file to server ──────────────────────────────
     print()
@@ -251,23 +255,27 @@ def cmd_plan(args):
     model_name = args.model_name
     input_file = args.input_file
 
-    if not os.path.exists(input_file):
+    is_s3 = input_file.startswith("s3://")
+    if not is_s3 and not os.path.exists(input_file):
         print(f"\n  {RED}Error:{RESET} Input file not found: {input_file}")
         sys.exit(1)
 
-    step("Parsing input file...")
-    stats = parse_input_file(input_file)
-    print()
-    lines = [
-        f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
-        f"{DIM}Model:{RESET}      {c(model_name, WHITE+BOLD)}",
-        f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
-        f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
-        f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
-        f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
-        f"{DIM}SLO:{RESET}        {args.slo} hours",
-    ]
-    print(box(lines, title="WORKLOAD"))
+    if is_s3:
+        step("Using S3 input (stats parsed by server)...")
+    else:
+        step("Parsing input file...")
+        stats = parse_input_file(input_file)
+        print()
+        lines = [
+            f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
+            f"{DIM}Model:{RESET}      {c(model_name, WHITE+BOLD)}",
+            f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
+            f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
+            f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
+            f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
+            f"{DIM}SLO:{RESET}        {args.slo} hours",
+        ]
+        print(box(lines, title="WORKLOAD"))
 
     # Upload input so server can parse it
     print()
@@ -309,7 +317,7 @@ def cmd_plan(args):
 
     step(f"Solver completed in {c(f'{elapsed:.2f}s', GREEN)}")
 
-    configs = data.get("configs", [])
+    configs = data.get("placements") or data.get("configs") or []
     if not configs:
         print(f"\n  {RED}No feasible configuration found.{RESET}")
         sys.exit(1)
@@ -325,10 +333,12 @@ def cmd_plan(args):
             f"{DIM}TP:{RESET}           {cfg.get('tp_size', '?')}    {DIM}PP:{RESET} {cfg.get('pp_size', '?')}    {DIM}Nodes:{RESET} {cfg.get('num_instances', '?')}",
             f"{DIM}Max context:{RESET}  {c(str(cfg.get('max_model_len', '?')), YELLOW)} tokens",
         ]
-        if cfg.get("throughput_tokens_per_sec"):
-            lines.append(f"{DIM}Throughput:{RESET}  {c(f'{cfg[\"throughput_tokens_per_sec\"]:.0f}', GREEN)} tok/s")
-        if cfg.get("cost_per_hour"):
-            lines.append(f"{DIM}Cost:{RESET}        ${cfg['cost_per_hour']:.2f}/hr")
+        tps = cfg.get("throughput_tokens_per_sec")
+        if tps:
+            lines.append(f"{DIM}Throughput:{RESET}  {c(f'{tps:.0f}', GREEN)} tok/s")
+        cph = cfg.get("cost_per_hour")
+        if cph:
+            lines.append(f"{DIM}Cost:{RESET}        ${cph:.2f}/hr")
         print(box(lines, title=f"CONFIG {rank_label}"))
         print()
 
