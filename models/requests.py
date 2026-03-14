@@ -32,7 +32,7 @@ class BatchedRequest(BaseModel):
     is_speculative_decode: Optional[bool] = None  # none means not specified
     is_PD_disaggregation: Optional[bool] = None  # none means not specified
     slo_mode: str
-    slo_deadline_hours: int = None
+    slo_deadline_hours: int = 4
     placement: str
     # Placement solver selection:
     #   "roofline"       — deterministic roofline-based solver (default)
