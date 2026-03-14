@@ -626,6 +626,7 @@ async def submit_batch(request: BatchedRequest):
     # Get multiple fallback solutions for retry logic
     # Request field takes priority, then fall back to env var
     use_solver = request.placement_solver or PLACEMENT_SOLVER
+    quota_warning = None  # Set by user_specified path if no viable regions
 
     if use_solver == "user_specified":
         # ---------- User-specified path ----------
@@ -656,6 +657,21 @@ async def submit_batch(request: BatchedRequest):
             max_output_tokens=request.max_output_tokens or 0,
         )
 
+        # Lightweight quota check (cached, non-blocking)
+        quota_warning = None
+        partitions_per_inst = gpu_count // tp
+        num_instances = math.ceil(pp / partitions_per_inst)
+        instance_family = get_instance_family(instance_type)
+        quotas = get_cached_quotas(instance_family)
+        viable_regions = get_ordered_regions(
+            instance_type=instance_type,
+            num_nodes=num_instances,
+            quotas=quotas,
+            prefer_spot=True,
+        )
+        if not viable_regions:
+            quota_warning = f"No quota for {instance_type} in any region. Launch will likely fail."
+
         if not result["feasible"] and not request.force:
             return {
                 "status": "confirm",
@@ -667,12 +683,11 @@ async def submit_batch(request: BatchedRequest):
                     "pp": pp,
                     "instance_type": instance_type,
                 },
+                "quota_warning": quota_warning,
                 "hint": "Re-submit with force=true to launch anyway",
             }
 
-        # Build MagicOutput directly
-        partitions_per_inst = gpu_count // tp
-        num_instances = math.ceil(pp / partitions_per_inst)
+        # Build MagicOutput directly (partitions_per_inst, num_instances already computed above)
         configs = [
             MagicOutput(
                 decision_id=f"mo-{uuid.uuid4()}",
@@ -777,6 +792,7 @@ async def submit_batch(request: BatchedRequest):
                 "avg_input_tokens": avg_input_tokens,
                 "max_input_tokens": max_input_tokens,
             },
+            "quota_warning": quota_warning,
             "message": f"Job submitted. Check progress at GET /job/{used_config.decision_id}",
         }
     else:
@@ -837,8 +853,21 @@ async def test_placement(request: BatchedRequest):
             max_output_tokens=request.max_output_tokens or 0,
         )
 
+        # Lightweight quota check (cached, non-blocking)
         partitions_per_inst = gpu_count // tp
         num_instances = math.ceil(pp / partitions_per_inst)
+        instance_family = get_instance_family(instance_type)
+        quotas = get_cached_quotas(instance_family)
+        viable_regions = get_ordered_regions(
+            instance_type=instance_type,
+            num_nodes=num_instances,
+            quotas=quotas,
+            prefer_spot=True,
+        )
+        quota_warning = None
+        if not viable_regions:
+            quota_warning = f"No quota for {instance_type} in any region. Launch will likely fail."
+
         sol = result.get("solution") or {}
         configs = [
             {
@@ -853,6 +882,7 @@ async def test_placement(request: BatchedRequest):
                 "cost_per_million_tokens": sol.get("cost_per_million_tokens"),
                 "feasible": result["feasible"],
                 "reason": result.get("reason"),
+                "quota_warning": quota_warning,
             }
         ]
 
