@@ -61,7 +61,7 @@ def parse_input_file_stats(
             char_estimates.append(estimate_tokens(prompt_text))
 
     if not prompt_texts:
-        raise ValueError(f"No valid entries found in {input_file}")
+        raise ValueError(f"No valid entries found in {file_path}")
 
     num_lines = len(prompt_texts)
     avg_input_tokens = sum(char_estimates) // num_lines
