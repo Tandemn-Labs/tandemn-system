@@ -1,70 +1,109 @@
-# Orca
+**Orca**
 
-Orca is Tandemn's end-to-end system for processing taking users' requests for inference (batched, online). Orca takes a user request, makes a decision on the GPUs needed, and then launches the required instances.
+Batch inference on large models means choosing the right GPU, figuring out tensor and pipeline parallelism, picking a region with available quota, and hoping it all fits in memory before your deadline. Most teams just guess.
+
+Orca handles all of that. Give it a model name, a JSONL file, and a deadline. Its roofline-based placement solver sizes the job automatically — picking the instance type, parallelism configuration, and AWS region — then launches on spot via SkyPilot. Output lands in S3 when it's done.
+
+---
+
+## Prerequisites
+
+- Python 3.11+
+- AWS credentials (`~/.aws/credentials`)
+- SkyPilot configured for AWS
+
+---
 
 ## Installation
 
 ```bash
-# Clone the repo with its submodule
-git clone --recurse-submodules https://github.com/Tandemn-Labs/orca.git
-
-# If you already cloned without --recurse-submodules, initialize the submodule manually
-git submodule update --init --recursive
+git clone --recurse-submodules https://github.com/Tandemn-Labs/Tandemn-orca.git
+cd Tandemn-orca
+pip install -r requirements.txt
 ```
-
-Do this in whatever Python virtual environment you prefer
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# If you use uv, do this instead
-uv pip install -r requirements.txt
+# .env
+S3_UPLOAD_BUCKET=your-s3-bucket
+HF_TOKEN=your_hf_token        # for gated models (Llama, etc.)
 ```
 
-### Configuring cloud
+---
 
-We use SkyPilot to launch AWS instances. Make sure you have AWS credentials. Check that you have a `~/.aws/credentials` file. We support only AWS for now, and am working to add more cloud providers.
-(Also check out: https://github.com/tandemn-labs/tandemn-tuna)
+## Quick Start
 
-## Using the roofline placement solver
+Start the server (control plane):
 
-Other files you need:
-
-- AWS Quota CSV file in `quota/aws_gpu_quota_by_region.csv`
-- Profiling files in `~/.perfdb/[GPU name]/files`
-
-These default files are included in the repo.
-
-1. Start the server
-
-```
-python -m server
+```bash
+python server.py
 ```
 
-2. Upload a JSONL file of input prompts to S3. We use the OpenAI batch format (Check: https://developers.openai.com/api/docs/guides/batch)
+Run a batch job:
 
-3. Now send a BatchedRequest object to the default endpoint `http://localhost:26336/submit/batch`
+```bash
+orca deploy Qwen/Qwen2.5-72B-Instruct input.jsonl --slo 4
+```
+
+Orca parses the input file, runs the solver, and launches on the cheapest viable spot configuration. No GPU selection required.
+
+Track progress:
+
+```bash
+orca progress
+```
+
+---
+
+## CLI
 
 ```
-curl --request POST \
-  --url http://localhost:26336/test/placement \
-  --header 'content-type: application/json' \
-  --data '{
-  "user_id": "test-user",
-  "input_file": "s3://tandemn-orca/workload/sharegpt-numreq_200-avginputlen_956-avgoutputlen_50.jsonl",
-  "output_file": "output.jsonl",
-  "avg_output_tokens": 100,
-  "max_output_tokens": 256,
-  "description": "Qwen batch inference test",
-  "task_type": "chat_completion",
-  "task_priority": "high",
-  "model_name": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-  "engine": "vllm",
-  "slo_mode": "batch",
-  "slo_deadline_hours": 1,
-  "placement": "aws:us-east-1:auto",
-  "placement_solver": "roofline",
-  "s3_models": true
-}'
+orca deploy <model> <input>     Run a batch job (solver picks GPU automatically)
+orca plan   <model> <input>     Show placement plan without launching
+orca progress [job_id]          Monitor job progress
+orca status                     List all jobs
+orca logs <cluster>             Stream logs from a running cluster
+orca clusters                   Show active SkyPilot clusters
 ```
+
+Key options for `deploy` and `plan`:
+
+```
+--slo <hours>           Deadline in hours (default: 4)
+--max-output-tokens N   Max tokens per response (default: 1024)
+--gpu <type>            Override GPU type (e.g. A100, L40S, H100)
+--tp / --pp             Override tensor / pipeline parallelism
+--force                 Skip feasibility check and launch anyway
+```
+
+---
+
+## How It Works
+
+The placement solver uses a roofline model to estimate throughput and memory requirements for your workload across GPU types and parallelism configurations. It picks the cheapest option that completes within your SLO, with automatic fallback to alternative regions and instance types if the primary launch fails.
+
+Quota usage is tracked in real time across AWS regions — Orca won't try to launch where you have no capacity.
+
+---
+
+## Input Format
+
+Standard OpenAI batch JSONL:
+
+```json
+{"custom_id": "req-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "placeholder", "messages": [{"role": "user", "content": "Your prompt here"}], "max_tokens": 256}}
+```
+
+Local files are uploaded to S3 automatically. S3 URIs are passed through directly.
+
+---
+
+## Contact
+
+- Hetarth — hetarth@tandemn.com
+- Mankeerat — mankeerat@tandemn.com
+
+---
+
+## License
+
+MIT (depends on SkyPilot under Apache License 2.0)
