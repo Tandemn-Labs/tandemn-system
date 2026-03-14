@@ -232,6 +232,9 @@ def cmd_deploy(args):
             payload["force"] = True
 
     resp = api("post", "/submit/batch", json=payload)
+    if resp.status_code not in (200, 201):
+        print(f"\n  {RED}Server error ({resp.status_code}):{RESET} {resp.text}\n")
+        sys.exit(1)
     data = resp.json()
 
     if data.get("status") == "confirm":
@@ -354,6 +357,9 @@ def cmd_plan(args):
     resp = api("post", "/test/placement", json=payload)
     elapsed = time.time() - t0
 
+    if resp.status_code not in (200, 201):
+        print(f"\n  {RED}Server error ({resp.status_code}):{RESET} {resp.text}\n")
+        sys.exit(1)
     data = resp.json()
     if data.get("status") == "error":
         print(f"\n  {RED}Solver error:{RESET} {data.get('message', 'Unknown')}")
