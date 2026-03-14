@@ -135,7 +135,11 @@ class VPCQuotaTracker:
 
     def reserve_cluster(self, cluster_name: str, region: str, market: str,
                         instance_type: str, num_instances: int) -> bool:
-        """Reserve quota for a cluster and persist to SQLite. Returns True on success."""
+        """Reserve quota for a cluster and persist to SQLite. Returns True on success.
+
+        The quota check, DB write, and in-memory update are all performed under
+        self.lock so no concurrent call can interleave between them.
+        """
         row = self.quota_df[self.quota_df["Instance_Type"] == instance_type]
         if row.empty:
             logger.warning(f"[QuotaTracker] Instance type {instance_type} not found in CSV")
@@ -143,30 +147,41 @@ class VPCQuotaTracker:
         family_type = row["Family_Type"].iloc[0]
         vcpu = int(row["vCPU"].iloc[0]) * num_instances
 
-        if not self.reserve(region, market, family_type, vcpu):
-            return False
-
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (cluster_name, region, market, instance_type, num_instances,
-                 family_type, vcpu, time.time()),
+        with self.lock:
+            available = self.get_available(region, market, family_type)
+            if vcpu > available:
+                logger.warning(f"[QuotaTracker] Not enough quota for {region}, {market}, {family_type}")
+                return False
+            # DB write inside the lock — check and write are atomic
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (cluster_name, region, market, instance_type, num_instances,
+                     family_type, vcpu, time.time()),
+                )
+            # In-memory update only after successful DB write
+            self.used_vcpu[(region, market, family_type)] = (
+                self.used_vcpu.get((region, market, family_type), 0) + vcpu
             )
+
         logger.info(f"[QuotaTracker] Reserved cluster {cluster_name}: {instance_type} x{num_instances} in {region}/{market}")
         return True
 
     def release_cluster(self, cluster_name: str):
         """Release quota for a cluster and remove from SQLite."""
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT region, market, family_type, vcpu_reserved FROM reservations WHERE cluster_name = ?",
-                (cluster_name,),
-            ).fetchone()
-            if row is None:
-                return
-            region, market, family_type, vcpu = row
-            self.release(region, market, family_type, vcpu)
-            conn.execute("DELETE FROM reservations WHERE cluster_name = ?", (cluster_name,))
+        with self.lock:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT region, market, family_type, vcpu_reserved FROM reservations WHERE cluster_name = ?",
+                    (cluster_name,),
+                ).fetchone()
+                if row is None:
+                    return
+                region, market, family_type, vcpu = row
+                conn.execute("DELETE FROM reservations WHERE cluster_name = ?", (cluster_name,))
+            # In-memory update after successful DB delete
+            old = self.used_vcpu.get((region, market, family_type), 0)
+            self.used_vcpu[(region, market, family_type)] = max(0, old - vcpu)
         logger.info(f"[QuotaTracker] Released cluster {cluster_name}")
 
     def reconcile(self, live_clusters: set):
