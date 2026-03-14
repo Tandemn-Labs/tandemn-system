@@ -12,7 +12,7 @@ file_mounts:
   /opt/tandemn-orca:
     name: tandemn-orca-src
     mode: COPY
-    source: /home/orange/Desktop/tandemn/Tandemn-orca
+    source: .
 
 envs:
   TD_OPENROUTER_KEY: "YOUR_KEY_HERE"

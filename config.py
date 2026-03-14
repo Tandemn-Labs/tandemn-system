@@ -34,7 +34,7 @@ PLACEMENT_PRIORITY = os.environ.get("TD_PLACEMENT_PRIORITY", "cost_first").lower
 # HuggingFace token for gated models
 HF_TOKEN = os.environ.get("HF_TOKEN")
 
-CHUNK_SIZE_MB = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024
+CHUNK_SIZE_BYTES = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024
 
 # --------------------------------------------------------------------------- #
 # Canonical AWS instance table

@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    import requests as http
+    import requests
 except ImportError:
     print("Error: 'requests' package is required. Install with: pip install requests")
     sys.exit(1)
@@ -124,11 +124,11 @@ def api(method, path, **kwargs):
     try:
         resp = getattr(http, method)(url, timeout=kwargs.pop("timeout", 600), **kwargs)
         return resp
-    except http.ConnectionError:
+    except requests.ConnectionError:
         print(f"\n  {RED}Error:{RESET} Cannot reach Orca server at {ORCA_SERVER}")
         print(f"  {DIM}Set ORCA_SERVER env var or start the server.{RESET}\n")
         sys.exit(1)
-    except http.Timeout:
+    except requests.Timeout:
         print(f"\n  {RED}Error:{RESET} Request timed out to {url}")
         sys.exit(1)
 

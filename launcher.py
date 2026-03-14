@@ -2,12 +2,14 @@
 SkyPilot cluster launch orchestration for vLLM batch and online jobs.
 """
 
+import subprocess
 import threading
 from pathlib import Path
 from typing import List, Tuple
 
 import requests
 import sky
+import yaml
 
 from config import (
     HF_TOKEN,
@@ -94,8 +96,6 @@ async def sp_launch_vllm_batch(
 
     # Verify model exists in S3; fall back to HuggingFace if unavailable
     if request.s3_models:
-        import subprocess
-
         s3_model_path = (
             f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}/"
         )
@@ -170,8 +170,6 @@ async def sp_launch_vllm_batch(
             template_content = template_content.replace("{" + key + "}", str(value))
 
         # Write to temp file and parse as yaml
-        import yaml
-
         yaml_data = yaml.safe_load(template_content)
 
         # Preserve image_id from template if specified (e.g., custom AMI for A100)
@@ -305,7 +303,7 @@ async def sp_launch_vllm_batch(
     try:
         job_logger.info(f"[SkyPilot] Launching cluster {config.decision_id}...")
         task = sky.Task.from_yaml(YAML_OUTPUT)
-        result_id = sky.launch(task, cluster_name=config.decision_id, down=True, idle_minutes_to_autostop=10)
+        result_id = sky.launch(task, cluster_name=config.decision_id, down=True)
         job_id, handle = sky.stream_and_get(result_id, follow=True)
         job_logger.info(f"[SkyPilot] Launch complete. job_id={job_id}")
 
