@@ -1,0 +1,64 @@
+name: tandemn-cp
+
+resources:
+  infra: aws/us-east-1
+  instance_type: m5.large
+  disk_size: 50GB
+  ports:
+    - 6379
+    - 26336
+
+file_mounts:
+  /opt/tandemn-orca:
+    name: tandemn-orca-src
+    mode: COPY
+    source: /home/orange/Desktop/tandemn/Tandemn-orca
+
+envs:
+  TD_OPENROUTER_KEY: "YOUR_KEY_HERE"
+
+setup: |
+  set -euxo pipefail
+
+  # Redis
+  sudo apt-get update -y
+  sudo apt-get install -y redis-server
+
+  # Python env
+  cd /opt/tandemn-orca
+  python3 -m pip install -U pip uv
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+  uv pip install -r requirements.txt
+  uv pip install "skypilot[aws]"
+
+  mkdir -p /opt/tandemn-orca/temp
+
+run: |
+  set -euxo pipefail
+
+  # Reconfigure systemd Redis to listen on all interfaces
+  sudo sed -i 's/^bind .*/bind 0.0.0.0/' /etc/redis/redis.conf
+  sudo systemctl restart redis-server
+  redis-cli ping
+
+  # Write .env (use public IP so cross-region workers can reach Redis)
+  IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+  PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+  printf '%s\n' \
+    "TD_OPENROUTER_KEY=${TD_OPENROUTER_KEY}" \
+    "REDIS_HOST=localhost" \
+    "REDIS_PORT=6379" \
+    "CONTROL_PLANE_IP=${PUBLIC_IP}" \
+    "TEST_FORCE_REPLICAS=2" \
+    > /opt/tandemn-orca/.env
+
+  echo "============================================="
+  echo "Control plane IP: ${PUBLIC_IP}"
+  echo "Redis: ${PUBLIC_IP}:6379"
+  echo "Server: ${PUBLIC_IP}:26336"
+  echo "============================================="
+
+  cd /opt/tandemn-orca
+  source .venv/bin/activate
+  python server.py

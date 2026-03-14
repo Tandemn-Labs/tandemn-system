@@ -9,6 +9,10 @@ files/
 # input/output data
 *jsonl
 *.log
+outputs/
+
+# Audit/planning docs (local only)
+AUDIT.md
 
 # Editor
 *.code-workspace
