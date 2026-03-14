@@ -43,6 +43,15 @@ def sample_perfdb_dir(tmp_path):
 
 
 @pytest.fixture
+def sample_tracker(sample_quota_csv_path, tmp_path):
+    """VPCQuotaTracker with temp DB for isolation."""
+    from tracking.tracking import VPCQuotaTracker
+
+    db = str(tmp_path / "quota.db")
+    return VPCQuotaTracker(quota_csv_file=sample_quota_csv_path, db_path=db)
+
+
+@pytest.fixture
 def region_quotas():
     """Pre-built RegionQuota dict for testing without AWS calls."""
     from quota.region_selector import RegionQuota
