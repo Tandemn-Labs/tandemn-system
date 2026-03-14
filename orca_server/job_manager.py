@@ -12,6 +12,8 @@ from typing import Dict, Literal, Optional
 import requests
 
 from orca_server.config import INSTANCE_TO_GPU
+
+logger = logging.getLogger(__name__)
 from models.requests import BatchedRequest
 from models.resources import MagicOutput
 from quota.tracker import JobRecord, JobSpec, JobState
@@ -113,13 +115,13 @@ class ClusterManager:
                 "region": region, "market": market,
                 "instance_type": instance_type, "num_instances": num_instances,
             }
-            print(f"[ClusterManager] Registered cluster: {cluster_name}")
+            logger.info(f"[ClusterManager] Registered cluster: {cluster_name}")
 
     def unregister(self, cluster_name: str):
         with self.lock:
             if cluster_name in self.active_clusters:
                 del self.active_clusters[cluster_name]
-                print(f"[ClusterManager] Unregistered cluster: {cluster_name}")
+                logger.info(f"[ClusterManager] Unregistered cluster: {cluster_name}")
 
     def terminate_cluster(self, cluster_name: str) -> bool:
         try:
@@ -134,7 +136,7 @@ class ClusterManager:
                 return True
             return False
         except Exception as e:
-            print(f"[ClusterManager] Error terminating {cluster_name}: {e}")
+            logger.error(f"[ClusterManager] Error terminating {cluster_name}: {e}")
             return False
 
 
@@ -179,7 +181,7 @@ class JobTracker:
                 avg_output_tokens=req.avg_output_tokens
                 if req.avg_output_tokens is not None
                 else 2048,
-                slo_hours=req.slo_deadline_hours or 12,
+                slo_hours=req.slo_deadline_hours or 4,
                 region="us-east-1",
                 market="spot",
             ),
