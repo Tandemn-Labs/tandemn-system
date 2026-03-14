@@ -8,6 +8,7 @@ files/
 
 # input/output data
 *jsonl
+!examples/workloads/demo_batch.jsonl
 *.log
 solver.log
 outputs/
