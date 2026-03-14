@@ -249,7 +249,7 @@ async def sp_launch_vllm_batch(
     output_s3_path = f"{s3_output_dir}/{request.output_file}"
     job_logger.info(f"[Job] Output will be saved to: {s3_output_dir}/")
 
-    def monitor_and_download():
+    def monitor_and_download(job_id):
         """Background thread: stream logs, then download output when done."""
         try:
             sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
@@ -332,7 +332,7 @@ async def sp_launch_vllm_batch(
             jt.set_head_ip(config.decision_id, head_ip)
 
         # Stream logs in background and download when done
-        threading.Thread(target=monitor_and_download, daemon=True).start()
+        threading.Thread(target=monitor_and_download, args=(job_id,), daemon=True).start()
 
     except Exception as e:
         job_logger.error(
