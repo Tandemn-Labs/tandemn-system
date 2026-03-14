@@ -251,9 +251,14 @@ class ClusterManager:
         self.active_clusters: Dict[str, dict] = {}
         self.lock = Lock()
 
-    def register(self, cluster_name: str, job_id: str):
+    def register(self, cluster_name: str, job_id: str, region: str = None,
+                 market: str = None, instance_type: str = None, num_instances: int = None):
         with self.lock:
-            self.active_clusters[cluster_name] = {"job_id": job_id, "status": "active"}
+            self.active_clusters[cluster_name] = {
+                "job_id": job_id, "status": "active",
+                "region": region, "market": market,
+                "instance_type": instance_type, "num_instances": num_instances,
+            }
             print(f"[ClusterManager] Registered cluster: {cluster_name}")
 
     def unregister(self, cluster_name: str):
@@ -297,8 +302,17 @@ async def lifespan(app: FastAPI):
     # Initialize cluster manager
     app.state.cluster_manager = get_cluster_manager()
 
-    # Initialize quota tracker
+    # Initialize quota tracker (replays persisted reservations from SQLite)
     app.state.quota_tracker = VPCQuotaTracker()
+
+    # Reconcile stale reservations against live SkyPilot clusters
+    try:
+        request_id = sky.status()
+        clusters = sky.get(request_id)
+        live = {c['name'] for c in clusters} if clusters else set()
+        app.state.quota_tracker.reconcile(live)
+    except Exception as e:
+        print(f"[Quota] Could not reconcile on startup: {e}")
 
     yield
 
@@ -514,10 +528,15 @@ def get_quota_tracker():
 
 @app.get("/quota/status")
 async def quota_status():
-    """Get current quota usage summary."""
+    """Get current quota usage summary and active cluster reservations."""
     tracker = get_quota_tracker()
     summary = tracker.status_summary()
-    return {"status": "success", "quota_usage": summary.to_dict(orient="records")}
+    reservations = tracker.get_reservations()
+    return {
+        "status": "success",
+        "quota_usage": summary.to_dict(orient="records"),
+        "active_reservations": reservations,
+    }
 
 
 # A: Stats on input file computed instead of from request
@@ -1150,7 +1169,6 @@ async def sp_launch_vllm_batch(
         update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
 
     cm = get_cluster_manager()
-    cm.register(config.decision_id, config.decision_id)
 
     # Construct S3 output path for later download
     output_s3_path = f"{s3_output_dir}/{request.output_file}"
@@ -1200,6 +1218,7 @@ async def sp_launch_vllm_batch(
             elif not failed_dir.exists():
                 failed_dir.mkdir(parents=True, exist_ok=True)
         finally:
+            get_quota_tracker().release_cluster(config.decision_id)
             cm.unregister(config.decision_id)
 
     try:
@@ -1209,6 +1228,21 @@ async def sp_launch_vllm_batch(
         job_id, handle = sky.stream_and_get(result_id, follow=True)
         job_logger.info(f"[SkyPilot] Launch complete. job_id={job_id}")
 
+        # Extract actual region/market from SkyPilot handle and reserve quota
+        actual_region = handle.launched_resources.region
+        actual_market = "spot" if handle.launched_resources.use_spot else "on_demand"
+        get_quota_tracker().reserve_cluster(
+            cluster_name=config.decision_id,
+            region=actual_region,
+            market=actual_market,
+            instance_type=config.instance_type,
+            num_instances=num_nodes,
+        )
+        cm.register(config.decision_id, config.decision_id,
+                     region=actual_region, market=actual_market,
+                     instance_type=config.instance_type, num_instances=num_nodes)
+        job_logger.info(f"[Quota] Reserved {config.instance_type} x{num_nodes} in {actual_region}/{actual_market}")
+
         # Stream logs in background and download when done
         threading.Thread(target=monitor_and_download, daemon=True).start()
 
@@ -1217,7 +1251,6 @@ async def sp_launch_vllm_batch(
             f"[SkyPilot] Failed to launch cluster {config.decision_id}: {e}"
         )
         close_job_logger(job_logger)
-        cm.unregister(config.decision_id)
         raise Exception(f"Failed to launch cluster {config.decision_id}: {e}")
 
 

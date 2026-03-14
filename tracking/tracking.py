@@ -1,13 +1,20 @@
 from dataclasses import dataclass, field
+import sqlite3
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Literal
 from threading import Lock
 import pandas as pd
 
-# this will be a wrapper around the database soon, rn it is in memory only
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 @dataclass
 class VPCQuotaTracker:
     quota_csv_file: str = "quota/aws_gpu_quota_by_region.csv"
+    db_path: str = "temp/quota.db"
     quota_df: pd.DataFrame = field(init=False)
     # Key: (region, market, family_type) → vcpu_in_use
     used_vcpu: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
@@ -15,6 +22,7 @@ class VPCQuotaTracker:
 
     def __post_init__(self):
         self.reload_quota()
+        self._init_db()
     
     def reload_quota(self):
         """Reload the quota from CSV (called after Refresh)"""
@@ -73,6 +81,15 @@ class VPCQuotaTracker:
         vcpu = row["vCPU"].iloc[0]
         return self.reserve(region, market, family_type, vcpu * num_instances)
 
+    def release_for_instance(self, region: str, market: str, instance_type: str, num_instances: int):
+        """Convenience: release by instance type (auto-looks up family + vCPU)."""
+        row = self.quota_df[self.quota_df["Instance_Type"] == instance_type]
+        if row.empty:
+            return
+        family_type = row["Family_Type"].iloc[0]
+        vcpu = row["vCPU"].iloc[0]
+        self.release(region, market, family_type, vcpu * num_instances)
+
     def status_summary(self) -> pd.DataFrame:
         """Get a human-readable summary of quota usage."""
         rows = []
@@ -88,6 +105,86 @@ class VPCQuotaTracker:
                 "Usage %": f"{(used/baseline*100):.1f}%" if baseline > 0 else "N/A"
             })
         return pd.DataFrame(rows)
+
+    # ---- SQLite-backed reservation persistence ----
+
+    def _init_db(self):
+        """Create reservations table and replay persisted state into memory."""
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS reservations (
+                    cluster_name TEXT PRIMARY KEY,
+                    region TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    instance_type TEXT NOT NULL,
+                    num_instances INTEGER NOT NULL,
+                    family_type TEXT NOT NULL,
+                    vcpu_reserved INTEGER NOT NULL,
+                    reserved_at REAL NOT NULL
+                )
+            """)
+            # Replay persisted reservations into in-memory counters
+            rows = conn.execute("SELECT region, market, family_type, vcpu_reserved FROM reservations").fetchall()
+            for region, market, family_type, vcpu in rows:
+                key = (region, market, family_type)
+                self.used_vcpu[key] = self.used_vcpu.get(key, 0) + vcpu
+            if rows:
+                logger.info(f"[QuotaTracker] Restored {len(rows)} reservations from {self.db_path}")
+
+    def reserve_cluster(self, cluster_name: str, region: str, market: str,
+                        instance_type: str, num_instances: int) -> bool:
+        """Reserve quota for a cluster and persist to SQLite. Returns True on success."""
+        row = self.quota_df[self.quota_df["Instance_Type"] == instance_type]
+        if row.empty:
+            logger.warning(f"[QuotaTracker] Instance type {instance_type} not found in CSV")
+            return False
+        family_type = row["Family_Type"].iloc[0]
+        vcpu = int(row["vCPU"].iloc[0]) * num_instances
+
+        if not self.reserve(region, market, family_type, vcpu):
+            return False
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (cluster_name, region, market, instance_type, num_instances,
+                 family_type, vcpu, time.time()),
+            )
+        logger.info(f"[QuotaTracker] Reserved cluster {cluster_name}: {instance_type} x{num_instances} in {region}/{market}")
+        return True
+
+    def release_cluster(self, cluster_name: str):
+        """Release quota for a cluster and remove from SQLite."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT region, market, family_type, vcpu_reserved FROM reservations WHERE cluster_name = ?",
+                (cluster_name,),
+            ).fetchone()
+            if row is None:
+                return
+            region, market, family_type, vcpu = row
+            self.release(region, market, family_type, vcpu)
+            conn.execute("DELETE FROM reservations WHERE cluster_name = ?", (cluster_name,))
+        logger.info(f"[QuotaTracker] Released cluster {cluster_name}")
+
+    def reconcile(self, live_clusters: set):
+        """Remove reservations for clusters that no longer exist."""
+        with sqlite3.connect(self.db_path) as conn:
+            all_names = [r[0] for r in conn.execute("SELECT cluster_name FROM reservations").fetchall()]
+        stale = [name for name in all_names if name not in live_clusters]
+        for name in stale:
+            logger.info(f"[QuotaTracker] Reconciling stale reservation: {name}")
+            self.release_cluster(name)
+        if stale:
+            logger.info(f"[QuotaTracker] Reconciled {len(stale)} stale reservations")
+
+    def get_reservations(self) -> list:
+        """Return all active reservations as a list of dicts."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM reservations ORDER BY reserved_at").fetchall()
+            return [dict(r) for r in rows]
 
 
 @dataclass
