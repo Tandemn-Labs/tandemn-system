@@ -1,6 +1,6 @@
 import time
 import pytest
-from tracking.tracking import JobSpec, JobState, JobRecord, VPCQuotaTracker
+from quota.tracker import JobSpec, JobState, JobRecord, VPCQuotaTracker
 
 
 def _make_spec(**overrides):

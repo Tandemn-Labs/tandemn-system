@@ -11,14 +11,14 @@ import requests
 import sky
 import yaml
 
-from config import (
+from orca_server.config import (
     HF_TOKEN,
     S3_MODEL_BUCKET,
     S3_MODEL_PREFIX,
     VLLM_PORT,
     YAML_OUTPUT,
 )
-from job_manager import (
+from orca_server.job_manager import (
     close_job_logger,
     download_output_from_s3,
     generate_job_dirname,
@@ -30,7 +30,7 @@ from job_manager import (
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from quota.region_selector import get_cached_quotas, get_instance_family, get_ordered_regions
-from templates import get_vllm_config_template, replace_run_vllm, replace_run_vllm_online
+from orca_server.job_templates import get_vllm_config_template, replace_run_vllm, replace_run_vllm_online
 from utils.utils import split_uri, update_template, update_yaml_file
 
 

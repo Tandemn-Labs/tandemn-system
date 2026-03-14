@@ -26,7 +26,7 @@ import pandas as pd
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.magic import VPCMagic
-from config import AWS_INSTANCE_TO_GPU
+from orca_server.config import AWS_INSTANCE_TO_GPU
 from utils.utils import load_aws_quota_csv
 
 logger = logging.getLogger(__name__)

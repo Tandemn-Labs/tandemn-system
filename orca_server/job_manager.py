@@ -11,10 +11,10 @@ from typing import Dict, Literal, Optional
 
 import requests
 
-from config import INSTANCE_TO_GPU
+from orca_server.config import INSTANCE_TO_GPU
 from models.requests import BatchedRequest
 from models.resources import MagicOutput
-from tracking.tracking import JobRecord, JobSpec, JobState
+from quota.tracker import JobRecord, JobSpec, JobState
 
 
 # --------------------------------------------------------------------------- #

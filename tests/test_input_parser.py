@@ -1,4 +1,4 @@
-from input_parser import estimate_tokens, extract_prompt_text
+from orca_server.input_parser import estimate_tokens, extract_prompt_text
 
 
 def test_estimate_tokens_basic():
