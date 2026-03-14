@@ -503,7 +503,8 @@ async def test_placement(request: BatchedRequest):
         response["context_warning"] = context_warning
     if solver_log:
         response["solver_log"] = solver_log
-        with open("solver.log", "w") as f:
+        os.makedirs("temp", exist_ok=True)
+        with open("temp/solver.log", "w") as f:
             f.write(solver_log)
 
     return response

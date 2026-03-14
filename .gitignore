@@ -9,6 +9,7 @@ files/
 # input/output data
 *jsonl
 *.log
+solver.log
 outputs/
 
 # Audit/planning docs (local only)
