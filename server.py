@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 logger = logging.getLogger(__name__)
 
 from config import (
-    CHUNK_SIZE_MB,
+    CHUNK_SIZE_BYTES,
     INSTANCE_TO_GPU,
     PLACEMENT_PRIORITY,
     PLACEMENT_SOLVER,
@@ -43,6 +43,20 @@ from quota.region_selector import (
 from storage.storage_factory import get_storage_backend
 from templates import real_magic
 from tracking.tracking import VPCQuotaTracker
+
+
+async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:
+    """If input_file is an S3 URI, download via storage backend to a temp file.
+
+    Returns (local_path, tmp_path_to_cleanup_or_None).
+    """
+    if input_file.startswith("s3://"):
+        tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+        tmp_path = tmp.name
+        tmp.close()
+        await storage_backend.download_file(input_file, tmp_path, user="system")
+        return tmp_path, tmp_path
+    return input_file, None
 
 
 @asynccontextmanager
@@ -145,10 +159,15 @@ async def submit_batch(request: BatchedRequest):
     - "roofline": Deterministic roofline-based solver (default)
     - "user_specified": User provides GPU/TP/PP directly
     """
-    # Parse input file to get real stats (num_lines, avg_input_tokens, max_input_tokens)
-    num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
-        request.input_file, model_name=request.model_name
-    )
+    # Download S3 input if needed, then parse local file for stats
+    local_input, tmp_cleanup = await _resolve_input_file(request.input_file)
+    try:
+        num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
+            local_input, model_name=request.model_name
+        )
+    finally:
+        if tmp_cleanup:
+            os.unlink(tmp_cleanup)
 
     # Update request with parsed values (these override any user-provided values)
     request = request.model_copy(
@@ -349,10 +368,15 @@ async def test_placement(request: BatchedRequest):
     Accepts the same BatchedRequest as /submit/batch but only runs the solver
     and returns the placement decision(s) with performance/cost estimates.
     """
-    # Parse input file to get real stats
-    num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
-        request.input_file, model_name=request.model_name
-    )
+    # Download S3 input if needed, then parse local file for stats
+    local_input, tmp_cleanup = await _resolve_input_file(request.input_file)
+    try:
+        num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
+            local_input, model_name=request.model_name
+        )
+    finally:
+        if tmp_cleanup:
+            os.unlink(tmp_cleanup)
 
     request = request.model_copy(
         update={
@@ -536,7 +560,7 @@ async def upload_file_to_storage(
             remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{remote_path}"
         logger.info(f"[Storage] Uploading file for user {user} to {remote_path}")
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-            chunk_size = CHUNK_SIZE_MB
+            chunk_size = CHUNK_SIZE_BYTES
             while True:
                 chunk = await file.read(chunk_size)
                 if not chunk:
