@@ -656,17 +656,18 @@ async def submit_batch(request: BatchedRequest):
             max_output_tokens=request.max_output_tokens or 0,
         )
 
-        if not result["feasible"]:
+        if not result["feasible"] and not request.force:
             return {
-                "status": "error",
-                "error_type": "infeasible_placement",
-                "message": f"Placement is not feasible: {result['reason']}",
-                "detail": {
+                "status": "confirm",
+                "message": result["reason"],
+                "feasibility": result,
+                "config": {
                     "gpu_type": gpu_type,
                     "tp": tp,
                     "pp": pp,
                     "instance_type": instance_type,
                 },
+                "hint": "Re-submit with force=true to launch anyway",
             }
 
         # Build MagicOutput directly
@@ -836,19 +837,6 @@ async def test_placement(request: BatchedRequest):
             max_output_tokens=request.max_output_tokens or 0,
         )
 
-        if not result["feasible"]:
-            return {
-                "status": "error",
-                "error_type": "infeasible_placement",
-                "message": f"Placement is not feasible: {result['reason']}",
-                "detail": {
-                    "gpu_type": gpu_type,
-                    "tp": tp,
-                    "pp": pp,
-                    "instance_type": instance_type,
-                },
-            }
-
         partitions_per_inst = gpu_count // tp
         num_instances = math.ceil(pp / partitions_per_inst)
         sol = result.get("solution") or {}
@@ -859,10 +847,12 @@ async def test_placement(request: BatchedRequest):
                 "tp_size": tp,
                 "pp_size": pp,
                 "num_instances": num_instances,
-                "max_model_len": result["max_model_len"],
+                "max_model_len": result.get("max_model_len"),
                 "throughput_tokens_per_sec": sol.get("throughput_tokens_per_sec"),
                 "cost_per_hour": sol.get("cost_per_hour"),
                 "cost_per_million_tokens": sol.get("cost_per_million_tokens"),
+                "feasible": result["feasible"],
+                "reason": result.get("reason"),
             }
         ]
 
