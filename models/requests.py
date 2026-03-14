@@ -46,6 +46,9 @@ class BatchedRequest(BaseModel):
     tp_size: Optional[int] = None  # tensor parallelism (1,2,4,8)
     pp_size: Optional[int] = None  # pipeline parallelism (1,2,3,4)
 
+    # Skip feasibility check for user_specified placement (launch even if infeasible)
+    force: Optional[bool] = False
+
     # Load model weights from S3 instead of HuggingFace (faster, requires prior upload)
     s3_models: Optional[bool] = False
     # HuggingFace token for gated models (Llama, etc.)
