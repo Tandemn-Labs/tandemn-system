@@ -1,4 +1,4 @@
-**Orca**
+# Orca
 
 Batch inference on large models means choosing the right GPU, figuring out tensor and pipeline parallelism, picking a region with available quota, and hoping it all fits in memory before your deadline. Most teams just guess.
 
