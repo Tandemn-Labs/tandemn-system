@@ -11,7 +11,7 @@ Usage:
     from placement.roofline_magic import RooflineAWSAllocation
 
     solver = RooflineAWSAllocation(
-        perfdb_dir="./perf_db",
+        perfdb_dir="./data/perf_db",
         aws_quota_csv="./quota/aws_gpu_quota_by_region.csv",
     )
     result = solver.decide(request)
@@ -323,7 +323,7 @@ class RooflineAWSAllocation(VPCMagic):
 
     def __init__(
         self,
-        perfdb_dir: str = "./perf_db",
+        perfdb_dir: str = "./data/perf_db",
         aws_quota_csv: str = "./quota/aws_gpu_quota_by_region.csv",
         priority: str = "cost_first",
         k_nearest_model_size: int = 1,
