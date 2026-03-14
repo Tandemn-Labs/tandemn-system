@@ -80,7 +80,7 @@ def test_magic_output_num_nodes_with_instances():
         replicas=2,
         num_instances=3,
     )
-    assert mo.num_nodes == 6  # 3 * 2
+    assert mo.num_nodes == 3  # solver's num_instances IS total nodes
 
 
 def test_magic_output_num_nodes_fallback():

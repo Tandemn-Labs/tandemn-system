@@ -20,7 +20,7 @@ from quota.region_selector import (
     get_cached_quotas,
 )
 from storage.storage_factory import get_storage_backend
-from tracking.tracking import JobRecord, JobSpec, JobState
+from tracking.tracking import JobRecord, JobSpec, JobState, VPCQuotaTracker
 from utils.utils import split_uri, update_template, update_yaml_file
 from typing import Dict, List, Union, Optional, Literal, Tuple
 from threading import Lock
@@ -297,6 +297,9 @@ async def lifespan(app: FastAPI):
     # Initialize cluster manager
     app.state.cluster_manager = get_cluster_manager()
 
+    # Initialize quota tracker
+    app.state.quota_tracker = VPCQuotaTracker()
+
     yield
 
     # Shutdown logic
@@ -448,6 +451,7 @@ def get_vllm_progress(
     return int(done), int(queued)
 
 
+# Future: wired up when chunked batch queue is implemented
 def poll_job_progress(
     job_id: str,
     endpoint_url: str,
@@ -506,14 +510,6 @@ def log_jobtracker_loop(tracker: JobTracker, interval_sec: int = 0.5):
 
 def get_quota_tracker():
     return app.state.quota_tracker
-
-
-def get_job_tracker():
-    return app.state.job_tracker
-
-
-def get_orca_orchestrator():
-    return app.state.orca_orchestrator
 
 
 @app.get("/quota/status")
