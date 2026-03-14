@@ -47,7 +47,6 @@ async def sp_launch_vllm_batch_with_fallback(
 
     for i, config in enumerate(configs):
         msg = f"[Launch] Trying config {i + 1}/{len(configs)}: {config.instance_type} TP={config.tp_size} PP={config.pp_size}"
-        print(msg)
         early_messages.append(("INFO", msg))
 
         try:

@@ -112,6 +112,7 @@ class VPCQuotaTracker:
         """Create reservations table and replay persisted state into memory."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS reservations (
                     cluster_name TEXT PRIMARY KEY,
