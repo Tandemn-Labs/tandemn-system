@@ -18,5 +18,5 @@ class MagicOutput(BaseModel):
         """Total SkyPilot nodes needed. Uses solver's num_instances if available,
         otherwise falls back to pp_size * replicas (1 PP stage per node)."""
         if self.num_instances is not None:
-            return self.num_instances * self.replicas
+            return self.num_instances  # solver already computed total nodes
         return self.pp_size * self.replicas
