@@ -1,3 +1,4 @@
+import time
 import pytest
 from tracking.tracking import JobSpec, JobState, JobRecord, VPCQuotaTracker
 
@@ -164,3 +165,33 @@ def test_multi_node_large_instance(sample_tracker):
     else:
         # Quota insufficient (384 spot vCPU in fixture < 576 needed) — expected
         assert sample_tracker.get_used_vcpu("us-east-1", "spot", "G") == 0
+
+
+# --- JobRecord / JobState (testing what JobTracker uses) ---
+
+
+def test_job_record_default_status():
+    spec = _make_spec(job_id="test-job-1")
+    state = JobState(spec=spec, submitted_at=time.time())
+    rec = JobRecord(state=state)
+    assert rec.status == "queued"
+    assert rec.state.spec.model_name == "Qwen/Qwen3-32B"
+
+
+def test_job_record_status_update():
+    spec = _make_spec(job_id="test-job-2")
+    state = JobState(spec=spec, submitted_at=time.time())
+    rec = JobRecord(state=state)
+    rec.status = "running"
+    assert rec.status == "running"
+    rec.status = "succeeded"
+    assert rec.status == "succeeded"
+
+
+def test_job_record_progress_update():
+    spec = _make_spec(job_id="test-job-3")
+    state = JobState(spec=spec, submitted_at=time.time())
+    rec = JobRecord(state=state)
+    rec.state.progress_frac = 0.75
+    assert rec.state.progress_frac == 0.75
+    assert rec.state.remaining_tokens == int(0.25 * rec.state.total_tokens)

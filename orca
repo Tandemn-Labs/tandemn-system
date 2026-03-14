@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+"""
+Orca CLI - Batch Inference Orchestrator
+
+Thin HTTP client that talks to the Orca control plane server.
+Set ORCA_SERVER env var to point to your control plane (default: http://localhost:26336).
+
+Usage:
+    orca deploy <model_name> <input_file> [options]
+    orca plan <model_name> <input_file> [options]
+    orca progress [job_id]
+    orca status
+    orca logs <cluster_id>
+    orca clusters
+
+Examples:
+    orca deploy Qwen/Qwen3-32B demo_batch.jsonl
+    orca deploy Qwen/Qwen2.5-72B-Instruct demo_batch.jsonl --slo 4
+    orca plan Qwen/Qwen3-32B demo_batch.jsonl
+    orca progress
+    orca status
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+try:
+    import requests as http
+except ImportError:
+    print("Error: 'requests' package is required. Install with: pip install requests")
+    sys.exit(1)
+
+# ─── Config ──────────────────────────────────────────────────────────────────
+ORCA_SERVER = os.environ.get("ORCA_SERVER", "http://localhost:26336")
+
+# ─── ANSI helpers ────────────────────────────────────────────────────────────
+BOLD    = "\033[1m"
+DIM     = "\033[2m"
+RESET   = "\033[0m"
+RED     = "\033[31m"
+GREEN   = "\033[32m"
+YELLOW  = "\033[33m"
+BLUE    = "\033[34m"
+MAGENTA = "\033[35m"
+CYAN    = "\033[36m"
+WHITE   = "\033[37m"
+
+def c(text, color):
+    return f"{color}{text}{RESET}"
+
+def bar(pct, width=40):
+    filled = int(width * pct)
+    empty = width - filled
+    if pct >= 1.0:
+        color = GREEN
+    elif pct >= 0.5:
+        color = CYAN
+    else:
+        color = BLUE
+    return f"{color}{'█' * filled}{'░' * empty}{RESET} {pct*100:5.1f}%"
+
+def visible_len(text):
+    return len(re.sub(r'\033\[[0-9;]*m', '', text))
+
+def box(lines, title="", width=72):
+    top = f"╭─{'─ ' + c(title, BOLD+CYAN) + ' ─' if title else '─'}" + "─" * (width - len(title) - 6 if title else width - 2) + "╮"
+    bottom = f"╰{'─' * (width)}╯"
+    result = [top]
+    for line in lines:
+        padding = max(0, width - visible_len(line))
+        result.append(f"│ {line}{' ' * padding}│")
+    result.append(bottom)
+    return "\n".join(result)
+
+
+# ─── Logo ────────────────────────────────────────────────────────────────────
+LOGO = f"""{CYAN}{BOLD}
+     ██████╗ ██████╗  ██████╗ █████╗
+    ██╔═══██╗██╔══██╗██╔════╝██╔══██╗
+    ██║   ██║██████╔╝██║     ███████║
+    ██║   ██║██╔══██╗██║     ██╔══██║
+    ╚██████╔╝██║  ██║╚██████╗██║  ██║
+     ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝{RESET}
+    {DIM}Batch Inference Orchestrator by Tandemn{RESET}
+"""
+
+
+# ─── Input file parsing (standalone, no server deps) ────────────────────────
+def parse_input_file(input_file: str) -> dict:
+    """Parse a JSONL batch file and return stats."""
+    prompts = []
+    max_tokens_list = []
+    with open(input_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            body = entry.get("body", {})
+            messages = body.get("messages", [])
+            text = " ".join(m.get("content", "") for m in messages)
+            prompts.append(text)
+            max_tokens_list.append(body.get("max_tokens", 256))
+
+    char_estimates = [max(1, len(p) // 4) for p in prompts]
+    return {
+        "num_lines": len(prompts),
+        "avg_input_tokens": sum(char_estimates) // max(1, len(prompts)),
+        "max_input_tokens": max(char_estimates) if char_estimates else 0,
+        "avg_max_output_tokens": sum(max_tokens_list) // max(1, len(max_tokens_list)),
+        "max_output_tokens": max(max_tokens_list) if max_tokens_list else 256,
+    }
+
+
+# ─── Server communication helpers ───────────────────────────────────────────
+def api(method, path, **kwargs):
+    """Make an HTTP request to the Orca server."""
+    url = f"{ORCA_SERVER}{path}"
+    try:
+        resp = getattr(http, method)(url, timeout=kwargs.pop("timeout", 600), **kwargs)
+        return resp
+    except http.ConnectionError:
+        print(f"\n  {RED}Error:{RESET} Cannot reach Orca server at {ORCA_SERVER}")
+        print(f"  {DIM}Set ORCA_SERVER env var or start the server.{RESET}\n")
+        sys.exit(1)
+    except http.Timeout:
+        print(f"\n  {RED}Error:{RESET} Request timed out to {url}")
+        sys.exit(1)
+
+
+def upload_to_server(local_path: str, user: str = "orca-cli") -> str:
+    """Upload a local file to S3 via the server's storage endpoint. Returns S3 URI."""
+    basename = os.path.basename(local_path)
+    remote_path = f"orca-cli/{int(time.time())}_{basename}"
+    with open(local_path, "rb") as f:
+        resp = api("post", "/storage/upload",
+                    files={"file": (basename, f)},
+                    data={"remote_path": remote_path, "user": user})
+    if resp.status_code != 200:
+        print(f"\n  {RED}Upload failed:{RESET} {resp.text}")
+        sys.exit(1)
+    return resp.json()["storage_uri"]
+
+
+# ─── Animated print helpers ─────────────────────────────────────────────────
+def step(msg, icon="▸"):
+    print(f"  {CYAN}{icon}{RESET} {msg}")
+
+def header(msg):
+    print(f"\n  {BOLD}{MAGENTA}{'━' * 60}{RESET}")
+    print(f"  {BOLD}{WHITE}{msg}{RESET}")
+    print(f"  {BOLD}{MAGENTA}{'━' * 60}{RESET}")
+
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+def cmd_deploy(args):
+    """Deploy a model for batch inference."""
+    print(LOGO)
+    header("DEPLOY")
+
+    model_name = args.model_name
+    input_file = args.input_file
+
+    if not os.path.exists(input_file):
+        print(f"\n  {RED}Error:{RESET} Input file not found: {input_file}")
+        sys.exit(1)
+
+    # ── Phase 1: Parse input ─────────────────────────────────────────────
+    step("Parsing input file...")
+    stats = parse_input_file(input_file)
+    print()
+    lines = [
+        f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
+        f"{DIM}Model:{RESET}      {c(model_name, WHITE+BOLD)}",
+        f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
+        f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
+        f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
+        f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
+        f"{DIM}SLO:{RESET}        {args.slo} hours",
+    ]
+    print(box(lines, title="WORKLOAD"))
+
+    # ── Phase 2: Upload input file to server ──────────────────────────────
+    print()
+    if input_file.startswith("s3://"):
+        s3_input = input_file
+        step(f"Using S3 path: {c(s3_input, DIM)}")
+    else:
+        step("Uploading input file to storage...")
+        s3_input = upload_to_server(input_file)
+        step(f"Uploaded to {c(s3_input, DIM)}")
+
+    # ── Phase 3: Submit to server ─────────────────────────────────────────
+    print()
+    step("Submitting job to Orca server...")
+    payload = {
+        "placement_solver": "roofline",
+        "user_id": "orca-cli",
+        "input_file": s3_input,
+        "output_file": args.output or "output.jsonl",
+        "avg_output_tokens": args.max_output_tokens,
+        "max_output_tokens": args.max_output_tokens,
+        "description": f"Orca CLI deploy: {model_name}",
+        "task_type": "batch",
+        "task_priority": "normal",
+        "model_name": model_name,
+        "engine": "vllm",
+        "slo_mode": "batch",
+        "slo_deadline_hours": args.slo,
+        "placement": "aws",
+        "s3_models": False,
+        "hf_token": os.environ.get("HF_TOKEN", ""),
+        "log_level": args.log_level,
+    }
+
+    resp = api("post", "/submit/batch", json=payload)
+    data = resp.json()
+
+    if data.get("status") == "launched":
+        job_id = data["job_id"]
+        cfg = data.get("config", {})
+        print()
+        print(box([
+            f"{GREEN}{BOLD}Job launched successfully!{RESET}",
+            f"",
+            f"{DIM}Job ID:{RESET}    {c(job_id, CYAN+BOLD)}",
+            f"{DIM}Instance:{RESET}  {cfg.get('instance_type', '?')}",
+            f"{DIM}Config:{RESET}   TP={cfg.get('tp_size', '?')} PP={cfg.get('pp_size', '?')}",
+            f"",
+            f"Track progress: {c('orca progress ' + job_id, WHITE+BOLD)}",
+        ], title="SUCCESS"))
+    else:
+        print(f"\n  {RED}Launch failed:{RESET} {data.get('message', 'Unknown error')}")
+        if data.get("detail"):
+            print(f"  {DIM}{json.dumps(data['detail'], indent=2)}{RESET}")
+        sys.exit(1)
+
+    print()
+
+
+def cmd_plan(args):
+    """Run solver only, show the plan without launching."""
+    print(LOGO)
+    header("PLAN")
+
+    model_name = args.model_name
+    input_file = args.input_file
+
+    if not os.path.exists(input_file):
+        print(f"\n  {RED}Error:{RESET} Input file not found: {input_file}")
+        sys.exit(1)
+
+    step("Parsing input file...")
+    stats = parse_input_file(input_file)
+    print()
+    lines = [
+        f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
+        f"{DIM}Model:{RESET}      {c(model_name, WHITE+BOLD)}",
+        f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
+        f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
+        f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
+        f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
+        f"{DIM}SLO:{RESET}        {args.slo} hours",
+    ]
+    print(box(lines, title="WORKLOAD"))
+
+    # Upload input so server can parse it
+    print()
+    if input_file.startswith("s3://"):
+        s3_input = input_file
+    else:
+        step("Uploading input file to storage...")
+        s3_input = upload_to_server(input_file)
+        step(f"Uploaded to {c(s3_input, DIM)}")
+
+    step("Running Orca placement solver...")
+    t0 = time.time()
+
+    payload = {
+        "placement_solver": "roofline",
+        "user_id": "orca-cli",
+        "input_file": s3_input,
+        "output_file": "output.jsonl",
+        "avg_output_tokens": args.max_output_tokens,
+        "max_output_tokens": args.max_output_tokens,
+        "description": f"Orca CLI plan: {model_name}",
+        "task_type": "batch",
+        "task_priority": "normal",
+        "model_name": model_name,
+        "engine": "vllm",
+        "slo_mode": "batch",
+        "slo_deadline_hours": args.slo,
+        "placement": "aws",
+        "log_level": args.log_level,
+    }
+
+    resp = api("post", "/test/placement", json=payload)
+    elapsed = time.time() - t0
+
+    data = resp.json()
+    if data.get("status") == "error":
+        print(f"\n  {RED}Solver error:{RESET} {data.get('message', 'Unknown')}")
+        sys.exit(1)
+
+    step(f"Solver completed in {c(f'{elapsed:.2f}s', GREEN)}")
+
+    configs = data.get("configs", [])
+    if not configs:
+        print(f"\n  {RED}No feasible configuration found.{RESET}")
+        sys.exit(1)
+
+    print()
+    header(f"PLACEMENT PLAN  ({len(configs)} option{'s' if len(configs) > 1 else ''})")
+
+    for i, cfg in enumerate(configs):
+        rank_label = f"#{i+1}" + (" BEST" if i == 0 else "")
+        lines = [
+            f"{DIM}Instance:{RESET}     {c(cfg.get('instance_type', '?'), WHITE+BOLD)}",
+            f"{DIM}GPU:{RESET}          {c(cfg.get('gpu_type', '?'), CYAN+BOLD)}",
+            f"{DIM}TP:{RESET}           {cfg.get('tp_size', '?')}    {DIM}PP:{RESET} {cfg.get('pp_size', '?')}    {DIM}Nodes:{RESET} {cfg.get('num_instances', '?')}",
+            f"{DIM}Max context:{RESET}  {c(str(cfg.get('max_model_len', '?')), YELLOW)} tokens",
+        ]
+        if cfg.get("throughput_tokens_per_sec"):
+            lines.append(f"{DIM}Throughput:{RESET}  {c(f'{cfg[\"throughput_tokens_per_sec\"]:.0f}', GREEN)} tok/s")
+        if cfg.get("cost_per_hour"):
+            lines.append(f"{DIM}Cost:{RESET}        ${cfg['cost_per_hour']:.2f}/hr")
+        print(box(lines, title=f"CONFIG {rank_label}"))
+        print()
+
+    if args.verbose and data.get("solver_log"):
+        header("SOLVER LOG")
+        for line in data["solver_log"].splitlines():
+            print(f"  {DIM}{line}{RESET}")
+        print()
+
+    step(f"To deploy: {c(f'orca deploy {model_name} {input_file}', WHITE+BOLD)}")
+    print()
+
+
+def cmd_progress(args):
+    """Poll job progress."""
+    print(LOGO)
+    header("PROGRESS MONITOR")
+
+    job_id = args.job_id
+
+    # If no job_id, list recent jobs from server
+    if not job_id:
+        resp = api("get", "/jobs", timeout=10)
+        if resp.status_code == 200:
+            jobs = resp.json().get("jobs", [])
+            if jobs:
+                step(f"Found {len(jobs)} job(s) on server:")
+                print()
+                for j in jobs:
+                    status = j["status"]
+                    sc = GREEN if status == "succeeded" else (RED if status == "failed" else YELLOW)
+                    ts = datetime.fromtimestamp(j["created_at"]).strftime("%Y-%m-%d %H:%M")
+                    print(f"    {c(status, sc+BOLD):<22} {DIM}{ts}{RESET}  {j['model_name']}  [{j['job_id'][:40]}...]")
+                print()
+                print(f"  {DIM}Run with job ID to monitor a specific job:{RESET}")
+                print(f"  {WHITE}orca progress <job_id>{RESET}\n")
+            else:
+                print(f"\n  {DIM}No jobs found on server.{RESET}\n")
+        return
+
+    # Poll a specific job
+    step(f"Monitoring job: {c(job_id, CYAN+BOLD)}")
+    print()
+
+    resp = api("get", f"/job/{job_id}", timeout=10)
+    if resp.status_code == 404:
+        print(f"  {RED}Job not found:{RESET} {job_id}\n")
+        return
+    if resp.status_code != 200:
+        print(f"  {RED}Error:{RESET} {resp.text}\n")
+        return
+
+    data = resp.json()
+    status = data.get("status", "unknown")
+    progress = data.get("progress", 0)
+
+    status_color = GREEN if status == "succeeded" else (RED if status == "failed" else YELLOW)
+    lines = [
+        f"{DIM}Job ID:{RESET}     {c(job_id, CYAN+BOLD)}",
+        f"{DIM}Model:{RESET}      {data.get('model_name', '?')}",
+        f"{DIM}Status:{RESET}     {c(status, status_color+BOLD)}",
+        f"{DIM}Progress:{RESET}   {bar(progress)}",
+        f"{DIM}Prompts:{RESET}    {data.get('num_lines', '?')}",
+    ]
+    if data.get("endpoint_url"):
+        lines.append(f"{DIM}Endpoint:{RESET}   {data['endpoint_url']}")
+    if data.get("head_ip"):
+        lines.append(f"{DIM}Head IP:{RESET}    {data['head_ip']}")
+    print(box(lines, title="JOB STATUS"))
+
+    # Live poll if still running
+    if status in ("running", "launching", "queued"):
+        print()
+        step("Live polling (Ctrl+C to stop)...")
+        print()
+        try:
+            while True:
+                time.sleep(2)
+                resp = api("get", f"/job/{job_id}", timeout=10)
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                progress = data.get("progress", 0)
+                status = data.get("status", "unknown")
+                done_count = int(progress * data.get("num_lines", 100))
+                total = data.get("num_lines", "?")
+                sys.stdout.write(f"\r  {bar(progress, 50)}  {done_count}/{total} prompts  [{status}]  ")
+                sys.stdout.flush()
+                if status in ("succeeded", "failed"):
+                    break
+        except KeyboardInterrupt:
+            print(f"\n\n  {DIM}Stopped polling.{RESET}")
+
+    print()
+
+
+def cmd_status(args):
+    """Show status of all jobs."""
+    print(LOGO)
+    header("JOB STATUS")
+
+    resp = api("get", "/jobs", timeout=10)
+    if resp.status_code != 200:
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        return
+
+    jobs = resp.json().get("jobs", [])
+    if not jobs:
+        print(f"\n  {DIM}No jobs found.{RESET}\n")
+        return
+
+    print()
+    print(f"  {'STATUS':<12} {'PROGRESS':>10} {'PROMPTS':>8} {'MODEL':<35} {'CREATED'}")
+    print(f"  {'─'*12} {'─'*10} {'─'*8} {'─'*35} {'─'*18}")
+
+    for j in jobs:
+        status = j["status"]
+        sc = GREEN if status == "succeeded" else (RED if status == "failed" else YELLOW)
+        ts = datetime.fromtimestamp(j["created_at"]).strftime("%Y-%m-%d %H:%M")
+        pct = f"{j['progress']*100:.0f}%"
+        model = j.get("model_name", "?")[:35]
+        print(f"  {c(status, sc):<23} {pct:>10} {j.get('num_lines', '?'):>8} {model:<35} {DIM}{ts}{RESET}")
+
+    print()
+
+
+def cmd_logs(args):
+    """Stream logs from a running or completed job."""
+    print(LOGO)
+    header("LOGS")
+
+    cluster = args.cluster_id
+    if not cluster:
+        step("Fetching active clusters...")
+        print()
+        import subprocess as _sp
+        _sp.run(["sky", "status"], check=False)
+        print(f"\n  {DIM}Run with cluster name to stream logs:{RESET}")
+        print(f"  {WHITE}orca logs <cluster_name>{RESET}\n")
+        return
+
+    step(f"Streaming logs for: {c(cluster, CYAN+BOLD)}")
+    print()
+    import subprocess as _sp
+    try:
+        _sp.run(["sky", "logs", cluster], check=False)
+    except KeyboardInterrupt:
+        print(f"\n\n  {DIM}Stopped streaming.{RESET}")
+
+
+def cmd_clusters(args):
+    """Show active SkyPilot clusters."""
+    print(LOGO)
+    header("CLUSTERS")
+    import subprocess as _sp
+    _sp.run(["sky", "status"], check=False)
+
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(
+        prog="orca",
+        description="Orca - Batch Inference Orchestrator by Tandemn",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+Environment:
+  ORCA_SERVER   Control plane URL (default: http://localhost:26336)
+  HF_TOKEN      HuggingFace token for gated models
+
+Examples:
+  orca plan Qwen/Qwen3-32B demo_batch.jsonl
+  orca deploy Qwen/Qwen3-32B demo_batch.jsonl --slo 4
+  orca progress
+  orca status
+        """,
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+
+    # deploy
+    p_deploy = subparsers.add_parser("deploy", help="Deploy a model for batch inference")
+    p_deploy.add_argument("model_name", help="Model name (e.g., Qwen/Qwen3-32B)")
+    p_deploy.add_argument("input_file", help="Path to JSONL batch file (local or s3://)")
+    p_deploy.add_argument("--slo", type=int, default=4, help="SLO deadline in hours (default: 4)")
+    p_deploy.add_argument("--max-output-tokens", type=int, default=1024, help="Max output tokens per request")
+    p_deploy.add_argument("--output", "-o", help="Output file name (default: output.jsonl)")
+    p_deploy.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
+
+    # plan
+    p_plan = subparsers.add_parser("plan", help="Run solver and show placement plan (no launch)")
+    p_plan.add_argument("model_name", help="Model name (e.g., Qwen/Qwen3-32B)")
+    p_plan.add_argument("input_file", help="Path to JSONL batch file (local or s3://)")
+    p_plan.add_argument("--slo", type=int, default=4, help="SLO deadline in hours (default: 4)")
+    p_plan.add_argument("--max-output-tokens", type=int, default=1024, help="Max output tokens per request")
+    p_plan.add_argument("--verbose", "-v", action="store_true", help="Show full solver log")
+    p_plan.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
+
+    # progress
+    p_progress = subparsers.add_parser("progress", help="Monitor job progress")
+    p_progress.add_argument("job_id", nargs="?", help="Job ID to monitor (optional)")
+
+    # status
+    subparsers.add_parser("status", help="Show status of all jobs")
+
+    # logs
+    p_logs = subparsers.add_parser("logs", help="Stream logs from a job cluster")
+    p_logs.add_argument("cluster_id", nargs="?", help="Cluster name / job ID")
+
+    # clusters
+    subparsers.add_parser("clusters", help="Show active SkyPilot clusters")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        print(LOGO)
+        sys.exit(0)
+
+    commands = {
+        "deploy": cmd_deploy,
+        "plan": cmd_plan,
+        "progress": cmd_progress,
+        "status": cmd_status,
+        "logs": cmd_logs,
+        "clusters": cmd_clusters,
+    }
+
+    commands[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

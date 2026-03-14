@@ -294,6 +294,16 @@ def get_cluster_manager() -> ClusterManager:
     return _cluster_manager
 
 
+_job_tracker = None
+
+
+def get_job_tracker() -> "JobTracker":
+    global _job_tracker
+    if _job_tracker is None:
+        _job_tracker = JobTracker()
+    return _job_tracker
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
@@ -537,6 +547,44 @@ async def quota_status():
         "quota_usage": summary.to_dict(orient="records"),
         "active_reservations": reservations,
     }
+
+
+@app.get("/job/{job_id}")
+async def get_job(job_id: str):
+    """Get status and progress for a specific job."""
+    tracker = get_job_tracker()
+    rec = tracker.get(job_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return {
+        "job_id": job_id,
+        "status": rec.status,
+        "progress": round(rec.state.progress_frac, 4),
+        "num_lines": rec.state.spec.num_lines,
+        "model_name": rec.state.spec.model_name,
+        "head_ip": rec.head_ip,
+        "endpoint_url": rec.endpoint_url,
+        "created_at": rec.created_at,
+        "last_updated_at": rec.last_updated_at,
+    }
+
+
+@app.get("/jobs")
+async def list_jobs():
+    """List all tracked jobs."""
+    tracker = get_job_tracker()
+    with tracker.lock:
+        return {"jobs": [
+            {
+                "job_id": jid,
+                "status": rec.status,
+                "progress": round(rec.state.progress_frac, 4),
+                "model_name": rec.state.spec.model_name,
+                "num_lines": rec.state.spec.num_lines,
+                "created_at": rec.created_at,
+            }
+            for jid, rec in tracker.jobs.items()
+        ]}
 
 
 # A: Stats on input file computed instead of from request
@@ -1170,6 +1218,12 @@ async def sp_launch_vllm_batch(
 
     cm = get_cluster_manager()
 
+    # Register job in tracker
+    jt = get_job_tracker()
+    job_state = jt.build_job_state_batched(request, config)
+    jt.add(job_state)
+    jt.update_status(config.decision_id, "launching")
+
     # Construct S3 output path for later download
     output_s3_path = f"{s3_output_dir}/{request.output_file}"
     job_logger.info(f"[Job] Output will be saved to: {s3_output_dir}/")
@@ -1195,6 +1249,10 @@ async def sp_launch_vllm_batch(
                 and (base_dir / "metrics.csv").exists()
             )
 
+            # Update job tracker
+            get_job_tracker().update_progress(config.decision_id, 1.0)
+            get_job_tracker().update_status(config.decision_id, "succeeded" if is_success else "failed")
+
             # Rename dir with success-/failed- prefix
             status = "success" if is_success else "failed"
             prefixed_dirname = prefix_job_dirname(job_dirname, status)
@@ -1206,6 +1264,7 @@ async def sp_launch_vllm_batch(
 
         except Exception as e:
             job_logger.error(f"[Job] Error in monitor thread: {e}")
+            get_job_tracker().update_status(config.decision_id, "failed")
             # Ensure a failed- dir exists even if everything blew up
             failed_dirname = prefix_job_dirname(job_dirname, "failed")
             failed_dir = Path(f"outputs/{failed_dirname}")
@@ -1243,6 +1302,12 @@ async def sp_launch_vllm_batch(
                      instance_type=config.instance_type, num_instances=num_nodes)
         job_logger.info(f"[Quota] Reserved {config.instance_type} x{num_nodes} in {actual_region}/{actual_market}")
 
+        # Update job tracker: running + head IP
+        jt.update_status(config.decision_id, "running")
+        head_ip = getattr(handle, 'head_ip', None)
+        if head_ip:
+            jt.set_head_ip(config.decision_id, head_ip)
+
         # Stream logs in background and download when done
         threading.Thread(target=monitor_and_download, daemon=True).start()
 
@@ -1250,6 +1315,7 @@ async def sp_launch_vllm_batch(
         job_logger.error(
             f"[SkyPilot] Failed to launch cluster {config.decision_id}: {e}"
         )
+        jt.update_status(config.decision_id, "failed")
         close_job_logger(job_logger)
         raise Exception(f"Failed to launch cluster {config.decision_id}: {e}")
 
