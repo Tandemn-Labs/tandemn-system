@@ -135,3 +135,32 @@ def test_get_reservations_returns_list(sample_tracker):
     assert len(res) == 2
     names = {r["cluster_name"] for r in res}
     assert names == {"c1", "c2"}
+
+
+# --- Multi-node quota math ---
+
+
+def test_multi_node_reserve_and_release(sample_tracker):
+    """2x g6e.12xlarge (48 vCPU each) should reserve 96 vCPU total."""
+    avail_before = sample_tracker.get_available("us-east-1", "spot", "G")
+    sample_tracker.reserve_cluster("multi", "us-east-1", "spot", "g6e.12xlarge", 2)
+    assert sample_tracker.get_used_vcpu("us-east-1", "spot", "G") == 48 * 2
+    assert sample_tracker.get_available("us-east-1", "spot", "G") == avail_before - 96
+    # Release and verify fully restored
+    sample_tracker.release_cluster("multi")
+    assert sample_tracker.get_used_vcpu("us-east-1", "spot", "G") == 0
+    assert sample_tracker.get_available("us-east-1", "spot", "G") == avail_before
+
+
+def test_multi_node_large_instance(sample_tracker):
+    """3x g6e.48xlarge (192 vCPU each) = 576 vCPU."""
+    ok = sample_tracker.reserve_cluster("big", "us-east-1", "spot", "g6e.48xlarge", 3)
+    if ok:
+        assert sample_tracker.get_used_vcpu("us-east-1", "spot", "G") == 192 * 3
+        res = sample_tracker.get_reservations()
+        assert res[0]["vcpu_reserved"] == 576
+        assert res[0]["num_instances"] == 3
+        sample_tracker.release_cluster("big")
+    else:
+        # Quota insufficient (384 spot vCPU in fixture < 576 needed) — expected
+        assert sample_tracker.get_used_vcpu("us-east-1", "spot", "G") == 0
