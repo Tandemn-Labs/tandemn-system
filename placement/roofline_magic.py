@@ -26,6 +26,7 @@ import pandas as pd
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.magic import VPCMagic
+from config import AWS_INSTANCE_TO_GPU
 from utils.utils import load_aws_quota_csv
 
 logger = logging.getLogger(__name__)
@@ -46,41 +47,6 @@ def _build_gpu_type_to_instances(
         rev[gpu_name].sort(key=lambda x: x[1])
     return rev
 
-
-# AWS instance type to GPU mapping
-AWS_INSTANCE_TO_GPU: Dict[str, tuple] = {
-    # P5 instances (H100)
-    "p5.48xlarge": ("H100", 8),
-    # P4 instances (A100)
-    "p4d.24xlarge": ("A100", 8),
-    "p4de.24xlarge": ("A100", 8),
-    # P3 instances (V100)
-    "p3.2xlarge": ("V100", 1),
-    "p3.8xlarge": ("V100", 4),
-    "p3.16xlarge": ("V100", 8),
-    "p3dn.24xlarge": ("V100", 8),
-    # G6e instances (L40S)
-    "g6e.xlarge": ("L40S", 1),
-    "g6e.2xlarge": ("L40S", 1),
-    "g6e.4xlarge": ("L40S", 1),
-    "g6e.12xlarge": ("L40S", 4),
-    "g6e.24xlarge": ("L40S", 4),
-    "g6e.48xlarge": ("L40S", 8),
-    # G6 instances (L4)
-    "g6.xlarge": ("L4", 1),
-    "g6.2xlarge": ("L4", 1),
-    "g6.4xlarge": ("L4", 1),
-    "g6.12xlarge": ("L4", 2),
-    "g6.24xlarge": ("L4", 4),
-    "g6.48xlarge": ("L4", 8),
-    # G5 instances (A10G)
-    "g5.xlarge": ("A10G", 1),
-    "g5.2xlarge": ("A10G", 1),
-    "g5.4xlarge": ("A10G", 1),
-    "g5.12xlarge": ("A10G", 4),
-    "g5.24xlarge": ("A10G", 4),
-    "g5.48xlarge": ("A10G", 8),
-}
 
 # Reverse map built once at import time
 GPU_TYPE_TO_INSTANCES: Dict[str, List[tuple]] = _build_gpu_type_to_instances(

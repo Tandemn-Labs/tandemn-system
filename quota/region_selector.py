@@ -17,6 +17,8 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from config import INSTANCE_VCPUS, VLLM_PORT
+
 logger = logging.getLogger(__name__)
 
 # AWS regions to consider (major GPU-available regions)
@@ -30,47 +32,6 @@ AWS_REGIONS = [
     "ap-northeast-1",  # Tokyo
     "ap-southeast-1",  # Singapore
 ]
-
-# Instance type to vCPU mapping
-INSTANCE_VCPUS: Dict[str, int] = {
-    # G6e instances (L40S)
-    "g6e.xlarge": 4,
-    "g6e.2xlarge": 8,
-    "g6e.4xlarge": 16,
-    "g6e.8xlarge": 32,
-    "g6e.12xlarge": 48,
-    "g6e.16xlarge": 64,
-    "g6e.24xlarge": 96,
-    "g6e.48xlarge": 192,
-    # G6 instances (L4)
-    "g6.xlarge": 4,
-    "g6.2xlarge": 8,
-    "g6.4xlarge": 16,
-    "g6.8xlarge": 32,
-    "g6.12xlarge": 48,
-    "g6.16xlarge": 64,
-    "g6.24xlarge": 96,
-    "g6.48xlarge": 192,
-    # G5 instances (A10G)
-    "g5.xlarge": 4,
-    "g5.2xlarge": 8,
-    "g5.4xlarge": 16,
-    "g5.8xlarge": 32,
-    "g5.12xlarge": 48,
-    "g5.16xlarge": 64,
-    "g5.24xlarge": 96,
-    "g5.48xlarge": 192,
-    # P4 instances (A100)
-    "p4d.24xlarge": 96,
-    "p4de.24xlarge": 96,
-    # P5 instances (H100)
-    "p5.48xlarge": 192,
-    # P3 instances (V100)
-    "p3.2xlarge": 8,
-    "p3.8xlarge": 32,
-    "p3.16xlarge": 64,
-    "p3dn.24xlarge": 96,
-}
 
 # Instance family to quota code mapping
 # G and VT instances share one quota, P instances have their own
@@ -172,7 +133,7 @@ class RegionCandidate:
     available_quota: int
 
     def to_skypilot_resources(
-        self, instance_type: str, disk_size: str = "300GB", ports: int = 8001
+        self, instance_type: str, disk_size: str = "300GB", ports: int = VLLM_PORT
     ) -> dict:
         """Convert to SkyPilot resources dict for any_of.
 
@@ -276,7 +237,7 @@ def build_skypilot_any_of(
     max_candidates: int = 5,
     prefer_spot: bool = True,
     disk_size: str = "300GB",
-    ports: int = 8001,
+    ports: int = VLLM_PORT,
 ) -> List[dict]:
     """
     Build SkyPilot any_of resources list for fallback region selection.
