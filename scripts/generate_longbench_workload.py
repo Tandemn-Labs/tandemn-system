@@ -361,7 +361,9 @@ def main():
 
     # Generate filename
     filename = f"longbench-numreq_{stats['num_requests']}-avginputlen_{int(stats['avg_input_tokens'])}-avgoutputlen_{stats['target_avg_output_tokens']}.jsonl"
-    output_path = Path(filename)
+    output_dir = Path(__file__).resolve().parent.parent / "examples" / "workloads"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / filename
 
     # Write output
     print(f"\nWriting {len(requests)} requests to {output_path}...")
