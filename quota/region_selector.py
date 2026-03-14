@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from config import INSTANCE_VCPUS, VLLM_PORT
+from orca_server.config import INSTANCE_VCPUS, VLLM_PORT
 
 logger = logging.getLogger(__name__)
 

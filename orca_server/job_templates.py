@@ -6,7 +6,7 @@ import os
 import uuid
 from typing import Union
 
-from config import INSTANCE_TO_GPU, VLLM_PORT
+from orca_server.config import INSTANCE_TO_GPU, VLLM_PORT
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from utils.utils import split_uri

@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
 
-from config import (
+from orca_server.config import (
     CHUNK_SIZE_BYTES,
     INSTANCE_TO_GPU,
     PLACEMENT_PRIORITY,
@@ -22,9 +22,9 @@ from config import (
     S3_UPLOAD_BUCKET,
     S3_UPLOAD_PREFIX,
 )
-from input_parser import parse_input_file_stats
-from job_manager import get_cluster_manager, get_job_tracker, jobtracker_snapshot
-from launcher import (
+from orca_server.input_parser import parse_input_file_stats
+from orca_server.job_manager import get_cluster_manager, get_job_tracker, jobtracker_snapshot
+from orca_server.launcher import (
     sp_launch_vllm_batch_with_fallback,
     sp_launch_vllm_online,
 )
@@ -41,8 +41,8 @@ from quota.region_selector import (
     get_cached_quotas,
 )
 from storage.storage_factory import get_storage_backend
-from templates import real_magic
-from tracking.tracking import VPCQuotaTracker
+from orca_server.job_templates import real_magic
+from quota.tracker import VPCQuotaTracker
 
 
 async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:

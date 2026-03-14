@@ -1,4 +1,4 @@
-from config import (
+from orca_server.config import (
     AWS_INSTANCES,
     AWS_INSTANCE_TO_GPU,
     INSTANCE_TO_GPU,
