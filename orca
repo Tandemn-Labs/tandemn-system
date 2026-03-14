@@ -236,13 +236,17 @@ def cmd_deploy(args):
 
     if data.get("status") == "confirm":
         cfg = data.get("config", {})
-        print()
-        print(box([
+        warn_lines = [
             f"{YELLOW}Solver Warning:{RESET} {data['message']}",
             f"",
             f"{DIM}Instance:{RESET}  {cfg.get('instance_type', '?')}",
             f"{DIM}Config:{RESET}    TP={cfg.get('tp', '?')} PP={cfg.get('pp', '?')}",
-        ], title="FEASIBILITY CHECK"))
+        ]
+        if data.get("quota_warning"):
+            warn_lines.append(f"")
+            warn_lines.append(f"{YELLOW}Quota:{RESET}    {data['quota_warning']}")
+        print()
+        print(box(warn_lines, title="FEASIBILITY CHECK"))
 
         answer = input(f"\n  {YELLOW}Proceed anyway? [y/N]:{RESET} ").strip().lower()
         if answer != "y":
@@ -257,16 +261,20 @@ def cmd_deploy(args):
     if data.get("status") == "launched":
         job_id = data["job_id"]
         cfg = data.get("config", {})
-        print()
-        print(box([
+        success_lines = [
             f"{GREEN}{BOLD}Job launched successfully!{RESET}",
             f"",
             f"{DIM}Job ID:{RESET}    {c(job_id, CYAN+BOLD)}",
             f"{DIM}Instance:{RESET}  {cfg.get('instance_type', '?')}",
             f"{DIM}Config:{RESET}   TP={cfg.get('tp_size', '?')} PP={cfg.get('pp_size', '?')}",
-            f"",
-            f"Track progress: {c('orca progress ' + job_id, WHITE+BOLD)}",
-        ], title="SUCCESS"))
+        ]
+        if data.get("quota_warning"):
+            success_lines.append(f"")
+            success_lines.append(f"{YELLOW}Quota:{RESET}    {data['quota_warning']}")
+        success_lines.append(f"")
+        success_lines.append(f"Track progress: {c('orca progress ' + job_id, WHITE+BOLD)}")
+        print()
+        print(box(success_lines, title="SUCCESS"))
     else:
         print(f"\n  {RED}Launch failed:{RESET} {data.get('message', 'Unknown error')}")
         if data.get("detail"):
@@ -377,6 +385,8 @@ def cmd_plan(args):
             cph = cfg.get("cost_per_hour")
             if cph:
                 lines.append(f"{DIM}Cost:{RESET}        ${cph:.2f}/hr")
+            if cfg.get("quota_warning"):
+                lines.append(f"{YELLOW}Quota:{RESET}       {cfg['quota_warning']}")
             print(box(lines, title="FEASIBILITY CHECK"))
         else:
             reason = cfg.get("reason", "Unknown")
@@ -386,6 +396,8 @@ def cmd_plan(args):
                 f"{DIM}Instance:{RESET}     {c(cfg.get('instance_type', '?'), WHITE+BOLD)}",
                 f"{DIM}TP:{RESET}           {cfg.get('tp_size', '?')}    {DIM}PP:{RESET} {cfg.get('pp_size', '?')}",
             ]
+            if cfg.get("quota_warning"):
+                lines.append(f"{YELLOW}Quota:{RESET}       {cfg['quota_warning']}")
             print(box(lines, title="FEASIBILITY CHECK"))
             print(f"\n  {DIM}Use --force with deploy to launch anyway.{RESET}")
 
