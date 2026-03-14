@@ -102,13 +102,14 @@ async def sp_launch_vllm_batch(
             ["aws", "s3", "ls", s3_model_path],
             capture_output=True,
             text=True,
+            timeout=15,
         )
         if s3_check.returncode != 0 or not s3_check.stdout.strip():
             job_logger.warning(
                 f"[S3] Model '{request.model_name}' not found at {s3_model_path}. "
                 f"Falling back to HuggingFace download."
             )
-            request.s3_models = False
+            request = request.model_copy(update={"s3_models": False})
         else:
             job_logger.info(f"[S3] Verified model exists at {s3_model_path}")
 
