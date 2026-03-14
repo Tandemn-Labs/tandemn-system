@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 import math
 import uuid
 import time
@@ -10,6 +11,8 @@ from typing import Optional
 import sky
 from fastapi import FastAPI, Form, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
+
+logger = logging.getLogger(__name__)
 
 from config import (
     CHUNK_SIZE_MB,
@@ -60,7 +63,7 @@ async def lifespan(app: FastAPI):
         live = {c['name'] for c in clusters} if clusters else set()
         app.state.quota_tracker.reconcile(live)
     except Exception as e:
-        print(f"[Quota] Could not reconcile on startup: {e}")
+        logger.warning(f"[Quota] Could not reconcile on startup: {e}")
 
     yield
 
@@ -160,7 +163,7 @@ async def submit_batch(request: BatchedRequest):
     early_messages = []
 
     msg = f"[InputStats] num_lines={num_lines}, avg_input={avg_input_tokens}, max_input={max_input_tokens}"
-    print(msg)
+    logger.info(msg)
     early_messages.append(("INFO", msg))
 
     # Get multiple fallback solutions for retry logic
@@ -248,7 +251,7 @@ async def submit_batch(request: BatchedRequest):
             f"throughput={sol.get('throughput_tokens_per_sec', 'N/A')} tok/s "
             f"cost=${sol.get('cost_per_hour', 'N/A')}/hr"
         )
-        print(msg)
+        logger.info(msg)
         early_messages.append(("INFO", msg))
 
     elif use_solver == "roofline":
@@ -272,14 +275,14 @@ async def submit_batch(request: BatchedRequest):
         }
 
     msg = f"[Placement] Using solver: {use_solver}"
-    print(msg)
+    logger.info(msg)
     early_messages.append(("INFO", msg))
     msg = f"[Placement] Primary: {configs[0].instance_type} TP={configs[0].tp_size} PP={configs[0].pp_size}"
-    print(msg)
+    logger.info(msg)
     early_messages.append(("INFO", msg))
     if len(configs) > 1:
         msg = f"[Placement] Fallbacks: {len(configs) - 1}"
-        print(msg)
+        logger.info(msg)
         early_messages.append(("INFO", msg))
 
     # Pre-launch check: ensure max_model_len can accommodate the longest prompt
@@ -490,7 +493,7 @@ async def submit_online(request: OnlineServingRequest):
     Receives a OnlineServingRequest and returns a confirmation of receipt.
     """
     launch_config = real_magic(request)
-    print(launch_config)
+    logger.info(f"[Online] Launch config: {launch_config}")
 
     match launch_config.engine:
         case "vllm":
@@ -531,7 +534,7 @@ async def upload_file_to_storage(
             remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{int(time.time())}_{filename}"
         elif not remote_path.startswith("s3://"):
             remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{remote_path}"
-        print(f"[Storage] Uploading file for user {user} to {remote_path}")
+        logger.info(f"[Storage] Uploading file for user {user} to {remote_path}")
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             chunk_size = CHUNK_SIZE_MB
             while True:
@@ -542,7 +545,7 @@ async def upload_file_to_storage(
             tmp_path = tmp_file.name
         storage_uri = await storage_backend.upload_file(tmp_path, remote_path, user)
         os.unlink(tmp_path)
-        print(f"[Storage] Successfully uploaded file to {storage_uri}")
+        logger.info(f"[Storage] Successfully uploaded file to {storage_uri}")
         return {
             "status": "success",
             "storage_uri": storage_uri,
@@ -551,7 +554,7 @@ async def upload_file_to_storage(
             "filename": file.filename,
         }
     except Exception as e:
-        print(f"[Storage] Error uploading file: {e}")
+        logger.error(f"[Storage] Error uploading file: {e}")
         raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
 
 
@@ -559,7 +562,7 @@ async def upload_file_to_storage(
 async def list_user_files(user: str, prefix: str = ""):
     """List all files for a user in their storage space."""
     try:
-        print(f"[Storage] Listing files for user {user} with prefix '{prefix}'")
+        logger.info(f"[Storage] Listing files for user {user} with prefix '{prefix}'")
         files = await storage_backend.list_files(prefix, user)
         return {
             "status": "success",
@@ -569,7 +572,7 @@ async def list_user_files(user: str, prefix: str = ""):
             "count": len(files),
         }
     except Exception as e:
-        print(f"[Storage] Error listing files: {e}")
+        logger.error(f"[Storage] Error listing files: {e}")
         raise HTTPException(status_code=500, detail=f"Error listing files: {str(e)}")
 
 
@@ -577,7 +580,7 @@ async def list_user_files(user: str, prefix: str = ""):
 async def download_file_from_storage(user: str, file_path: str):
     """Download a file from storage backend using streaming."""
     try:
-        print(f"[Storage] Downloading file {file_path} for user {user}")
+        logger.info(f"[Storage] Downloading file {file_path} for user {user}")
         filename = file_path.split("/")[-1] or "download"
 
         async def file_stream_iterator():
@@ -590,7 +593,7 @@ async def download_file_from_storage(user: str, file_path: str):
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except Exception as e:
-        print(f"[Storage] Error downloading file: {e}")
+        logger.error(f"[Storage] Error downloading file: {e}")
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 
@@ -598,7 +601,7 @@ async def download_file_from_storage(user: str, file_path: str):
 async def delete_file_from_storage(user: str, file_path: str):
     """Delete a file from storage backend."""
     try:
-        print(f"[Storage] Deleting file {file_path} for user {user}")
+        logger.info(f"[Storage] Deleting file {file_path} for user {user}")
         success = await storage_backend.delete_file(file_path, user)
         if success:
             return {
@@ -612,7 +615,7 @@ async def delete_file_from_storage(user: str, file_path: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[Storage] Error deleting file: {e}")
+        logger.error(f"[Storage] Error deleting file: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
 
 
@@ -628,7 +631,7 @@ async def check_file_exists(user: str, file_path: str):
             "exists": exists,
         }
     except Exception as e:
-        print(f"[Storage] Error checking file existence: {e}")
+        logger.error(f"[Storage] Error checking file existence: {e}")
         raise HTTPException(status_code=500, detail=f"Error checking file: {str(e)}")
 
 

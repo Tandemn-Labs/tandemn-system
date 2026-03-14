@@ -26,9 +26,9 @@ class VPCQuotaTracker:
     
     def reload_quota(self):
         """Reload the quota from CSV (called after Refresh)"""
-        print(f"Reloading Quota from {self.quota_csv_file}")
+        logger.info(f"Reloading Quota from {self.quota_csv_file}")
         self.quota_df = pd.read_csv(self.quota_csv_file)
-        print(f"[QuotaTracker] Loaded {len(self.quota_df)} instance types")
+        logger.info(f"[QuotaTracker] Loaded {len(self.quota_df)} instance types")
     
     def get_baseline_quota(self, region:str, market:str, family_type:str):
         """Get the AWS Quota limit for family type"""
@@ -54,10 +54,10 @@ class VPCQuotaTracker:
             available = self.get_available(region, market, family_type)
 
             if vcpu > available:
-                print(f"[QuotaTracker] Not enough quota for {region}, {market}, {family_type}")
+                logger.warning(f"[QuotaTracker] Not enough quota for {region}, {market}, {family_type}")
                 return False
             self.used_vcpu[(region, market, family_type)] = self.used_vcpu.get((region, market, family_type), 0) + vcpu
-            print(f"[QuotaTracker] Reserved {vcpu} vCPU for {region}, {market}, {family_type}")
+            logger.info(f"[QuotaTracker] Reserved {vcpu} vCPU for {region}, {market}, {family_type}")
             return True
     
     def release(self, region:str, market:str, family_type:str, vcpu:int):
@@ -65,7 +65,7 @@ class VPCQuotaTracker:
         with self.lock:
             old = self.get_used_vcpu(region, market, family_type)
             self.used_vcpu[(region, market, family_type)] = max(0, old - vcpu)
-            print(f"[QuotaTracker] Released {vcpu} vCPU for {region}, {market}, {family_type}")
+            logger.info(f"[QuotaTracker] Released {vcpu} vCPU for {region}, {market}, {family_type}")
     
     def get_family_for_instance(self, instance_type:str):
         """Get the family for the given instance example - g6e.xlarge -> G Family"""
