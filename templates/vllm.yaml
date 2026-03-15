@@ -10,11 +10,8 @@ resources:
 
 envs:
   HF_TOKEN: null  # Will be replaced at runtime
-  VLLM_USE_V1: "0"  # Disable v1 engine - has PP bugs and transformers compatibility issues
-
-envs:
-  HF_TOKEN: null  # Will be replaced at runtime
-  VLLM_USE_V1: "0"  # Disable v1 engine - has PP bugs and transformers compatibility issues
+  # VLLM_USE_V1: "0"  # Disabled — use V1 engine (default in vLLM 0.10.0)
+  VLLM_USE_V1: "1"
   VLLM_NO_USAGE_STATS: "1"
   VLLM_LOG_STATS_INTERVAL: "1"  # 1-second Prometheus counter flush for live throughput
   # CUDA initialization settings for A100/multi-GPU stability
@@ -29,7 +26,6 @@ file_mounts:
   ~/batch_runner.py: ./templates/vllm_batch_runner_server.py
   ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py
 
-setup: |
 setup: |
   export PYTHONHASHSEED=0
   set -euxo pipefail

@@ -1,8 +1,8 @@
 set -euxo pipefail
 source .venv/bin/activate
 
-# Disable vLLM v1 engine - has PP bugs and transformers compatibility issues
-export VLLM_USE_V1=0
+# V1 engine is default in vLLM 0.10.0 — set via YAML envs
+# export VLLM_USE_V1=0  # was: disabled for PP bugs (now fixed)
 
 # Manual Ray cluster setup (bypasses broken SkyPilot start_cluster script)
 RAY_PORT=6379
