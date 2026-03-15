@@ -845,11 +845,50 @@ def build_metrics(
         metrics["gpu_mem_gb"] = gpu_spec["gpu_mem_gb"]
         metrics["gpu_tflops_fp16"] = gpu_spec["gpu_tflops_fp16"]
         metrics["gpu_bandwidth_gbps"] = gpu_spec["gpu_bandwidth_gbps"]
-        # VRAM headroom
-        model_size_gb = (model_info or {}).get("params_billion", 0) * 2  # rough bf16 estimate
-        if model_size_gb and args.tensor_parallel_size:
-            per_gpu_gb = model_size_gb / args.tensor_parallel_size
-            metrics["vram_headroom_gb"] = round(gpu_spec["gpu_mem_gb"] - per_gpu_gb, 1)
+
+    # === DERIVED (canonical schema parity) ===
+    mi = model_info or {}
+    params_b = mi.get("params_billion")
+    tp = args.tensor_parallel_size
+    num_kv_heads = mi.get("num_key_value_heads")
+    num_attn_heads = mi.get("num_attention_heads")
+    gpu_count = tp * args.pipeline_parallel_size
+
+    # Model sizing
+    model_size_gb = round(params_b * 2, 2) if params_b else None  # bf16
+    metrics["model_size_gb"] = model_size_gb
+    if params_b and gpu_count:
+        metrics["params_per_gpu"] = round(params_b / gpu_count, 2)
+    if model_size_gb and gpu_spec:
+        metrics["vram_headroom_gb"] = round(gpu_spec["gpu_mem_gb"] * gpu_count - model_size_gb, 1)
+        metrics["model_fits_single_gpu"] = 1 if model_size_gb <= gpu_spec["gpu_mem_gb"] else 0
+
+    # Attention / GQA
+    if num_attn_heads and num_kv_heads and num_kv_heads > 0:
+        metrics["attention_heads_per_kv_head"] = round(num_attn_heads / num_kv_heads, 2)
+    if num_kv_heads and tp:
+        metrics["kv_heads_per_tp"] = round(num_kv_heads / tp, 2)
+
+    # Hardware efficiency ratios
+    if params_b and params_b > 0 and gpu_spec:
+        metrics["bandwidth_per_param"] = round(gpu_spec["gpu_bandwidth_gbps"] * tp / params_b, 2)
+        metrics["flops_per_param"] = round(gpu_spec["gpu_tflops_fp16"] * tp / params_b, 2)
+
+    # Topology
+    metrics["crosses_node_boundary"] = 1 if args.pipeline_parallel_size > 1 else 0
+
+    # Prefill / decode cost split
+    if price_per_hour and in_tok_per_sec > 0:
+        metrics["cost_per_1m_tokens_prefill_usd"] = round(price_per_hour / (in_tok_per_sec * 3.6), 4)
+    if price_per_hour and out_tok_per_sec > 0:
+        metrics["cost_per_1m_tokens_decode_usd"] = round(price_per_hour / (out_tok_per_sec * 3.6), 4)
+
+    # Feature flags (static for Orca batch jobs)
+    metrics["kv_offload_target"] = "None"
+
+    # Full model config JSON
+    if mi.get("model_config_json"):
+        metrics["model_config_json"] = mi["model_config_json"]
 
     return metrics
 
@@ -895,6 +934,12 @@ def _get_model_info(model_name: str) -> dict:
         info["vocab_size"] = vocab
         info["num_attention_heads"] = num_heads
         info["num_key_value_heads"] = num_kv_heads
+
+        # Full config dump for canonical schema
+        try:
+            info["model_config_json"] = json.dumps(cfg.to_dict(), default=str)
+        except Exception:
+            pass
 
         # MoE
         num_experts = getattr(cfg, "num_local_experts", None) or getattr(cfg, "num_experts", None)
