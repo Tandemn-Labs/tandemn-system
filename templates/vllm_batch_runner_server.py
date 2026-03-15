@@ -493,7 +493,9 @@ def start_vllm_server(args) -> subprocess.Popen:
     ]
     if args.max_model_len:
         cmd += ["--max-model-len", str(args.max_model_len)]
-    return subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
+    env = os.environ.copy()
+    env.setdefault("VLLM_LOG_STATS_INTERVAL", "1")
+    return subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, env=env)
 
 
 def wait_for_server(timeout_sec: int = 600) -> float:
