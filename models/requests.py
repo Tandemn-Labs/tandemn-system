@@ -49,6 +49,9 @@ class BatchedRequest(BaseModel):
     # Skip feasibility check for user_specified placement (launch even if infeasible)
     force: Optional[bool] = False
 
+    # Keep cluster alive after job completes (default: destroy)
+    persist: Optional[bool] = False
+
     # Load model weights from S3 instead of HuggingFace (faster, requires prior upload)
     s3_models: Optional[bool] = False
     # HuggingFace token for gated models (Llama, etc.)

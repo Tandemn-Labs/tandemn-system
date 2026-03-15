@@ -471,6 +471,7 @@ async def submit_batch(request: BatchedRequest):
     success, used_config = await sp_launch_vllm_batch_with_fallback(
         request, configs, solver=use_solver, early_messages=early_messages,
         quota_tracker=get_quota_tracker(),
+        persist=getattr(request, "persist", False),
     )
 
     if success:
