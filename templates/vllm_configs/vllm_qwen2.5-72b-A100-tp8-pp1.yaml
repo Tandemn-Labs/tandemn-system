@@ -15,6 +15,7 @@ envs:
   HF_TOKEN: null
   VLLM_USE_V1: "0"
   VLLM_NO_USAGE_STATS: "1"
+  VLLM_LOG_STATS_INTERVAL: "1"
 
 file_mounts:
   /data:

@@ -89,7 +89,17 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown logic
+    # Shutdown: join non-daemon monitor threads so they can finish teardown
+    cm = app.state.cluster_manager
+    threads = cm.get_active_threads()
+    if threads:
+        logger.info(f"[Shutdown] Waiting for {len(threads)} monitor thread(s) to finish teardown...")
+        for name, t in threads.items():
+            logger.info(f"[Shutdown] Joining thread for cluster {name}...")
+            t.join(timeout=120)
+            if t.is_alive():
+                logger.warning(f"[Shutdown] Thread for {name} did not finish within 120s")
+        logger.info("[Shutdown] All monitor threads joined.")
 
 
 app = FastAPI(
@@ -219,6 +229,7 @@ async def ingest_job_metrics(
 
     ingested = 0
     batch_for_db = []
+    prev_snap = None
 
     for item in snapshots_raw:
         ts   = item.get("timestamp", time.time())
@@ -227,6 +238,18 @@ async def ingest_job_metrics(
             continue
 
         snap = MetricsSnapshot.from_prometheus_text(job_id, text, ts)
+
+        # Compute throughput from counter deltas (vLLM >=0.10 removed the gauge)
+        if snap.avg_generation_throughput_toks_per_s == 0 and prev_snap is not None:
+            dt = snap.timestamp - prev_snap.timestamp
+            if dt > 0:
+                snap.avg_generation_throughput_toks_per_s = (
+                    snap.generation_tokens_total - prev_snap.generation_tokens_total
+                ) / dt
+                snap.avg_prompt_throughput_toks_per_s = (
+                    snap.prompt_tokens_total - prev_snap.prompt_tokens_total
+                ) / dt
+        prev_snap = snap
 
         # Write into ring buffer for live SSE / REST
         with mc._lock:
@@ -247,6 +270,22 @@ async def ingest_job_metrics(
             logger.warning("[Ingest] timeseries write failed for %s: %s", job_id, e)
 
     return {"ok": True, "ingested": ingested}
+
+
+@app.post("/job/{job_id}/phase")
+async def update_job_phase(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Called by in-cluster runner to report lifecycle phases (loading_model, model_ready, generating)."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    phase = body.get("phase")
+    if phase:
+        get_job_tracker().update_status(job_id, phase)
+    return {"ok": True}
 
 
 @app.get("/analytics/runs")

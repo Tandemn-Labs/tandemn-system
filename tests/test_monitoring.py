@@ -89,6 +89,7 @@ class TestMetricsSnapshot:
             "avg_generation_throughput_toks_per_s", "avg_prompt_throughput_toks_per_s",
             "gpu_cache_usage_perc", "num_requests_running", "num_requests_waiting",
             "num_requests_swapped", "request_success_total", "num_preemptions_total",
+            "generation_tokens_total", "prompt_tokens_total",
             "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
             "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
             "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
