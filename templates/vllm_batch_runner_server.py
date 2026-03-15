@@ -241,6 +241,7 @@ class GPUMonitor:
                     sample[f"gpu{i}_sm_pct"] = util.gpu
                     sample[f"gpu{i}_membw_pct"] = util.memory
                     sample[f"gpu{i}_mem_gb"] = round(mem.used / (1024 ** 3), 2)
+                    sample[f"gpu{i}_mem_pct"] = round((mem.used / mem.total) * 100, 1) if mem.total else 0
                 except Exception:
                     pass
             if len(sample) > 1:
@@ -253,13 +254,15 @@ class GPUMonitor:
     def get_summary(self) -> dict:
         if not self._timeseries:
             return {}
-        all_sm, all_membw = [], []
+        all_sm, all_membw, all_mem = [], [], []
         for s in self._timeseries:
             for k, v in s.items():
                 if "_sm_pct" in k:
                     all_sm.append(v)
                 elif "_membw_pct" in k:
                     all_membw.append(v)
+                elif "_mem_pct" in k:
+                    all_mem.append(v)
         summary = {"gpu_samples": len(self._timeseries)}
         if all_sm:
             summary["avg_sm_util_pct"] = round(sum(all_sm) / len(all_sm), 2)
@@ -267,6 +270,9 @@ class GPUMonitor:
         if all_membw:
             summary["avg_mem_bw_util_pct"] = round(sum(all_membw) / len(all_membw), 2)
             summary["max_mem_bw_util_pct"] = round(max(all_membw), 2)
+        if all_mem:
+            summary["avg_mem_util_pct"] = round(sum(all_mem) / len(all_mem), 2)
+            summary["max_mem_util_pct"] = round(max(all_mem), 2)
         return summary
 
 
@@ -796,6 +802,8 @@ def build_metrics(
         "max_sm_util_pct": gpu_summary.get("max_sm_util_pct"),
         "avg_mem_bw_util_pct": gpu_summary.get("avg_mem_bw_util_pct"),
         "max_mem_bw_util_pct": gpu_summary.get("max_mem_bw_util_pct"),
+        "avg_mem_util_pct": gpu_summary.get("avg_mem_util_pct"),
+        "max_mem_util_pct": gpu_summary.get("max_mem_util_pct"),
         "gpu_samples": gpu_summary.get("gpu_samples", 0),
 
         # === SCHEDULER TIMESERIES (from local MetricsPoller) ===
@@ -845,6 +853,14 @@ def build_metrics(
         metrics["gpu_mem_gb"] = gpu_spec["gpu_mem_gb"]
         metrics["gpu_tflops_fp16"] = gpu_spec["gpu_tflops_fp16"]
         metrics["gpu_bandwidth_gbps"] = gpu_spec["gpu_bandwidth_gbps"]
+        metrics["gpu_model"] = gpu_spec.get("model", args.gpu_name)
+        metrics["gpu_generation"] = gpu_spec.get("generation")
+        metrics["interconnect"] = gpu_spec.get("interconnect")
+
+    # === STATIC METADATA ===
+    metrics["num_nodes"] = int(os.getenv("SKYPILOT_NUM_NODES", "1"))
+    metrics["precision"] = "bfloat16" if args.dtype == "auto" else args.dtype
+    metrics["runtime_stack"] = "vllm 0.10.0"
 
     # === DERIVED (canonical schema parity) ===
     mi = model_info or {}
@@ -899,13 +915,13 @@ def build_metrics(
 
 # Confirmed against tandemn-profiling/roofline/vllm/automatic_launch_1.py GPU_CONFIGS
 GPU_SPECS = {
-    "L40S":     {"gpu_mem_gb": 48, "gpu_tflops_fp16": 362, "gpu_bandwidth_gbps": 864},
-    "L4":       {"gpu_mem_gb": 24, "gpu_tflops_fp16": 121, "gpu_bandwidth_gbps": 300},
-    "A10G":     {"gpu_mem_gb": 24, "gpu_tflops_fp16": 125, "gpu_bandwidth_gbps": 600},
-    "A100":     {"gpu_mem_gb": 80, "gpu_tflops_fp16": 312, "gpu_bandwidth_gbps": 2039},  # p4de 80GB
-    "A100-40GB":{"gpu_mem_gb": 40, "gpu_tflops_fp16": 312, "gpu_bandwidth_gbps": 1555},  # p4d 40GB
-    "H100":     {"gpu_mem_gb": 80, "gpu_tflops_fp16": 989, "gpu_bandwidth_gbps": 3350},
-    "V100":     {"gpu_mem_gb": 16, "gpu_tflops_fp16": 125, "gpu_bandwidth_gbps": 900},
+    "L40S":     {"gpu_mem_gb": 48, "gpu_tflops_fp16": 362, "gpu_bandwidth_gbps": 864, "generation": "Ada Lovelace", "interconnect": "PCIe", "model": "NVIDIA L40S"},
+    "L4":       {"gpu_mem_gb": 24, "gpu_tflops_fp16": 121, "gpu_bandwidth_gbps": 300, "generation": "Ada Lovelace", "interconnect": "PCIe", "model": "NVIDIA L4"},
+    "A10G":     {"gpu_mem_gb": 24, "gpu_tflops_fp16": 125, "gpu_bandwidth_gbps": 600, "generation": "Ampere", "interconnect": "PCIe", "model": "NVIDIA A10G"},
+    "A100":     {"gpu_mem_gb": 80, "gpu_tflops_fp16": 312, "gpu_bandwidth_gbps": 2039, "generation": "Ampere", "interconnect": "NVLink", "model": "NVIDIA A100 80GB"},  # p4de
+    "A100-40GB":{"gpu_mem_gb": 40, "gpu_tflops_fp16": 312, "gpu_bandwidth_gbps": 1555, "generation": "Ampere", "interconnect": "NVLink", "model": "NVIDIA A100 40GB"},  # p4d
+    "H100":     {"gpu_mem_gb": 80, "gpu_tflops_fp16": 989, "gpu_bandwidth_gbps": 3350, "generation": "Hopper", "interconnect": "NVLink", "model": "NVIDIA H100 SXM"},
+    "V100":     {"gpu_mem_gb": 16, "gpu_tflops_fp16": 125, "gpu_bandwidth_gbps": 900, "generation": "Volta", "interconnect": "NVLink", "model": "NVIDIA V100"},
 }
 
 
