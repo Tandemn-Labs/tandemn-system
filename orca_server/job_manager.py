@@ -210,7 +210,8 @@ class JobTracker:
         self,
         job_id: str,
         status: Literal[
-            "queued", "launching", "running", "succeeded", "failed", "cancelled"
+            "queued", "launching", "loading_model", "generating",
+            "running", "succeeded", "failed", "cancelled",
         ],
     ):
         with self.lock:
@@ -241,14 +242,14 @@ class JobTracker:
 # vLLM metrics parser
 # --------------------------------------------------------------------------- #
 
-_METRIC_LINE_RE = re.compile(
+METRIC_LINE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)"  # metric name
     r"(?:\{(?P<labels>[^}]*)\})?"  # optional {k="v",...}
     r"\s+(?P<value>[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*$"
 )
 
 
-def _parse_labels(labels_blob: str) -> dict[str, str]:
+def parse_labels(labels_blob: str) -> dict[str, str]:
     # Very small parser; works for the usual key="value" labels vLLM emits.
     out: dict[str, str] = {}
     if not labels_blob:
@@ -259,19 +260,19 @@ def _parse_labels(labels_blob: str) -> dict[str, str]:
     return out
 
 
-def _sum_metric(
+def sum_metric(
     text: str, metric_name: str, *, where: dict[str, str] | None = None
 ) -> float:
     total = 0.0
     for line in text.splitlines():
         if not line or line[0] == "#":
             continue
-        m = _METRIC_LINE_RE.match(line)
+        m = METRIC_LINE_RE.match(line)
         if not m:
             continue
         if m.group("name") != metric_name:
             continue
-        labels = _parse_labels(m.group("labels") or "")
+        labels = parse_labels(m.group("labels") or "")
         if where and any(labels.get(k) != v for k, v in where.items()):
             continue
         total += float(m.group("value"))
@@ -288,11 +289,11 @@ def get_vllm_progress(
     # Optional: only count metrics for a specific model
     filt = {"model_name": model_name} if model_name else None
 
-    running = _sum_metric(text, "vllm:num_requests_running", where=filt)
-    waiting = _sum_metric(text, "vllm:num_requests_waiting", where=filt)
+    running = sum_metric(text, "vllm:num_requests_running", where=filt)
+    waiting = sum_metric(text, "vllm:num_requests_waiting", where=filt)
 
     # "done requests" = sum across finished_reason labels
-    done = _sum_metric(text, "vllm:request_success_total", where=filt)
+    done = sum_metric(text, "vllm:request_success_total", where=filt)
 
     queued = running + waiting
     return int(done), int(queued)

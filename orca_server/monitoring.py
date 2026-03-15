@@ -169,6 +169,8 @@ class _JobCollector:
 
     def _poll_loop(self) -> None:
         last_flush = time.time()
+        _metrics_reached = False  # /metrics endpoint responding
+        _generating = False       # requests are in-flight
         while not self._stop_event.is_set():
             try:
                 r = _requests.get(self.endpoint_url + "/metrics", timeout=4)
@@ -177,17 +179,30 @@ class _JobCollector:
                 with self.lock:
                     self.buffer.append(snap)
                     self._unflushed.append(snap.to_dict())
-                # Update job progress from request_success_total
-                if snap.request_success_total > 0:
-                    try:
-                        from orca_server.job_manager import get_job_tracker
-                        jt = get_job_tracker()
-                        rec = jt.get(self.job_id)
-                        if rec and rec.state.spec.num_lines > 0:
+
+                # Update job status + progress based on what we observe
+                try:
+                    from orca_server.job_manager import get_job_tracker
+                    jt = get_job_tracker()
+                    rec = jt.get(self.job_id)
+                    if rec:
+                        # First successful /metrics → model is loaded
+                        if not _metrics_reached:
+                            _metrics_reached = True
+                            if rec.status in ("running", "launching"):
+                                jt.update_status(self.job_id, "loading_model")
+
+                        # Requests in-flight → generating
+                        if snap.num_requests_running > 0 and not _generating:
+                            _generating = True
+                            jt.update_status(self.job_id, "generating")
+
+                        # Progress from completed requests
+                        if snap.request_success_total > 0 and rec.state.spec.num_lines > 0:
                             frac = min(snap.request_success_total / rec.state.spec.num_lines, 0.99)
                             jt.update_progress(self.job_id, frac)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
             except Exception as e:
                 logger.debug("[MetricsCollector] poll error job=%s: %s", self.job_id, e)
 

@@ -67,6 +67,52 @@ def bar(pct, width=40):
 def visible_len(text):
     return len(re.sub(r'\033\[[0-9;]*m', '', text))
 
+def spinner(message, stop_event):
+    """Orca swimming across the terminal while waiting."""
+    orca_frames = [
+        f"{CYAN}~{BOLD}><(((o>{RESET}",   # swimming right
+        f"{CYAN}~~{BOLD}><(((o>{RESET}",
+        f"{CYAN}~~~{BOLD}><(((o>{RESET}",
+        f"{CYAN}~{BOLD}><(((o>{RESET}~",
+    ]
+    width = 40
+    pos = 0
+    frame = 0
+    try:
+        while not stop_event.is_set():
+            orca = orca_frames[frame % len(orca_frames)]
+            # Orca swims left to right then wraps
+            pad_left = pos % width
+            pad_right = max(0, width - pad_left - 10)
+            water_left = f"{DIM}{'~' * pad_left}{RESET}"
+            water_right = f"{DIM}{'~' * pad_right}{RESET}"
+            line = f"\r  {water_left}{orca}{water_right} {DIM}{message}{RESET}  "
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            pos += 1
+            frame += 1
+            stop_event.wait(0.15)
+    except Exception:
+        pass
+    # Clear the spinner line
+    sys.stdout.write("\r" + " " * 80 + "\r")
+    sys.stdout.flush()
+
+
+def api_with_spinner(method, path, message="Working...", **kwargs):
+    """Make an API call with an orca spinner while waiting."""
+    import threading as _thr
+    stop = _thr.Event()
+    spin_thread = _thr.Thread(target=spinner, args=(message, stop), daemon=True)
+    spin_thread.start()
+    try:
+        result = api(method, path, **kwargs)
+    finally:
+        stop.set()
+        spin_thread.join(timeout=2)
+    return result
+
+
 def box(lines, title="", width=72):
     top = f"╭─{'─ ' + c(title, BOLD+CYAN) + ' ─' if title else '─'}" + "─" * (width - len(title) - 6 if title else width - 2) + "╮"
     bottom = f"╰{'─' * (width)}╯"
@@ -232,7 +278,8 @@ def cmd_deploy(args):
         if args.force:
             payload["force"] = True
 
-    resp = api("post", "/submit/batch", json=payload)
+    resp = api_with_spinner("post", "/submit/batch",
+                            message="Launching cluster...", json=payload)
     if resp.status_code not in (200, 201):
         print(f"\n  {RED}Server error ({resp.status_code}):{RESET} {resp.text}\n")
         sys.exit(1)
@@ -489,12 +536,12 @@ def cmd_progress(args):
     status = data.get("status", "unknown")
     progress = data.get("progress", 0)
 
-    status_color = GREEN if status == "succeeded" else (RED if status == "failed" else YELLOW)
+    status_colors = {"succeeded": GREEN, "failed": RED, "generating": CYAN}
+    status_color = status_colors.get(status, YELLOW)
     lines = [
         f"{DIM}Job ID:{RESET}     {c(job_id, CYAN+BOLD)}",
         f"{DIM}Model:{RESET}      {data.get('model_name', '?')}",
         f"{DIM}Status:{RESET}     {c(status, status_color+BOLD)}",
-        f"{DIM}Progress:{RESET}   {bar(progress)}",
         f"{DIM}Prompts:{RESET}    {data.get('num_lines', '?')}",
     ]
     if data.get("endpoint_url"):
@@ -504,7 +551,7 @@ def cmd_progress(args):
     print(box(lines, title="JOB STATUS"))
 
     # Live poll if still running
-    if status in ("running", "launching", "queued"):
+    if status in ("running", "launching", "queued", "loading_model", "generating"):
         print()
         step("Live polling (Ctrl+C to stop)...")
         print()
@@ -550,18 +597,23 @@ def cmd_progress(args):
                     sys.stdout.flush()
                     break
 
-                if running > 0:
+                if running > 0 or status == "generating":
                     # During generation: show running requests as a bar
                     run_frac = running / total if isinstance(total, int) and total > 0 else 0
                     w = 50
                     filled = int(w * run_frac)
                     run_bar = f"{CYAN}{'▓' * filled}{'░' * (w - filled)}{RESET}"
-                    sys.stdout.write(f"\r  {run_bar}  {running}/{total} in-flight  [{status}]  ")
+                    sys.stdout.write(f"\r  {run_bar}  {running}/{total} in-flight  [{c(status, GREEN)}]  ")
                     sys.stdout.write(f"\n  {DIM}{metrics_line}{RESET}  \033[1A")
                 else:
-                    # Waiting for model load or idle
-                    phase = "loading model..." if progress == 0 else f"{progress*100:.0f}%"
-                    sys.stdout.write(f"\r  {DIM}{'░' * 50}  {phase}  [{status}]{RESET}  ")
+                    # Show current phase
+                    phase_labels = {
+                        "launching": "provisioning cluster...",
+                        "running": "setting up environment...",
+                        "loading_model": "downloading & loading model...",
+                    }
+                    phase = phase_labels.get(status, f"{status}...")
+                    sys.stdout.write(f"\r  {DIM}{'░' * 50}  {phase}  [{c(status, YELLOW)}]{RESET}  ")
                 sys.stdout.flush()
         except KeyboardInterrupt:
             print(f"\n\n  {DIM}Stopped polling.{RESET}")
