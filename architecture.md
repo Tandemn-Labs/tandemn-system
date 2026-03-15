@@ -264,7 +264,7 @@ Returns a presigned S3 URL for downloading output files.
 
 | Variable | Value | Purpose |
 |----------|-------|---------|
-| `VLLM_USE_V1` | `0` | Disable vLLM v1 engine (PP bugs, transformers incompatibility) |
+| `VLLM_USE_V1` | `1` | Enable vLLM V1 engine (default in v0.10.0) |
 | `CUDA_DEVICE_ORDER` | `PCI_BUS_ID` | Consistent GPU ordering across nodes |
 | `NCCL_ASYNC_ERROR_HANDLING` | `1` | Graceful error handling for multi-GPU NCCL |
 
