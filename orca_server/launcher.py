@@ -42,6 +42,7 @@ async def sp_launch_vllm_batch_with_fallback(
     solver: str = "roofline",
     early_messages: list = None,
     quota_tracker=None,
+    persist: bool = False,
 ) -> Tuple[bool, MagicOutput]:
     """Launch vLLM batch job with fallback to alternative instance types."""
     if early_messages is None:
@@ -54,7 +55,7 @@ async def sp_launch_vllm_batch_with_fallback(
         try:
             await sp_launch_vllm_batch(
                 request, config, solver, early_messages=early_messages,
-                quota_tracker=quota_tracker,
+                quota_tracker=quota_tracker, persist=persist,
             )
             print(f"[Launch] Success with config {i + 1}: {config.instance_type}")
             return (True, config)
@@ -75,6 +76,7 @@ async def sp_launch_vllm_batch(
     solver: str = "roofline",
     early_messages: list = None,
     quota_tracker=None,
+    persist: bool = False,
 ):
     # Generate informative job directory name
     job_dirname = generate_job_dirname(
@@ -326,20 +328,15 @@ async def sp_launch_vllm_batch(
             if quota_tracker is not None:
                 quota_tracker.release_cluster(config.decision_id)
             cm.unregister(config.decision_id)
-            # Explicit teardown — don't rely on autostop alone
-            try:
-                import logging as _log
-                _log.getLogger(__name__).info(
-                    f"[Teardown] Destroying cluster {config.decision_id}..."
-                )
-                sky.down(config.decision_id)
-                _log.getLogger(__name__).info(
-                    f"[Teardown] Cluster {config.decision_id} destroyed."
-                )
-            except Exception as teardown_err:
-                _log.getLogger(__name__).warning(
-                    f"[Teardown] Failed to destroy {config.decision_id}: {teardown_err}"
-                )
+            if not persist:
+                try:
+                    job_logger.info(f"[Teardown] Destroying cluster {config.decision_id}...")
+                    sky.down(config.decision_id)
+                    job_logger.info(f"[Teardown] Cluster {config.decision_id} destroyed.")
+                except Exception as e:
+                    job_logger.warning(f"[Teardown] Failed: {e}")
+            else:
+                job_logger.info(f"[Teardown] --persist: keeping cluster {config.decision_id} alive")
 
     try:
         job_logger.info(f"[SkyPilot] Launching cluster {config.decision_id}...")
