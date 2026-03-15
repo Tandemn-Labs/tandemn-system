@@ -516,12 +516,52 @@ def cmd_progress(args):
                 data = resp.json()
                 progress = data.get("progress", 0)
                 status = data.get("status", "unknown")
-                done_count = int(progress * data.get("num_lines", 100))
                 total = data.get("num_lines", "?")
-                sys.stdout.write(f"\r  {bar(progress, 50)}  {done_count}/{total} prompts  [{status}]  ")
-                sys.stdout.flush()
+
+                # Live metrics from vLLM Prometheus (polled by control plane)
+                running = 0
+                metrics_line = ""
+                try:
+                    md = api("get", f"/job/{job_id}/metrics", timeout=2).json()
+                    tps = md.get("avg_generation_throughput_toks_per_s", 0)
+                    kv = md.get("gpu_cache_usage_perc", 0) * 100
+                    running = md.get("num_requests_running", 0)
+                    waiting = md.get("num_requests_waiting", 0)
+                    parts = []
+                    if running > 0:
+                        parts.append(f"{GREEN}{running}{RESET} running")
+                    if waiting > 0:
+                        parts.append(f"{YELLOW}{waiting}{RESET} waiting")
+                    if kv > 0:
+                        parts.append(f"KV {kv:.0f}%")
+                    if tps > 0:
+                        parts.append(f"{tps:.0f} tok/s")
+                    if parts:
+                        metrics_line = "  ".join(parts)
+                except Exception:
+                    pass
+
                 if status in ("succeeded", "failed"):
+                    # Final line: show completion bar
+                    done_count = int(progress * total) if isinstance(total, int) else total
+                    sys.stdout.write(f"\r  {bar(progress, 50)}  {done_count}/{total}  [{status}]")
+                    sys.stdout.write(f"\n  {DIM}{metrics_line}{RESET}  " if metrics_line else "")
+                    sys.stdout.flush()
                     break
+
+                if running > 0:
+                    # During generation: show running requests as a bar
+                    run_frac = running / total if isinstance(total, int) and total > 0 else 0
+                    w = 50
+                    filled = int(w * run_frac)
+                    run_bar = f"{CYAN}{'▓' * filled}{'░' * (w - filled)}{RESET}"
+                    sys.stdout.write(f"\r  {run_bar}  {running}/{total} in-flight  [{status}]  ")
+                    sys.stdout.write(f"\n  {DIM}{metrics_line}{RESET}  \033[1A")
+                else:
+                    # Waiting for model load or idle
+                    phase = "loading model..." if progress == 0 else f"{progress*100:.0f}%"
+                    sys.stdout.write(f"\r  {DIM}{'░' * 50}  {phase}  [{status}]{RESET}  ")
+                sys.stdout.flush()
         except KeyboardInterrupt:
             print(f"\n\n  {DIM}Stopped polling.{RESET}")
 
@@ -590,6 +630,112 @@ def cmd_clusters(args):
     _sp.run(["sky", "status"], check=False)
 
 
+def cmd_metrics(args):
+    """Show live vLLM metrics for a job."""
+    job_id = args.job_id
+    watch = args.watch
+
+    def _fetch_and_render():
+        resp = api("get", f"/job/{job_id}/metrics", timeout=5)
+        if resp.status_code == 404:
+            return None, f"  {RED}No metrics available for {job_id}.{RESET}"
+        if resp.status_code != 200:
+            return None, f"  {RED}Error:{RESET} {resp.text}"
+        md = resp.json()
+        tps = md.get("avg_generation_throughput_toks_per_s", 0)
+        kv = md.get("gpu_cache_usage_perc", 0) * 100
+        running = md.get("num_requests_running", 0)
+        waiting = md.get("num_requests_waiting", 0)
+        swapped = md.get("num_requests_swapped", 0)
+        done = int(md.get("request_success_total", 0))
+        lines = [
+            f"{DIM}Throughput:{RESET}   {c(f'{tps:.0f}', GREEN+BOLD)} tok/s",
+            f"{DIM}KV Cache:{RESET}     {bar(kv / 100, 30)}",
+            f"{DIM}Running:{RESET}      {c(str(running), CYAN)}   {DIM}Waiting:{RESET} {waiting}   {DIM}Swapped:{RESET} {swapped}",
+            f"{DIM}Completed:{RESET}    {done}",
+        ]
+        return box(lines, title="METRICS"), None
+
+    if watch:
+        print(LOGO)
+        header("LIVE METRICS")
+        step(f"Watching job: {c(job_id, CYAN+BOLD)} (Ctrl+C to stop)")
+        print()
+        first = True
+        try:
+            while True:
+                rendered, err = _fetch_and_render()
+                if err:
+                    if first:
+                        print(err)
+                        print()
+                    time.sleep(2)
+                    first = False
+                    continue
+                N = rendered.count("\n") + 1
+                if not first:
+                    sys.stdout.write(f"\033[{N}A")
+                print(rendered)
+                sys.stdout.flush()
+                first = False
+                time.sleep(2)
+        except KeyboardInterrupt:
+            print(f"\n\n  {DIM}Stopped.{RESET}")
+    else:
+        print(LOGO)
+        header("JOB METRICS")
+        rendered, err = _fetch_and_render()
+        if err:
+            print(err)
+        else:
+            print(rendered)
+    print()
+
+
+def cmd_history(args):
+    """Show completed run history from the analytics DB."""
+    print(LOGO)
+    header("RUN HISTORY")
+
+    params: dict = {"limit": args.limit}
+    if args.model:
+        params["model"] = args.model
+    if args.gpu:
+        params["gpu"] = args.gpu
+
+    resp = api("get", "/analytics/runs", params=params, timeout=10)
+    if resp.status_code != 200:
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        return
+
+    data = resp.json()
+    runs = data.get("runs", [])
+
+    if not runs:
+        print(f"\n  {DIM}No completed runs found.{RESET}\n")
+        return
+
+    print()
+    print(f"  {'ID':<5} {'JOB ID':<35} {'MODEL':<30} {'GPU':<8} {'TOK/S':>7} {'RT(s)':>7}  {'CREATED'}")
+    print(f"  {'─'*5} {'─'*35} {'─'*30} {'─'*8} {'─'*7} {'─'*7}  {'─'*18}")
+
+    for r in runs:
+        run_id = r.get("id", "?")
+        job_id_short = (r.get("job_id") or "")[:32] + "..."
+        model = (r.get("model_name") or "?")[:30]
+        gpu = (r.get("gpu_name") or "?")[:8]
+        tps = r.get("total_tokens_per_sec")
+        tps_str = f"{tps:.0f}" if tps else "?"
+        rt = r.get("total_runtime_sec")
+        rt_str = f"{rt:.0f}" if rt else "?"
+        created = ""
+        if r.get("created_at"):
+            created = datetime.fromtimestamp(r["created_at"]).strftime("%Y-%m-%d %H:%M")
+        print(f"  {run_id:<5} {job_id_short:<35} {model:<30} {gpu:<8} {tps_str:>7} {rt_str:>7}  {created}")
+
+    print()
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
@@ -649,6 +795,17 @@ Examples:
     # clusters
     subparsers.add_parser("clusters", help="Show active SkyPilot clusters")
 
+    # metrics
+    p_metrics = subparsers.add_parser("metrics", help="Show live vLLM metrics for a job")
+    p_metrics.add_argument("job_id", help="Job ID to inspect")
+    p_metrics.add_argument("--watch", "-w", action="store_true", help="Refresh every 2s")
+
+    # history
+    p_history = subparsers.add_parser("history", help="Show completed run history")
+    p_history.add_argument("--model", help="Filter by model name (substring match)")
+    p_history.add_argument("--gpu", help="Filter by GPU type (exact match, e.g. L40S)")
+    p_history.add_argument("--limit", type=int, default=50, help="Max rows (default: 50)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -663,6 +820,8 @@ Examples:
         "status": cmd_status,
         "logs": cmd_logs,
         "clusters": cmd_clusters,
+        "metrics": cmd_metrics,
+        "history": cmd_history,
     }
 
     commands[args.command](args)
