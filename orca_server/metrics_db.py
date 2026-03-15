@@ -209,12 +209,28 @@ class MetricsDB:
         conn.row_factory = sqlite3.Row
         return conn
 
+    # Columns added after initial schema — ALTER TABLE for existing DBs
+    _MIGRATE_COLUMNS = [
+        ("tpot_client_ms_p50", "REAL"), ("tpot_client_ms_p95", "REAL"), ("tpot_client_ms_p99", "REAL"),
+        ("ttft_server_ms_p50", "REAL"), ("ttft_server_ms_p95", "REAL"), ("ttft_server_ms_p99", "REAL"),
+        ("e2e_server_ms_p50", "REAL"), ("e2e_server_ms_p95", "REAL"), ("e2e_server_ms_p99", "REAL"),
+        ("params_per_gpu", "REAL"), ("attention_heads_per_kv_head", "REAL"), ("kv_heads_per_tp", "REAL"),
+        ("model_config_json", "TEXT"), ("bandwidth_per_param", "REAL"), ("flops_per_param", "REAL"),
+        ("crosses_node_boundary", "INTEGER"), ("cost_per_1m_tokens_prefill_usd", "REAL"),
+        ("cost_per_1m_tokens_decode_usd", "REAL"), ("kv_offload_target", "TEXT"),
+    ]
+
     def _init_schema(self) -> None:
         with self._get_conn() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(_CREATE_RUNS)
             conn.execute(_CREATE_TIMESERIES)
             conn.execute(_CREATE_INDEX)
+            # Migrate: add columns that may be missing in existing DBs
+            existing = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+            for col, dtype in self._MIGRATE_COLUMNS:
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {dtype}")
             conn.commit()
 
     # ------------------------------------------------------------------
