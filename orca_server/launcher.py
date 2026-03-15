@@ -326,6 +326,20 @@ async def sp_launch_vllm_batch(
             if quota_tracker is not None:
                 quota_tracker.release_cluster(config.decision_id)
             cm.unregister(config.decision_id)
+            # Explicit teardown — don't rely on autostop alone
+            try:
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    f"[Teardown] Destroying cluster {config.decision_id}..."
+                )
+                sky.down(config.decision_id)
+                _log.getLogger(__name__).info(
+                    f"[Teardown] Cluster {config.decision_id} destroyed."
+                )
+            except Exception as teardown_err:
+                _log.getLogger(__name__).warning(
+                    f"[Teardown] Failed to destroy {config.decision_id}: {teardown_err}"
+                )
 
     try:
         job_logger.info(f"[SkyPilot] Launching cluster {config.decision_id}...")
