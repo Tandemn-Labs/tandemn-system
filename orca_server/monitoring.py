@@ -1,0 +1,321 @@
+"""Live vLLM metrics collection: per-job daemon threads, ring buffer, SSE, Prometheus."""
+from __future__ import annotations
+
+import json
+import logging
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Generator
+
+import requests as _requests
+
+from orca_server.job_manager import METRIC_LINE_RE, parse_labels, sum_metric
+
+logger = logging.getLogger(__name__)
+
+POLL_INTERVAL_SEC: float = 1.0
+RING_BUFFER_SIZE: int = 120
+FLUSH_INTERVAL_SEC: int = 60
+
+
+def _parse_histogram_buckets(text: str, metric_name: str) -> list[tuple[float, float]]:
+    """Return sorted [(le, cumulative_count), ...] for a histogram metric."""
+    bucket_name = f"{metric_name}_bucket"
+    buckets: dict[float, float] = {}
+    for line in text.splitlines():
+        if not line or line[0] == "#":
+            continue
+        m = METRIC_LINE_RE.match(line)
+        if not m or m.group("name") != bucket_name:
+            continue
+        labels = parse_labels(m.group("labels") or "")
+        le_str = labels.get("le")
+        if le_str is None:
+            continue
+        le = float("inf") if le_str == "+Inf" else float(le_str)
+        buckets[le] = float(m.group("value"))
+    return sorted(buckets.items())
+
+
+def histogram_quantile(text: str, metric_name: str, quantile: float) -> float | None:
+    """Compute a quantile from a Prometheus histogram. Returns ms or None if no data."""
+    buckets = _parse_histogram_buckets(text, metric_name)
+    if not buckets or buckets[-1][1] == 0:
+        return None
+    total = buckets[-1][1]
+    target = quantile * total
+    prev_le, prev_count = 0.0, 0.0
+    for le, count in buckets:
+        if count >= target:
+            if count == prev_count:
+                result_s = prev_le
+            else:
+                frac = (target - prev_count) / (count - prev_count)
+                result_s = prev_le + frac * (le - prev_le)
+            return result_s * 1000.0  # convert to ms
+        prev_le, prev_count = le, count
+    return buckets[-1][0] * 1000.0
+
+
+@dataclass
+class MetricsSnapshot:
+    job_id: str
+    timestamp: float
+    # vLLM gauges
+    avg_generation_throughput_toks_per_s: float = 0.0
+    avg_prompt_throughput_toks_per_s: float = 0.0
+    gpu_cache_usage_perc: float = 0.0       # 0.0–1.0
+    num_requests_running: int = 0
+    num_requests_waiting: int = 0
+    num_requests_swapped: int = 0
+    request_success_total: float = 0.0
+    num_preemptions_total: float = 0.0
+    # Latency histograms (None until first requests complete)
+    ttft_ms_p50: float | None = None
+    ttft_ms_p95: float | None = None
+    ttft_ms_p99: float | None = None
+    tpot_ms_p50: float | None = None
+    tpot_ms_p95: float | None = None
+    tpot_ms_p99: float | None = None
+    e2e_ms_p50: float | None = None
+    e2e_ms_p95: float | None = None
+    e2e_ms_p99: float | None = None
+
+    @classmethod
+    def from_prometheus_text(cls, job_id: str, text: str, timestamp: float) -> "MetricsSnapshot":
+        snap = cls(job_id=job_id, timestamp=timestamp)
+        snap.avg_generation_throughput_toks_per_s = sum_metric(
+            text, "vllm:avg_generation_throughput_toks_per_s"
+        )
+        snap.avg_prompt_throughput_toks_per_s = sum_metric(
+            text, "vllm:avg_prompt_throughput_toks_per_s"
+        )
+        snap.gpu_cache_usage_perc = sum_metric(text, "vllm:gpu_cache_usage_perc")
+        snap.num_requests_running = int(sum_metric(text, "vllm:num_requests_running"))
+        snap.num_requests_waiting = int(sum_metric(text, "vllm:num_requests_waiting"))
+        snap.num_requests_swapped = int(sum_metric(text, "vllm:num_requests_swapped"))
+        snap.request_success_total = sum_metric(text, "vllm:request_success_total")
+        snap.num_preemptions_total = sum_metric(text, "vllm:num_preemptions_total")
+        # Latency histograms
+        snap.ttft_ms_p50 = histogram_quantile(text, "vllm:time_to_first_token_seconds", 0.50)
+        snap.ttft_ms_p95 = histogram_quantile(text, "vllm:time_to_first_token_seconds", 0.95)
+        snap.ttft_ms_p99 = histogram_quantile(text, "vllm:time_to_first_token_seconds", 0.99)
+        snap.tpot_ms_p50 = histogram_quantile(text, "vllm:time_per_output_token_seconds", 0.50)
+        snap.tpot_ms_p95 = histogram_quantile(text, "vllm:time_per_output_token_seconds", 0.95)
+        snap.tpot_ms_p99 = histogram_quantile(text, "vllm:time_per_output_token_seconds", 0.99)
+        snap.e2e_ms_p50 = histogram_quantile(text, "vllm:e2e_request_latency_seconds", 0.50)
+        snap.e2e_ms_p95 = histogram_quantile(text, "vllm:e2e_request_latency_seconds", 0.95)
+        snap.e2e_ms_p99 = histogram_quantile(text, "vllm:e2e_request_latency_seconds", 0.99)
+        return snap
+
+    def to_dict(self) -> dict:
+        return {
+            "job_id": self.job_id,
+            "timestamp": self.timestamp,
+            "avg_generation_throughput_toks_per_s": self.avg_generation_throughput_toks_per_s,
+            "avg_prompt_throughput_toks_per_s": self.avg_prompt_throughput_toks_per_s,
+            "gpu_cache_usage_perc": self.gpu_cache_usage_perc,
+            "num_requests_running": self.num_requests_running,
+            "num_requests_waiting": self.num_requests_waiting,
+            "num_requests_swapped": self.num_requests_swapped,
+            "request_success_total": self.request_success_total,
+            "num_preemptions_total": self.num_preemptions_total,
+            "ttft_ms_p50": self.ttft_ms_p50,
+            "ttft_ms_p95": self.ttft_ms_p95,
+            "ttft_ms_p99": self.ttft_ms_p99,
+            "tpot_ms_p50": self.tpot_ms_p50,
+            "tpot_ms_p95": self.tpot_ms_p95,
+            "tpot_ms_p99": self.tpot_ms_p99,
+            "e2e_ms_p50": self.e2e_ms_p50,
+            "e2e_ms_p95": self.e2e_ms_p95,
+            "e2e_ms_p99": self.e2e_ms_p99,
+        }
+
+
+class _JobCollector:
+    def __init__(self, job_id: str, endpoint_url: str | None):
+        self.job_id = job_id
+        self.endpoint_url = endpoint_url
+        self.buffer: deque = deque(maxlen=RING_BUFFER_SIZE)
+        self._unflushed: list = []
+        self.lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._poll = endpoint_url is not None
+        if self._poll:
+            self._thread = threading.Thread(
+                target=self._poll_loop,
+                daemon=True,
+                name=f"orca-metrics-{job_id[:8]}",
+            )
+
+    def start(self) -> None:
+        if self._poll:
+            self._thread.start()
+        # ingest-only: no thread; buffer ready immediately for ingest endpoint writes
+
+    def stop(self) -> None:
+        if self._poll:
+            self._stop_event.set()
+            self._thread.join(timeout=10)
+            if self._thread.is_alive():
+                logger.warning("[MetricsCollector] flush thread %s did not exit cleanly", self.job_id)
+        self._flush()  # always flush on stop regardless of mode
+
+    def latest(self) -> MetricsSnapshot | None:
+        with self.lock:
+            return self.buffer[-1] if self.buffer else None
+
+    def _poll_loop(self) -> None:
+        last_flush = time.time()
+        while not self._stop_event.is_set():
+            try:
+                r = _requests.get(self.endpoint_url + "/metrics", timeout=4)
+                r.raise_for_status()
+                snap = MetricsSnapshot.from_prometheus_text(self.job_id, r.text, time.time())
+                with self.lock:
+                    self.buffer.append(snap)
+                    self._unflushed.append(snap.to_dict())
+                # Update job progress from request_success_total
+                if snap.request_success_total > 0:
+                    try:
+                        from orca_server.job_manager import get_job_tracker
+                        jt = get_job_tracker()
+                        rec = jt.get(self.job_id)
+                        if rec and rec.state.spec.num_lines > 0:
+                            frac = min(snap.request_success_total / rec.state.spec.num_lines, 0.99)
+                            jt.update_progress(self.job_id, frac)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug("[MetricsCollector] poll error job=%s: %s", self.job_id, e)
+
+            if time.time() - last_flush >= FLUSH_INTERVAL_SEC:
+                self._flush()
+                last_flush = time.time()
+
+            self._stop_event.wait(timeout=POLL_INTERVAL_SEC)
+
+        self._flush()  # final flush on stop
+
+    def _flush(self) -> None:
+        with self.lock:
+            batch, self._unflushed = self._unflushed, []
+        if not batch:
+            return
+        try:
+            from orca_server.metrics_db import get_metrics_db
+            get_metrics_db().append_timeseries(self.job_id, batch)
+        except Exception as e:
+            logger.warning(
+                "[MetricsCollector] timeseries flush failed for %s: %s — data retained",
+                self.job_id, e,
+            )
+            with self.lock:
+                self._unflushed = batch + self._unflushed
+
+
+class MetricsCollector:
+    def __init__(self):
+        self._jobs: dict[str, _JobCollector] = {}
+        self._lock = threading.Lock()
+
+    def start_collecting(self, job_id: str, endpoint_url: str | None = None) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                return
+            jc = _JobCollector(job_id, endpoint_url)
+            self._jobs[job_id] = jc
+        jc.start()
+
+    def stop_collecting(self, job_id: str) -> None:
+        with self._lock:
+            jc = self._jobs.pop(job_id, None)
+        if jc:
+            jc.stop()
+
+    def get_latest(self, job_id: str) -> MetricsSnapshot | None:
+        with self._lock:
+            jc = self._jobs.get(job_id)
+        return jc.latest() if jc else None
+
+    def get_recent(self, job_id: str, n: int = 60) -> list[dict]:
+        with self._lock:
+            jc = self._jobs.get(job_id)
+        if not jc:
+            return []
+        with jc.lock:
+            snaps = list(jc.buffer)[-n:]
+        return [s.to_dict() for s in snaps]
+
+    def active_job_ids(self) -> list[str]:
+        with self._lock:
+            return list(self._jobs.keys())
+
+    def prometheus_exposition(self) -> str:
+        lines = [
+            "# HELP orca_job_throughput_toks_per_s Generation throughput tokens/sec",
+            "# TYPE orca_job_throughput_toks_per_s gauge",
+        ]
+        with self._lock:
+            items = list(self._jobs.items())
+        for job_id, jc in items:
+            snap = jc.latest()
+            if snap is None:
+                continue
+            lines.append(
+                f'orca_job_throughput_toks_per_s{{job_id="{job_id}"}} '
+                f"{snap.avg_generation_throughput_toks_per_s}"
+            )
+        lines += [
+            "# HELP orca_job_kv_cache_util KV cache utilization (0-1)",
+            "# TYPE orca_job_kv_cache_util gauge",
+        ]
+        for job_id, jc in items:
+            snap = jc.latest()
+            if snap is None:
+                continue
+            lines.append(f'orca_job_kv_cache_util{{job_id="{job_id}"}} {snap.gpu_cache_usage_perc}')
+        lines += [
+            "# HELP orca_job_requests_running Running requests",
+            "# TYPE orca_job_requests_running gauge",
+        ]
+        for job_id, jc in items:
+            snap = jc.latest()
+            if snap is None:
+                continue
+            lines.append(f'orca_job_requests_running{{job_id="{job_id}"}} {snap.num_requests_running}')
+        lines += [
+            "# HELP orca_job_requests_waiting Waiting requests",
+            "# TYPE orca_job_requests_waiting gauge",
+        ]
+        for job_id, jc in items:
+            snap = jc.latest()
+            if snap is None:
+                continue
+            lines.append(f'orca_job_requests_waiting{{job_id="{job_id}"}} {snap.num_requests_waiting}')
+        return "\n".join(lines) + "\n"
+
+    def sse_generator(self, job_id: str) -> Generator[str, None, None]:
+        yield "retry: 5000\n\n"
+        while True:
+            with self._lock:
+                still_active = job_id in self._jobs
+            snap = self.get_latest(job_id)
+            if snap:
+                yield f"data: {json.dumps(snap.to_dict())}\n\n"
+            elif not still_active:
+                yield f"data: {json.dumps({'status': 'completed'})}\n\n"
+                return
+            time.sleep(POLL_INTERVAL_SEC)
+
+
+_metrics_collector: MetricsCollector | None = None
+
+
+def get_metrics_collector() -> MetricsCollector:
+    global _metrics_collector
+    if _metrics_collector is None:
+        _metrics_collector = MetricsCollector()
+    return _metrics_collector
