@@ -285,7 +285,19 @@ async def update_job_phase(
     phase = body.get("phase")
     if phase:
         get_job_tracker().update_status(job_id, phase)
+        if phase == "generating":
+            app.state.metrics_collector.set_baseline(job_id)
     return {"ok": True}
+
+
+@app.get("/job/{job_id}/throughput")
+async def get_job_throughput(job_id: str, window: float = 60.0):
+    """Sustained throughput for the controller: rolling window + epoch (since baseline)."""
+    result = app.state.metrics_collector.get_sustained_throughput(job_id, window)
+    if result is None:
+        raise HTTPException(404, "No throughput data (insufficient samples)")
+    result["job_id"] = job_id
+    return result
 
 
 @app.get("/analytics/runs")

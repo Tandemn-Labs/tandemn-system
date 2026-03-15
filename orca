@@ -704,7 +704,18 @@ def cmd_metrics(args):
         swapped = md.get("num_requests_swapped", 0)
         done = int(md.get("request_success_total", 0))
         lines = [
-            f"{DIM}Throughput:{RESET}   {c(f'{tps:.0f}', GREEN+BOLD)} tok/s",
+            f"{DIM}Throughput:{RESET}   {c(f'{tps:.0f}', GREEN+BOLD)} tok/s  {DIM}(instant){RESET}",
+        ]
+        # Fetch sustained throughput
+        try:
+            sr = api("get", f"/job/{job_id}/throughput?window=60", timeout=5)
+            if sr.status_code == 200:
+                sd = sr.json()
+                sus = sd.get("generation_toks_per_s", 0)
+                lines.append(f"{DIM}Sustained:{RESET}    {c(f'{sus:.0f}', GREEN+BOLD)} tok/s  {DIM}(60s avg){RESET}")
+        except Exception:
+            pass
+        lines += [
             f"{DIM}KV Cache:{RESET}     {bar(kv / 100, 30)}",
             f"{DIM}Running:{RESET}      {c(str(running), CYAN)}   {DIM}Waiting:{RESET} {waiting}   {DIM}Swapped:{RESET} {swapped}",
             f"{DIM}Completed:{RESET}    {done}",
@@ -910,8 +921,8 @@ def cmd_stream(args):
     step(f"Streaming metrics for: {c(job_id, CYAN+BOLD)} (Ctrl+C to stop)")
     print()
 
-    print(f"  {'TIME':>8}  {'GEN TOK/S':>9}  {'PROMPT TOK/S':>12}  {'RUN':>5}  {'WAIT':>5}  {'KV %':>6}  {'SUCCESS':>7}  {'PREEMPT':>7}")
-    print(f"  {'─'*8}  {'─'*9}  {'─'*12}  {'─'*5}  {'─'*5}  {'─'*6}  {'─'*7}  {'─'*7}")
+    print(f"  {'TIME':>8}  {'GEN TOK/S':>9}  {'SUSTAINED':>9}  {'PROMPT TOK/S':>12}  {'RUN':>5}  {'WAIT':>5}  {'KV %':>6}  {'SUCCESS':>7}  {'PREEMPT':>7}")
+    print(f"  {'─'*8}  {'─'*9}  {'─'*9}  {'─'*12}  {'─'*5}  {'─'*5}  {'─'*6}  {'─'*7}  {'─'*7}")
 
     import requests as _req
     url = f"{ORCA_SERVER}/job/{job_id}/metrics/stream"
@@ -945,8 +956,12 @@ def cmd_stream(args):
                 succ = d.get("request_success_total", 0)
                 pre = d.get("num_preemptions_total", 0)
 
+                sus = d.get("sustained", {})
+                sus_tps = sus.get("generation_toks_per_s", 0)
+                sus_str = f"{sus_tps:>9.0f}" if sus else f"{'—':>9}"
+
                 run_str = c(f"{run:>5}", GREEN) if run > 0 else f"{run:>5}"
-                print(f"  {t:>7.0f}s  {tps:>9.0f}  {ptps:>12.0f}  {run_str}  {wait:>5}  {kv:>5.0f}%  {succ:>7.0f}  {pre:>7.0f}")
+                print(f"  {t:>7.0f}s  {tps:>9.0f}  {sus_str}  {ptps:>12.0f}  {run_str}  {wait:>5}  {kv:>5.0f}%  {succ:>7.0f}  {pre:>7.0f}")
 
     except KeyboardInterrupt:
         print(f"\n\n  {DIM}Stopped.{RESET}")

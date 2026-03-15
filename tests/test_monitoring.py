@@ -232,3 +232,87 @@ class TestMetricsCollector:
             assert "job-x" not in ids2
             assert "job-y" in ids2
             self.mc.stop_collecting("job-y")
+
+
+# ---------------------------------------------------------------------------
+# TestSustainedThroughput
+# ---------------------------------------------------------------------------
+
+def _make_snap(job_id: str, ts: float, gen_total: float, prompt_total: float) -> MetricsSnapshot:
+    snap = MetricsSnapshot(job_id=job_id, timestamp=ts)
+    snap.generation_tokens_total = gen_total
+    snap.prompt_tokens_total = prompt_total
+    return snap
+
+
+class TestSustainedThroughput:
+    def test_insufficient_data(self):
+        jc = _JobCollector("job-sus", None)
+        assert jc.get_sustained_throughput() is None
+        # Single snapshot still insufficient
+        jc.buffer.append(_make_snap("job-sus", 100.0, 0, 0))
+        assert jc.get_sustained_throughput() is None
+
+    def test_basic_computation(self):
+        jc = _JobCollector("job-sus", None)
+        jc.buffer.append(_make_snap("job-sus", 100.0, 1000, 200))
+        jc.buffer.append(_make_snap("job-sus", 110.0, 9500, 1300))
+        result = jc.get_sustained_throughput(window_sec=60.0)
+        assert result is not None
+        assert result["generation_toks_per_s"] == pytest.approx(850.0)
+        assert result["prompt_toks_per_s"] == pytest.approx(110.0)
+        assert result["window_actual_sec"] == pytest.approx(10.0)
+
+    def test_baseline_clips_window(self):
+        jc = _JobCollector("job-sus", None)
+        # t=0: pre-generation data (should be excluded)
+        jc.buffer.append(_make_snap("job-sus", 100.0, 0, 0))
+        jc.buffer.append(_make_snap("job-sus", 101.0, 100, 10))
+        # baseline set at t=102 (generating starts)
+        jc.buffer.append(_make_snap("job-sus", 102.0, 200, 20))
+        jc.set_baseline()
+        # t=103: generating data
+        jc.buffer.append(_make_snap("job-sus", 103.0, 1200, 120))
+        jc.buffer.append(_make_snap("job-sus", 110.0, 9200, 920))
+
+        result = jc.get_sustained_throughput(window_sec=600.0)
+        assert result is not None
+        # Window should start at baseline (t=102), not t=100
+        assert result["window_actual_sec"] == pytest.approx(8.0)
+        # (9200 - 200) / 8 = 1125
+        assert result["generation_toks_per_s"] == pytest.approx(1125.0)
+
+    def test_epoch_throughput(self):
+        jc = _JobCollector("job-sus", None)
+        jc.buffer.append(_make_snap("job-sus", 100.0, 500, 50))
+        jc.set_baseline()
+        jc.buffer.append(_make_snap("job-sus", 105.0, 5500, 550))
+        jc.buffer.append(_make_snap("job-sus", 110.0, 10500, 1050))
+
+        result = jc.get_sustained_throughput(window_sec=60.0)
+        assert result is not None
+        # Epoch: (10500 - 500) / 10 = 1000
+        assert result["epoch_generation_toks_per_s"] == pytest.approx(1000.0)
+        assert result["epoch_prompt_toks_per_s"] == pytest.approx(100.0)
+        assert result["since_baseline_sec"] == pytest.approx(10.0)
+
+    def test_collector_delegation(self):
+        mc = MetricsCollector()
+        jc = _JobCollector("job-del", None)
+        jc.buffer.append(_make_snap("job-del", 100.0, 1000, 100))
+        with mc._lock:
+            mc._jobs["job-del"] = jc
+
+        # set_baseline through MetricsCollector (at t=100)
+        mc.set_baseline("job-del")
+        assert jc._baseline_snap is not None
+
+        # More data after baseline
+        jc.buffer.append(_make_snap("job-del", 110.0, 9000, 900))
+
+        result = mc.get_sustained_throughput("job-del", window_sec=60.0)
+        assert result is not None
+        assert result["generation_toks_per_s"] == pytest.approx(800.0)
+
+        # Unknown job returns None
+        assert mc.get_sustained_throughput("nonexistent") is None
