@@ -568,6 +568,7 @@ def cmd_progress(args):
 
                 # Live metrics from vLLM Prometheus (polled by control plane)
                 running = 0
+                done_reqs = 0
                 metrics_line = ""
                 try:
                     md = api("get", f"/job/{job_id}/metrics", timeout=2).json()
@@ -575,9 +576,12 @@ def cmd_progress(args):
                     kv = md.get("gpu_cache_usage_perc", 0) * 100
                     running = md.get("num_requests_running", 0)
                     waiting = md.get("num_requests_waiting", 0)
+                    done_reqs = int(md.get("request_success_total", 0))
                     parts = []
+                    if done_reqs > 0:
+                        parts.append(f"{GREEN}{done_reqs}{RESET}/{total} done")
                     if running > 0:
-                        parts.append(f"{GREEN}{running}{RESET} running")
+                        parts.append(f"{CYAN}{running}{RESET} running")
                     if waiting > 0:
                         parts.append(f"{YELLOW}{waiting}{RESET} waiting")
                     if kv > 0:
@@ -598,12 +602,9 @@ def cmd_progress(args):
                     break
 
                 if running > 0 or status == "generating":
-                    # During generation: show running requests as a bar
-                    run_frac = running / total if isinstance(total, int) and total > 0 else 0
-                    w = 50
-                    filled = int(w * run_frac)
-                    run_bar = f"{CYAN}{'▓' * filled}{'░' * (w - filled)}{RESET}"
-                    sys.stdout.write(f"\r  {run_bar}  {running}/{total} in-flight  [{c(status, GREEN)}]  ")
+                    # During generation: show progress bar based on done/total
+                    done_frac = done_reqs / total if isinstance(total, int) and total > 0 else 0
+                    sys.stdout.write(f"\r  {bar(done_frac, 50)}  {done_reqs}/{total} done  {running} in-flight  [{c(status, GREEN)}]  ")
                     sys.stdout.write(f"\n  {DIM}{metrics_line}{RESET}  \033[1A")
                 else:
                     # Show current phase
@@ -611,6 +612,7 @@ def cmd_progress(args):
                         "launching": "provisioning cluster...",
                         "running": "setting up environment...",
                         "loading_model": "downloading & loading model...",
+                        "model_ready": "model loaded, preparing batch...",
                     }
                     phase = phase_labels.get(status, f"{status}...")
                     sys.stdout.write(f"\r  {DIM}{'░' * 50}  {phase}  [{c(status, YELLOW)}]{RESET}  ")

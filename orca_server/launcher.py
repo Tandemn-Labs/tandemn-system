@@ -28,6 +28,7 @@ from orca_server.job_manager import (
     get_job_tracker,
     prefix_job_dirname,
     setup_job_logger,
+    sky_down_with_retry,
 )
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
@@ -328,13 +329,9 @@ async def sp_launch_vllm_batch(
             if quota_tracker is not None:
                 quota_tracker.release_cluster(config.decision_id)
             cm.unregister(config.decision_id)
+            cm.unregister_thread(config.decision_id)
             if not persist:
-                try:
-                    job_logger.info(f"[Teardown] Destroying cluster {config.decision_id}...")
-                    sky.down(config.decision_id)
-                    job_logger.info(f"[Teardown] Cluster {config.decision_id} destroyed.")
-                except Exception as e:
-                    job_logger.warning(f"[Teardown] Failed: {e}")
+                sky_down_with_retry(config.decision_id)
             else:
                 job_logger.info(f"[Teardown] --persist: keeping cluster {config.decision_id} alive")
 
@@ -372,7 +369,14 @@ async def sp_launch_vllm_batch(
             get_metrics_collector().start_collecting(config.decision_id, endpoint_url)
 
         # Stream logs in background and download when done
-        threading.Thread(target=monitor_and_download, args=(job_id,), daemon=True).start()
+        t = threading.Thread(
+            target=monitor_and_download, args=(job_id,),
+            daemon=False, name=f"orca-monitor-{config.decision_id[:12]}",
+        )
+        cm.register_thread(config.decision_id, t)
+        if persist:
+            cm.mark_persist(config.decision_id)
+        t.start()
 
     except Exception as e:
         job_logger.error(

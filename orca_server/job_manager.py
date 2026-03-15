@@ -5,6 +5,7 @@ Job lifecycle management: logging, tracking, metrics, and output download.
 import logging
 import re
 import subprocess
+import threading
 import time
 from threading import Lock
 from typing import Dict, Literal, Optional
@@ -105,6 +106,8 @@ class ClusterManager:
 
     def __init__(self):
         self.active_clusters: Dict[str, dict] = {}
+        self._threads: Dict[str, threading.Thread] = {}
+        self._persist_set: set = set()
         self.lock = Lock()
 
     def register(self, cluster_name: str, job_id: str, region: str = None,
@@ -122,6 +125,22 @@ class ClusterManager:
             if cluster_name in self.active_clusters:
                 del self.active_clusters[cluster_name]
                 logger.info(f"[ClusterManager] Unregistered cluster: {cluster_name}")
+
+    def register_thread(self, cluster_name: str, thread: threading.Thread):
+        with self.lock:
+            self._threads[cluster_name] = thread
+
+    def unregister_thread(self, cluster_name: str):
+        with self.lock:
+            self._threads.pop(cluster_name, None)
+
+    def mark_persist(self, cluster_name: str):
+        with self.lock:
+            self._persist_set.add(cluster_name)
+
+    def get_active_threads(self) -> Dict[str, threading.Thread]:
+        with self.lock:
+            return dict(self._threads)
 
     def terminate_cluster(self, cluster_name: str) -> bool:
         try:
@@ -148,6 +167,35 @@ def get_cluster_manager() -> ClusterManager:
     if _cluster_manager is None:
         _cluster_manager = ClusterManager()
     return _cluster_manager
+
+
+def sky_down_with_retry(cluster_name: str, max_attempts: int = 3, delay: float = 10.0) -> bool:
+    """Tear down a SkyPilot cluster with retries (handles security-group race)."""
+    import sky
+    for attempt in range(1, max_attempts + 1):
+        try:
+            logger.info(f"[Teardown] sky.down({cluster_name}) attempt {attempt}/{max_attempts}")
+            sky.down(cluster_name)
+            logger.info(f"[Teardown] Cluster {cluster_name} destroyed.")
+            return True
+        except Exception as e:
+            logger.warning(f"[Teardown] Attempt {attempt} failed: {e}")
+            if attempt < max_attempts:
+                time.sleep(delay)
+    # Final fallback: subprocess
+    logger.info(f"[Teardown] SDK retries exhausted, falling back to subprocess sky down -y {cluster_name}")
+    try:
+        result = subprocess.run(
+            ["sky", "down", "-y", cluster_name],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode == 0:
+            logger.info(f"[Teardown] Subprocess fallback succeeded for {cluster_name}.")
+            return True
+        logger.error(f"[Teardown] Subprocess fallback failed: {result.stderr}")
+    except Exception as e:
+        logger.error(f"[Teardown] Subprocess fallback error: {e}")
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -210,8 +258,8 @@ class JobTracker:
         self,
         job_id: str,
         status: Literal[
-            "queued", "launching", "loading_model", "generating",
-            "running", "succeeded", "failed", "cancelled",
+            "queued", "launching", "loading_model", "model_ready",
+            "generating", "running", "succeeded", "failed", "cancelled",
         ],
     ):
         with self.lock:

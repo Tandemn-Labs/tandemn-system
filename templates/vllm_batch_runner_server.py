@@ -54,6 +54,23 @@ def write_progress(done: int, total: int, status: str = "running"):
         pass
 
 
+def _report_phase(phase: str):
+    """Report job lifecycle phase to orca control plane."""
+    url = os.getenv("ORCA_SERVER_URL", "")
+    key = os.getenv("ORCA_API_KEY", "")
+    job_id = os.getenv("JOB_ID", "")
+    if not url or not job_id:
+        return
+    try:
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        requests.post(f"{url}/job/{job_id}/phase",
+                      json={"phase": phase}, headers=headers, timeout=5)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Prometheus helpers — inline, no orca_server imports on cluster
 # ---------------------------------------------------------------------------
@@ -1061,12 +1078,14 @@ def main():
     print(f"[Runner] max_model_len={args.max_model_len or 'auto'}, gpu_util={args.gpu_memory_utilization}")
 
     # 1. Start vLLM HTTP server
+    _report_phase("loading_model")
     proc = start_vllm_server(args)
     try:
         # 2. Wait until healthy
         print("[Runner] Waiting for vLLM server to be ready...")
         model_load_sec = wait_for_server()
         print(f"[Runner] Server ready in {model_load_sec:.2f}s")
+        _report_phase("model_ready")
 
         # 3. Start sidecar (bonus push to control plane)
         orca_url = os.getenv("ORCA_SERVER_URL", "")
@@ -1103,6 +1122,7 @@ def main():
         metrics_poller.start()
 
         # 8. Run benchmark
+        _report_phase("generating")
         generation_start_time = time.time()
         results = asyncio.run(run_benchmark(all_requests, args.model))
         generation_time = time.time() - generation_start_time

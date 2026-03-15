@@ -72,6 +72,9 @@ class MetricsSnapshot:
     num_requests_swapped: int = 0
     request_success_total: float = 0.0
     num_preemptions_total: float = 0.0
+    # vLLM counters (for computing throughput via deltas on vLLM >=0.10)
+    generation_tokens_total: float = 0.0
+    prompt_tokens_total: float = 0.0
     # Latency histograms (None until first requests complete)
     ttft_ms_p50: float | None = None
     ttft_ms_p95: float | None = None
@@ -86,12 +89,16 @@ class MetricsSnapshot:
     @classmethod
     def from_prometheus_text(cls, job_id: str, text: str, timestamp: float) -> "MetricsSnapshot":
         snap = cls(job_id=job_id, timestamp=timestamp)
+        # Throughput gauges (vLLM <0.10 — removed in 0.10.0, will be 0)
         snap.avg_generation_throughput_toks_per_s = sum_metric(
             text, "vllm:avg_generation_throughput_toks_per_s"
         )
         snap.avg_prompt_throughput_toks_per_s = sum_metric(
             text, "vllm:avg_prompt_throughput_toks_per_s"
         )
+        # Token counters (vLLM >=0.10 — used to compute throughput via deltas)
+        snap.generation_tokens_total = sum_metric(text, "vllm:generation_tokens_total")
+        snap.prompt_tokens_total = sum_metric(text, "vllm:prompt_tokens_total")
         snap.gpu_cache_usage_perc = sum_metric(text, "vllm:gpu_cache_usage_perc")
         snap.num_requests_running = int(sum_metric(text, "vllm:num_requests_running"))
         snap.num_requests_waiting = int(sum_metric(text, "vllm:num_requests_waiting"))
@@ -122,6 +129,8 @@ class MetricsSnapshot:
             "num_requests_swapped": self.num_requests_swapped,
             "request_success_total": self.request_success_total,
             "num_preemptions_total": self.num_preemptions_total,
+            "generation_tokens_total": self.generation_tokens_total,
+            "prompt_tokens_total": self.prompt_tokens_total,
             "ttft_ms_p50": self.ttft_ms_p50,
             "ttft_ms_p95": self.ttft_ms_p95,
             "ttft_ms_p99": self.ttft_ms_p99,
@@ -169,13 +178,27 @@ class _JobCollector:
 
     def _poll_loop(self) -> None:
         last_flush = time.time()
-        _metrics_reached = False  # /metrics endpoint responding
+        _prev_snap: MetricsSnapshot | None = None
         _generating = False       # requests are in-flight
         while not self._stop_event.is_set():
             try:
                 r = _requests.get(self.endpoint_url + "/metrics", timeout=4)
                 r.raise_for_status()
                 snap = MetricsSnapshot.from_prometheus_text(self.job_id, r.text, time.time())
+
+                # Compute throughput from counter deltas (vLLM >=0.10 removed the gauge)
+                # With VLLM_LOG_STATS_INTERVAL=1, counters flush every second
+                if snap.avg_generation_throughput_toks_per_s == 0 and _prev_snap is not None:
+                    dt = snap.timestamp - _prev_snap.timestamp
+                    if dt > 0:
+                        snap.avg_generation_throughput_toks_per_s = (
+                            snap.generation_tokens_total - _prev_snap.generation_tokens_total
+                        ) / dt
+                        snap.avg_prompt_throughput_toks_per_s = (
+                            snap.prompt_tokens_total - _prev_snap.prompt_tokens_total
+                        ) / dt
+                _prev_snap = snap
+
                 with self.lock:
                     self.buffer.append(snap)
                     self._unflushed.append(snap.to_dict())
@@ -186,16 +209,11 @@ class _JobCollector:
                     jt = get_job_tracker()
                     rec = jt.get(self.job_id)
                     if rec:
-                        # First successful /metrics → model is loaded
-                        if not _metrics_reached:
-                            _metrics_reached = True
-                            if rec.status in ("running", "launching"):
-                                jt.update_status(self.job_id, "loading_model")
-
-                        # Requests in-flight → generating
+                        # Requests in-flight → generating (fallback if runner didn't report)
                         if snap.num_requests_running > 0 and not _generating:
                             _generating = True
-                            jt.update_status(self.job_id, "generating")
+                            if rec.status not in ("generating",):
+                                jt.update_status(self.job_id, "generating")
 
                         # Progress from completed requests
                         if snap.request_success_total > 0 and rec.state.spec.num_lines > 0:
