@@ -181,6 +181,11 @@ def monitor_job(job_id):
 def verify_results(job_id, metrics_seen, had_nonzero_progress, had_live_metrics):
     step("PHASE 3: Verify results")
 
+    # Wait for monitor_and_download background thread to finish
+    # (downloads output from S3 + writes to DB after status=succeeded)
+    print("  Waiting 15s for S3 download + DB write...")
+    time.sleep(15)
+
     results = []
 
     # 1. Job status
