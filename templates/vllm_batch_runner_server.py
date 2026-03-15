@@ -104,6 +104,25 @@ def sum_metric(text: str, metric_name: str) -> float:
     return total
 
 
+_METRIC_ALIASES = {
+    "vllm:generation_tokens_total": "vllm:generation_tokens",
+    "vllm:prompt_tokens_total":     "vllm:prompt_tokens",
+    "vllm:request_success_total":   "vllm:request_success",
+    "vllm:num_preemptions_total":   "vllm:num_preemptions",
+    "vllm:gpu_cache_usage_perc":    "vllm:kv_cache_usage_perc",
+    "vllm:prefix_cache_queries_total": "vllm:prefix_cache_queries",
+    "vllm:prefix_cache_hits_total":    "vllm:prefix_cache_hits",
+}
+
+
+def sum_metric_compat(text: str, name: str) -> float:
+    """sum_metric with fallback to v0.10.0 metric names."""
+    val = sum_metric(text, name)
+    if val == 0.0 and name in _METRIC_ALIASES:
+        val = sum_metric(text, _METRIC_ALIASES[name])
+    return val
+
+
 def _parse_histogram_buckets(text: str, metric_name: str) -> list:
     bucket_name = f"{metric_name}_bucket"
     buckets: dict = {}
@@ -204,7 +223,7 @@ def _delta_histogram_buckets(pre_text: str, post_text: str, metric_name: str) ->
 
 def _delta_counter(pre_text: str, post_text: str, metric_name: str) -> float:
     """Compute delta for a single counter between pre and post scrapes."""
-    return sum_metric(post_text, metric_name) - sum_metric(pre_text, metric_name)
+    return sum_metric_compat(post_text, metric_name) - sum_metric_compat(pre_text, metric_name)
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +347,7 @@ class MetricsPoller:
                     "running": int(sum_metric(text, "vllm:num_requests_running")),
                     "waiting": int(sum_metric(text, "vllm:num_requests_waiting")),
                     "swapped": int(sum_metric(text, "vllm:num_requests_swapped")),
-                    "kv_cache_util_pct": round(sum_metric(text, "vllm:gpu_cache_usage_perc") * 100, 1),
+                    "kv_cache_util_pct": round(sum_metric_compat(text, "vllm:gpu_cache_usage_perc") * 100, 1),
                 }
                 self._timeseries.append(sample)
             except Exception:
@@ -739,6 +758,11 @@ def build_metrics(
     delta_ttft = _delta_histogram_buckets(pre_prom_text, post_prom_text, "vllm:time_to_first_token_seconds")
     delta_tpot = _delta_histogram_buckets(pre_prom_text, post_prom_text, "vllm:time_per_output_token_seconds")
     delta_e2e = _delta_histogram_buckets(pre_prom_text, post_prom_text, "vllm:e2e_request_latency_seconds")
+    # Per-phase latency (V1 only — empty buckets on v0)
+    delta_queue = _delta_histogram_buckets(pre_prom_text, post_prom_text, "vllm:request_queue_time_seconds")
+    delta_prefill = _delta_histogram_buckets(pre_prom_text, post_prom_text, "vllm:request_prefill_time_seconds")
+    delta_decode = _delta_histogram_buckets(pre_prom_text, post_prom_text, "vllm:request_decode_time_seconds")
+    delta_inference = _delta_histogram_buckets(pre_prom_text, post_prom_text, "vllm:request_inference_time_seconds")
 
     def _hq(buckets, q):
         v = histogram_quantile_from_buckets(buckets, q)
@@ -746,6 +770,15 @@ def build_metrics(
 
     # --- Preemptions ---
     num_preemptions = int(_delta_counter(pre_prom_text, post_prom_text, "vllm:num_preemptions_total"))
+
+    # --- Prefix cache hit rate (V1) ---
+    pre_cq = sum_metric_compat(pre_prom_text, "vllm:prefix_cache_queries_total")
+    post_cq = sum_metric_compat(post_prom_text, "vllm:prefix_cache_queries_total")
+    pre_ch = sum_metric_compat(pre_prom_text, "vllm:prefix_cache_hits_total")
+    post_ch = sum_metric_compat(post_prom_text, "vllm:prefix_cache_hits_total")
+    delta_cq = post_cq - pre_cq
+    delta_ch = post_ch - pre_ch
+    prefix_cache_hit_rate = round(delta_ch / delta_cq, 4) if delta_cq > 0 else None
 
     # --- Cost efficiency ---
     price_per_hour = _get_price_per_hour(args.instance_type)
@@ -810,6 +843,21 @@ def build_metrics(
         "e2e_server_ms_p50": _hq(delta_e2e, 0.50),
         "e2e_server_ms_p95": _hq(delta_e2e, 0.95),
         "e2e_server_ms_p99": _hq(delta_e2e, 0.99),
+
+        # === PER-PHASE LATENCY (V1 histograms, warmup-subtracted, ms) ===
+        "queue_time_ms_p50": _hq(delta_queue, 0.50),
+        "queue_time_ms_p95": _hq(delta_queue, 0.95),
+        "queue_time_ms_p99": _hq(delta_queue, 0.99),
+        "prefill_time_ms_p50": _hq(delta_prefill, 0.50),
+        "prefill_time_ms_p95": _hq(delta_prefill, 0.95),
+        "prefill_time_ms_p99": _hq(delta_prefill, 0.99),
+        "decode_time_ms_p50": _hq(delta_decode, 0.50),
+        "decode_time_ms_p95": _hq(delta_decode, 0.95),
+        "decode_time_ms_p99": _hq(delta_decode, 0.99),
+        "inference_time_ms_p50": _hq(delta_inference, 0.50),
+        "inference_time_ms_p95": _hq(delta_inference, 0.95),
+        "inference_time_ms_p99": _hq(delta_inference, 0.99),
+        "prefix_cache_hit_rate": prefix_cache_hit_rate,
 
         # === PREEMPTIONS ===
         "num_preemptions": num_preemptions,

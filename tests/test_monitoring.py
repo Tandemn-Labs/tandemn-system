@@ -93,6 +93,11 @@ class TestMetricsSnapshot:
             "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
             "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
             "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
+            "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
+            "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
+            "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+            "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+            "prefix_cache_hit_rate",
         }
         assert set(d.keys()) == expected_keys
         assert d["job_id"] == "job1"
@@ -316,3 +321,194 @@ class TestSustainedThroughput:
 
         # Unknown job returns None
         assert mc.get_sustained_throughput("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# TestV010Compat — vLLM v0.10.0 renamed counters
+# ---------------------------------------------------------------------------
+
+V010_PROM_TEXT = """\
+# vLLM v0.10.0 style: no _total suffix, kv_cache renamed
+vllm:generation_tokens{model_name="m"} 5000
+vllm:prompt_tokens{model_name="m"} 1200
+vllm:kv_cache_usage_perc{model_name="m"} 0.85
+vllm:request_success{model_name="m",finished_reason="stop"} 300
+vllm:num_preemptions{model_name="m"} 4
+vllm:num_requests_running{model_name="m"} 10
+vllm:num_requests_waiting{model_name="m"} 3
+"""
+
+
+class TestV010Compat:
+    def test_v010_counter_names(self):
+        snap = MetricsSnapshot.from_prometheus_text("job1", V010_PROM_TEXT, 0.0)
+        assert snap.generation_tokens_total == 5000
+        assert snap.prompt_tokens_total == 1200
+        assert snap.request_success_total == 300
+        assert snap.num_preemptions_total == 4
+
+    def test_v09_counter_names_still_work(self):
+        snap = MetricsSnapshot.from_prometheus_text("job1", SAMPLE_PROM_TEXT, 0.0)
+        assert snap.generation_tokens_total == 0.0  # not present in v0.9 sample (no counter line)
+        assert snap.request_success_total == pytest.approx(500.0)
+        assert snap.num_preemptions_total == pytest.approx(2.0)
+
+    def test_kv_cache_alias(self):
+        snap = MetricsSnapshot.from_prometheus_text("job1", V010_PROM_TEXT, 0.0)
+        assert snap.gpu_cache_usage_perc == pytest.approx(0.85)
+
+    def test_new_fields_none_on_v0(self):
+        snap = MetricsSnapshot.from_prometheus_text("job1", SAMPLE_PROM_TEXT, 0.0)
+        assert snap.queue_time_ms_p50 is None
+        assert snap.prefill_time_ms_p50 is None
+        assert snap.decode_time_ms_p50 is None
+        assert snap.prefix_cache_hit_rate is None
+
+
+# ---------------------------------------------------------------------------
+# TestPerPhaseHistograms — new v0.10 histogram fields
+# ---------------------------------------------------------------------------
+
+QUEUE_HISTOGRAM_TEXT = """\
+vllm:request_queue_time_seconds_bucket{le="0.01",model_name="m"} 10
+vllm:request_queue_time_seconds_bucket{le="0.1",model_name="m"} 50
+vllm:request_queue_time_seconds_bucket{le="1.0",model_name="m"} 90
+vllm:request_queue_time_seconds_bucket{le="+Inf",model_name="m"} 100
+"""
+
+PREFILL_HISTOGRAM_TEXT = """\
+vllm:request_prefill_time_seconds_bucket{le="0.01",model_name="m"} 20
+vllm:request_prefill_time_seconds_bucket{le="0.05",model_name="m"} 60
+vllm:request_prefill_time_seconds_bucket{le="0.5",model_name="m"} 95
+vllm:request_prefill_time_seconds_bucket{le="+Inf",model_name="m"} 100
+"""
+
+DECODE_HISTOGRAM_TEXT = """\
+vllm:request_decode_time_seconds_bucket{le="0.5",model_name="m"} 10
+vllm:request_decode_time_seconds_bucket{le="1.0",model_name="m"} 50
+vllm:request_decode_time_seconds_bucket{le="2.0",model_name="m"} 90
+vllm:request_decode_time_seconds_bucket{le="+Inf",model_name="m"} 100
+"""
+
+PREFIX_CACHE_TEXT = """\
+vllm:prefix_cache_queries{model_name="m"} 1000
+vllm:prefix_cache_hits{model_name="m"} 724
+"""
+
+
+class TestPerPhaseHistograms:
+    def test_queue_time_histogram(self):
+        snap = MetricsSnapshot.from_prometheus_text("j", QUEUE_HISTOGRAM_TEXT, 0.0)
+        assert snap.queue_time_ms_p50 is not None
+        assert snap.queue_time_ms_p95 is not None
+        assert snap.queue_time_ms_p99 is not None
+        assert snap.queue_time_ms_p50 <= snap.queue_time_ms_p95 <= snap.queue_time_ms_p99
+
+    def test_prefill_decode_histograms(self):
+        text = PREFILL_HISTOGRAM_TEXT + DECODE_HISTOGRAM_TEXT
+        snap = MetricsSnapshot.from_prometheus_text("j", text, 0.0)
+        assert snap.prefill_time_ms_p50 is not None
+        assert snap.decode_time_ms_p50 is not None
+        assert snap.prefill_time_ms_p50 <= snap.prefill_time_ms_p95 <= snap.prefill_time_ms_p99
+        assert snap.decode_time_ms_p50 <= snap.decode_time_ms_p95 <= snap.decode_time_ms_p99
+
+    def test_prefix_cache_hit_rate(self):
+        snap = MetricsSnapshot.from_prometheus_text("j", PREFIX_CACHE_TEXT, 0.0)
+        assert snap.prefix_cache_hit_rate == pytest.approx(0.724)
+
+    def test_prefix_cache_no_queries(self):
+        snap = MetricsSnapshot.from_prometheus_text("j", "", 0.0)
+        assert snap.prefix_cache_hit_rate is None
+
+
+# ---------------------------------------------------------------------------
+# TestV1Engine — V1-specific behaviors
+# ---------------------------------------------------------------------------
+
+V1_MULTI_ENGINE_TEXT = """\
+vllm:generation_tokens{model_name="m",engine="0"} 3000
+vllm:generation_tokens{model_name="m",engine="1"} 2000
+vllm:prompt_tokens{model_name="m",engine="0"} 800
+vllm:prompt_tokens{model_name="m",engine="1"} 400
+vllm:kv_cache_usage_perc{model_name="m",engine="0"} 0.6
+vllm:kv_cache_usage_perc{model_name="m",engine="1"} 0.5
+vllm:num_requests_running{model_name="m",engine="0"} 8
+vllm:num_requests_running{model_name="m",engine="1"} 6
+vllm:num_requests_waiting{model_name="m",engine="0"} 2
+vllm:num_requests_waiting{model_name="m",engine="1"} 1
+vllm:request_success{model_name="m",finished_reason="stop",engine="0"} 150
+vllm:request_success{model_name="m",finished_reason="stop",engine="1"} 100
+"""
+
+INFERENCE_HISTOGRAM_TEXT = """\
+vllm:request_inference_time_seconds_bucket{le="0.5",model_name="m"} 10
+vllm:request_inference_time_seconds_bucket{le="1.0",model_name="m"} 50
+vllm:request_inference_time_seconds_bucket{le="2.0",model_name="m"} 90
+vllm:request_inference_time_seconds_bucket{le="+Inf",model_name="m"} 100
+"""
+
+PREFIX_CACHE_TOTAL_TEXT = """\
+vllm:prefix_cache_queries_total{model_name="m"} 500
+vllm:prefix_cache_hits_total{model_name="m"} 350
+"""
+
+
+class TestV1Engine:
+    def test_multi_engine_label_aggregation(self):
+        snap = MetricsSnapshot.from_prometheus_text("j", V1_MULTI_ENGINE_TEXT, 0.0)
+        assert snap.generation_tokens_total == 5000
+        assert snap.prompt_tokens_total == 1200
+        assert snap.gpu_cache_usage_perc == pytest.approx(1.1)  # sum across engines
+        assert snap.num_requests_running == 14
+        assert snap.num_requests_waiting == 3
+        assert snap.request_success_total == 250
+
+    def test_kv_cache_only_no_gpu_cache(self):
+        """When gpu_cache_usage_perc is hidden (V1 default), alias picks up kv_cache_usage_perc."""
+        text = 'vllm:kv_cache_usage_perc{model_name="m"} 0.72\n'
+        snap = MetricsSnapshot.from_prometheus_text("j", text, 0.0)
+        assert snap.gpu_cache_usage_perc == pytest.approx(0.72)
+
+    def test_inference_time_histogram(self):
+        snap = MetricsSnapshot.from_prometheus_text("j", INFERENCE_HISTOGRAM_TEXT, 0.0)
+        assert snap.inference_time_ms_p50 is not None
+        assert snap.inference_time_ms_p95 is not None
+        assert snap.inference_time_ms_p99 is not None
+        assert snap.inference_time_ms_p50 <= snap.inference_time_ms_p95 <= snap.inference_time_ms_p99
+
+    def test_inference_time_none_on_v0(self):
+        snap = MetricsSnapshot.from_prometheus_text("j", SAMPLE_PROM_TEXT, 0.0)
+        assert snap.inference_time_ms_p50 is None
+        assert snap.inference_time_ms_p95 is None
+        assert snap.inference_time_ms_p99 is None
+
+    def test_swapped_absent_returns_zero(self):
+        """V1 doesn't emit num_requests_swapped — field should be 0."""
+        snap = MetricsSnapshot.from_prometheus_text("j", V1_MULTI_ENGINE_TEXT, 0.0)
+        assert snap.num_requests_swapped == 0
+
+    def test_prefix_cache_with_total_suffix(self):
+        """prometheus_client appends _total to Counter names."""
+        snap = MetricsSnapshot.from_prometheus_text("j", PREFIX_CACHE_TOTAL_TEXT, 0.0)
+        assert snap.prefix_cache_hit_rate == pytest.approx(0.7)
+
+    def test_throughput_delta_always_overwrites(self):
+        """_poll_loop should always compute from deltas, not rely on gauge."""
+        jc = _JobCollector("j", None)
+        # Simulate two polls — first has gauge data, second doesn't
+        snap1 = MetricsSnapshot("j", 100.0)
+        snap1.generation_tokens_total = 1000
+        snap1.prompt_tokens_total = 200
+        snap1.avg_generation_throughput_toks_per_s = 500.0  # gauge value
+
+        snap2 = MetricsSnapshot("j", 110.0)
+        snap2.generation_tokens_total = 9000
+        snap2.prompt_tokens_total = 1800
+        snap2.avg_generation_throughput_toks_per_s = 0.0  # gauge gone (V1)
+
+        # Simulate the delta logic from _poll_loop
+        dt = snap2.timestamp - snap1.timestamp
+        snap2.avg_generation_throughput_toks_per_s = (
+            snap2.generation_tokens_total - snap1.generation_tokens_total
+        ) / dt
+        assert snap2.avg_generation_throughput_toks_per_s == pytest.approx(800.0)

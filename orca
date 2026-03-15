@@ -713,11 +713,15 @@ def cmd_metrics(args):
                 sd = sr.json()
                 sus = sd.get("generation_toks_per_s", 0)
                 lines.append(f"{DIM}Sustained:{RESET}    {c(f'{sus:.0f}', GREEN+BOLD)} tok/s  {DIM}(60s avg){RESET}")
+                qp50 = sd.get("queue_time_ms_p50")
+                qp95 = sd.get("queue_time_ms_p95")
+                if qp50 is not None and qp95 is not None:
+                    lines.append(f"{DIM}Queue:{RESET}        p50 {qp50:.0f}ms  p95 {qp95:.0f}ms")
         except Exception:
             pass
         lines += [
             f"{DIM}KV Cache:{RESET}     {bar(kv / 100, 30)}",
-            f"{DIM}Running:{RESET}      {c(str(running), CYAN)}   {DIM}Waiting:{RESET} {waiting}   {DIM}Swapped:{RESET} {swapped}",
+            f"{DIM}Running:{RESET}      {c(str(running), CYAN)}   {DIM}Waiting:{RESET} {waiting}",
             f"{DIM}Completed:{RESET}    {done}",
         ]
         return box(lines, title="METRICS"), None
@@ -801,10 +805,16 @@ def cmd_inspect(args):
                               "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99"]),
         ("LATENCY (server)", ["ttft_server_ms_p50", "ttft_server_ms_p95", "ttft_server_ms_p99",
                               "e2e_server_ms_p50", "e2e_server_ms_p95", "e2e_server_ms_p99"]),
+        ("LATENCY (per-phase v0.10+)", ["queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
+                                        "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
+                                        "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+                                        "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+                                        "prefix_cache_hit_rate"]),
         ("GPU UTILIZATION", ["avg_sm_util_pct", "max_sm_util_pct", "avg_mem_bw_util_pct",
                              "max_mem_bw_util_pct", "avg_mem_util_pct", "max_mem_util_pct", "gpu_samples"]),
         ("SCHEDULER", ["running_avg", "running_max", "waiting_avg", "waiting_max",
-                       "kv_cache_util_pct_avg", "kv_cache_util_pct_max", "scheduler_samples", "num_preemptions"]),
+                       "kv_cache_util_pct_avg", "kv_cache_util_pct_max", "scheduler_samples",
+                       "num_preemptions", "prefix_cache_hit_rate"]),
         ("WORKLOAD", ["num_requests_total", "num_requests_completed", "total_tokens",
                       "total_input_tokens", "total_output_tokens",
                       "avg_input_tokens", "max_input_tokens", "avg_output_tokens", "max_output_tokens"]),
@@ -884,16 +894,15 @@ def cmd_timeseries(args):
     print()
 
     # Table header
-    hdr = f"  {'TIME':>8}  {'RUNNING':>7}  {'WAITING':>7}  {'SWAPPED':>7}  {'KV %':>6}  {'TOK/S':>7}"
+    hdr = f"  {'TIME':>8}  {'RUNNING':>7}  {'WAITING':>7}  {'KV %':>6}  {'TOK/S':>7}"
     print(f"  {hdr}")
-    print(f"  {'─'*8}  {'─'*7}  {'─'*7}  {'─'*7}  {'─'*6}  {'─'*7}")
+    print(f"  {'─'*8}  {'─'*7}  {'─'*7}  {'─'*6}  {'─'*7}")
 
     first_ts = ts_list[0].get("timestamp", 0)
     for row in ts_list:
         t = row.get("timestamp", 0) - first_ts
         running = row.get("num_requests_running", 0)
         waiting = row.get("num_requests_waiting", 0)
-        swapped = row.get("num_requests_swapped", 0)
         kv = row.get("gpu_cache_usage_perc", 0)
         if isinstance(kv, (int, float)):
             kv_pct = kv * 100 if kv <= 1.0 else kv
@@ -907,7 +916,7 @@ def cmd_timeseries(args):
         else:
             run_str = f"{running:>7}"
 
-        print(f"  {t:>7.0f}s  {run_str}  {waiting:>7}  {swapped:>7}  {kv_pct:>5.0f}%  {tps:>7.0f}")
+        print(f"  {t:>7.0f}s  {run_str}  {waiting:>7}  {kv_pct:>5.0f}%  {tps:>7.0f}")
 
     print()
 
@@ -921,8 +930,8 @@ def cmd_stream(args):
     step(f"Streaming metrics for: {c(job_id, CYAN+BOLD)} (Ctrl+C to stop)")
     print()
 
-    print(f"  {'TIME':>8}  {'GEN TOK/S':>9}  {'SUSTAINED':>9}  {'PROMPT TOK/S':>12}  {'RUN':>5}  {'WAIT':>5}  {'KV %':>6}  {'SUCCESS':>7}  {'PREEMPT':>7}")
-    print(f"  {'─'*8}  {'─'*9}  {'─'*9}  {'─'*12}  {'─'*5}  {'─'*5}  {'─'*6}  {'─'*7}  {'─'*7}")
+    print(f"  {'TIME':>8}  {'GEN TOK/S':>9}  {'SUSTAINED':>9}  {'PROMPT TOK/S':>12}  {'RUN':>5}  {'WAIT':>5}  {'KV %':>6}  {'QUEUE':>7}  {'SUCCESS':>7}  {'PREEMPT':>7}")
+    print(f"  {'─'*8}  {'─'*9}  {'─'*9}  {'─'*12}  {'─'*5}  {'─'*5}  {'─'*6}  {'─'*7}  {'─'*7}  {'─'*7}")
 
     import requests as _req
     url = f"{ORCA_SERVER}/job/{job_id}/metrics/stream"
@@ -960,8 +969,11 @@ def cmd_stream(args):
                 sus_tps = sus.get("generation_toks_per_s", 0)
                 sus_str = f"{sus_tps:>9.0f}" if sus else f"{'—':>9}"
 
+                qp95 = d.get("queue_time_ms_p95")
+                q_str = f"{qp95:>6.0f}ms" if qp95 is not None else f"{'—':>7}"
+
                 run_str = c(f"{run:>5}", GREEN) if run > 0 else f"{run:>5}"
-                print(f"  {t:>7.0f}s  {tps:>9.0f}  {sus_str}  {ptps:>12.0f}  {run_str}  {wait:>5}  {kv:>5.0f}%  {succ:>7.0f}  {pre:>7.0f}")
+                print(f"  {t:>7.0f}s  {tps:>9.0f}  {sus_str}  {ptps:>12.0f}  {run_str}  {wait:>5}  {kv:>5.0f}%  {q_str}  {succ:>7.0f}  {pre:>7.0f}")
 
     except KeyboardInterrupt:
         print(f"\n\n  {DIM}Stopped.{RESET}")
