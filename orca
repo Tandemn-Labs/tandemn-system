@@ -692,6 +692,214 @@ def cmd_metrics(args):
     print()
 
 
+def cmd_inspect(args):
+    """Show full details for a completed run."""
+    print(LOGO)
+    header("RUN DETAILS")
+
+    run_id = args.run_id
+
+    # If it looks like a job_id (mo-...), search by job_id
+    if run_id.startswith("mo-"):
+        resp = api("get", "/analytics/runs", params={"limit": 200}, timeout=10)
+        if resp.status_code != 200:
+            print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+            return
+        runs = resp.json().get("runs", [])
+        match = [r for r in runs if r.get("job_id") == run_id]
+        if not match:
+            print(f"\n  {RED}Run not found for job_id:{RESET} {run_id}\n")
+            return
+        run_id = str(match[0]["id"])
+
+    resp = api("get", f"/analytics/runs/{run_id}", timeout=10)
+    if resp.status_code == 404:
+        print(f"\n  {RED}Run {run_id} not found.{RESET}\n")
+        return
+    if resp.status_code != 200:
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        return
+
+    run = resp.json().get("run", {})
+
+    groups = [
+        ("IDENTITY", ["id", "job_id", "model_name", "model_architecture", "params_billion",
+                       "instance_type", "gpu_name", "gpu_model", "actual_region", "actual_market", "solver"]),
+        ("PARALLELISM", ["tp_size", "pp_size", "num_nodes", "gpus_per_node", "gpu_count_total"]),
+        ("TIMING", ["total_runtime_sec", "model_load_time_sec", "generation_time_sec"]),
+        ("THROUGHPUT", ["total_tokens_per_sec", "tokens_per_sec_per_gpu", "input_tokens_per_sec",
+                        "output_tokens_per_sec", "throughput_requests_per_sec"]),
+        ("LATENCY (client)", ["ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
+                              "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
+                              "tpot_client_ms_p50", "tpot_client_ms_p95", "tpot_client_ms_p99",
+                              "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99"]),
+        ("LATENCY (server)", ["ttft_server_ms_p50", "ttft_server_ms_p95", "ttft_server_ms_p99",
+                              "e2e_server_ms_p50", "e2e_server_ms_p95", "e2e_server_ms_p99"]),
+        ("GPU UTILIZATION", ["avg_sm_util_pct", "max_sm_util_pct", "avg_mem_bw_util_pct",
+                             "max_mem_bw_util_pct", "avg_mem_util_pct", "max_mem_util_pct", "gpu_samples"]),
+        ("SCHEDULER", ["running_avg", "running_max", "waiting_avg", "waiting_max",
+                       "kv_cache_util_pct_avg", "kv_cache_util_pct_max", "scheduler_samples", "num_preemptions"]),
+        ("WORKLOAD", ["num_requests_total", "num_requests_completed", "total_tokens",
+                      "total_input_tokens", "total_output_tokens",
+                      "avg_input_tokens", "max_input_tokens", "avg_output_tokens", "max_output_tokens"]),
+        ("COST", ["price_per_hour", "cost_for_run_usd", "tokens_per_dollar",
+                  "cost_per_1m_tokens_total", "cost_per_1m_tokens_prefill_usd", "cost_per_1m_tokens_decode_usd"]),
+        ("MODEL", ["vocab_size", "is_moe", "num_experts_active", "model_size_gb",
+                   "model_fits_single_gpu", "vram_headroom_gb", "attention_heads_per_kv_head", "kv_heads_per_tp"]),
+        ("HARDWARE", ["gpu_mem_gb", "gpu_bandwidth_gbps", "gpu_tflops_fp16", "gpu_generation",
+                      "interconnect", "bandwidth_per_param", "flops_per_param", "crosses_node_boundary"]),
+        ("ENGINE", ["max_model_len", "max_num_seqs", "gpu_memory_utilization", "dtype",
+                    "kv_cache_dtype", "precision", "runtime_stack"]),
+    ]
+
+    print()
+    populated = 0
+    total_fields = 0
+    for group_name, fields in groups:
+        lines = []
+        for f in fields:
+            v = run.get(f)
+            total_fields += 1
+            if v is None:
+                lines.append(f"{DIM}{f}:{RESET} {DIM}—{RESET}")
+            else:
+                populated += 1
+                if isinstance(v, float):
+                    if "pct" in f or "util" in f:
+                        lines.append(f"{DIM}{f}:{RESET} {c(f'{v:.1f}%', GREEN)}")
+                    elif "_ms_" in f:
+                        lines.append(f"{DIM}{f}:{RESET} {c(f'{v:.1f}ms', CYAN)}")
+                    elif "sec" in f:
+                        lines.append(f"{DIM}{f}:{RESET} {c(f'{v:.1f}s', WHITE)}")
+                    elif "usd" in f or "cost" in f or "price" in f:
+                        lines.append(f"{DIM}{f}:{RESET} {c(f'${v:.4f}', YELLOW)}")
+                    else:
+                        lines.append(f"{DIM}{f}:{RESET} {c(f'{v:.2f}', WHITE)}")
+                else:
+                    lines.append(f"{DIM}{f}:{RESET} {c(str(v), WHITE)}")
+        print(box(lines, title=group_name))
+        print()
+
+    print(f"  {BOLD}{populated}/{total_fields} fields populated{RESET}\n")
+
+
+def cmd_timeseries(args):
+    """Show scheduler timeseries for a completed run."""
+    print(LOGO)
+    header("TIMESERIES")
+
+    run_id = args.run_id
+
+    # Resolve job_id to run_id
+    if run_id.startswith("mo-"):
+        resp = api("get", "/analytics/runs", params={"limit": 200}, timeout=10)
+        runs = resp.json().get("runs", []) if resp.status_code == 200 else []
+        match = [r for r in runs if r.get("job_id") == run_id]
+        if not match:
+            print(f"\n  {RED}Run not found for job_id:{RESET} {run_id}\n")
+            return
+        run_id = str(match[0]["id"])
+
+    resp = api("get", f"/analytics/runs/{run_id}/timeseries", timeout=15)
+    if resp.status_code != 200:
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        return
+
+    data = resp.json()
+    ts_list = data.get("timeseries", [])
+    job_id = data.get("job_id", "?")
+
+    if not ts_list:
+        print(f"\n  {DIM}No timeseries data for run {run_id}.{RESET}\n")
+        return
+
+    print()
+    step(f"Job: {c(job_id, CYAN+BOLD)}  ({len(ts_list)} samples)")
+    print()
+
+    # Table header
+    hdr = f"  {'TIME':>8}  {'RUNNING':>7}  {'WAITING':>7}  {'SWAPPED':>7}  {'KV %':>6}  {'TOK/S':>7}"
+    print(f"  {hdr}")
+    print(f"  {'─'*8}  {'─'*7}  {'─'*7}  {'─'*7}  {'─'*6}  {'─'*7}")
+
+    first_ts = ts_list[0].get("timestamp", 0)
+    for row in ts_list:
+        t = row.get("timestamp", 0) - first_ts
+        running = row.get("num_requests_running", 0)
+        waiting = row.get("num_requests_waiting", 0)
+        swapped = row.get("num_requests_swapped", 0)
+        kv = row.get("gpu_cache_usage_perc", 0)
+        if isinstance(kv, (int, float)):
+            kv_pct = kv * 100 if kv <= 1.0 else kv
+        else:
+            kv_pct = 0
+        tps = row.get("avg_generation_throughput_toks_per_s", 0)
+
+        # Color running count
+        if running > 0:
+            run_str = c(f"{running:>7}", GREEN)
+        else:
+            run_str = f"{running:>7}"
+
+        print(f"  {t:>7.0f}s  {run_str}  {waiting:>7}  {swapped:>7}  {kv_pct:>5.0f}%  {tps:>7.0f}")
+
+    print()
+
+
+def cmd_stream(args):
+    """Stream live SSE metrics for a running job."""
+    print(LOGO)
+    header("LIVE STREAM")
+
+    job_id = args.job_id
+    step(f"Streaming metrics for: {c(job_id, CYAN+BOLD)} (Ctrl+C to stop)")
+    print()
+
+    print(f"  {'TIME':>8}  {'GEN TOK/S':>9}  {'PROMPT TOK/S':>12}  {'RUN':>5}  {'WAIT':>5}  {'KV %':>6}  {'SUCCESS':>7}  {'PREEMPT':>7}")
+    print(f"  {'─'*8}  {'─'*9}  {'─'*12}  {'─'*5}  {'─'*5}  {'─'*6}  {'─'*7}  {'─'*7}")
+
+    import requests as _req
+    url = f"{ORCA_SERVER}/job/{job_id}/metrics/stream"
+    try:
+        with _req.get(url, stream=True, timeout=600) as resp:
+            if resp.status_code != 200:
+                print(f"\n  {RED}Error:{RESET} {resp.status_code} {resp.text[:200]}\n")
+                return
+            start = time.time()
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if not data_str or data_str == "":
+                    continue
+                try:
+                    d = json.loads(data_str)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                if d.get("status") == "completed":
+                    print(f"\n  {GREEN}Job completed.{RESET}\n")
+                    return
+
+                t = time.time() - start
+                tps = d.get("avg_generation_throughput_toks_per_s", 0)
+                ptps = d.get("avg_prompt_throughput_toks_per_s", 0)
+                run = d.get("num_requests_running", 0)
+                wait = d.get("num_requests_waiting", 0)
+                kv = d.get("gpu_cache_usage_perc", 0) * 100
+                succ = d.get("request_success_total", 0)
+                pre = d.get("num_preemptions_total", 0)
+
+                run_str = c(f"{run:>5}", GREEN) if run > 0 else f"{run:>5}"
+                print(f"  {t:>7.0f}s  {tps:>9.0f}  {ptps:>12.0f}  {run_str}  {wait:>5}  {kv:>5.0f}%  {succ:>7.0f}  {pre:>7.0f}")
+
+    except KeyboardInterrupt:
+        print(f"\n\n  {DIM}Stopped.{RESET}")
+    except Exception as e:
+        print(f"\n  {RED}Connection error:{RESET} {e}\n")
+    print()
+
+
 def cmd_history(args):
     """Show completed run history from the analytics DB."""
     print(LOGO)
@@ -806,6 +1014,18 @@ Examples:
     p_history.add_argument("--gpu", help="Filter by GPU type (exact match, e.g. L40S)")
     p_history.add_argument("--limit", type=int, default=50, help="Max rows (default: 50)")
 
+    # inspect
+    p_inspect = subparsers.add_parser("inspect", help="Show full details for a completed run (all 117 fields)")
+    p_inspect.add_argument("run_id", help="Run ID (number) or job ID (mo-...)")
+
+    # timeseries
+    p_ts = subparsers.add_parser("timeseries", help="Show scheduler timeseries for a completed run")
+    p_ts.add_argument("run_id", help="Run ID (number) or job ID (mo-...)")
+
+    # stream
+    p_stream = subparsers.add_parser("stream", help="Stream live SSE metrics for a running job")
+    p_stream.add_argument("job_id", help="Job ID to stream")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -822,6 +1042,9 @@ Examples:
         "clusters": cmd_clusters,
         "metrics": cmd_metrics,
         "history": cmd_history,
+        "inspect": cmd_inspect,
+        "timeseries": cmd_timeseries,
+        "stream": cmd_stream,
     }
 
     commands[args.command](args)
