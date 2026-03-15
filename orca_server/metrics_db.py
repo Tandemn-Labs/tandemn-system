@@ -82,6 +82,11 @@ FLOAT_FIELDS: set[str] = {
     "bandwidth_per_param", "flops_per_param",
     "cost_per_1m_tokens_prefill_usd", "cost_per_1m_tokens_decode_usd",
     "gpu_bandwidth_gbps", "gpu_tflops_fp16",
+    "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
+    "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
+    "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+    "prefix_cache_hit_rate",
+    "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
 }
 
 _CREATE_RUNS = """
@@ -218,6 +223,11 @@ class MetricsDB:
         ("model_config_json", "TEXT"), ("bandwidth_per_param", "REAL"), ("flops_per_param", "REAL"),
         ("crosses_node_boundary", "INTEGER"), ("cost_per_1m_tokens_prefill_usd", "REAL"),
         ("cost_per_1m_tokens_decode_usd", "REAL"), ("kv_offload_target", "TEXT"),
+        ("queue_time_ms_p50", "REAL"), ("queue_time_ms_p95", "REAL"), ("queue_time_ms_p99", "REAL"),
+        ("prefill_time_ms_p50", "REAL"), ("prefill_time_ms_p95", "REAL"), ("prefill_time_ms_p99", "REAL"),
+        ("decode_time_ms_p50", "REAL"), ("decode_time_ms_p95", "REAL"), ("decode_time_ms_p99", "REAL"),
+        ("prefix_cache_hit_rate", "REAL"),
+        ("inference_time_ms_p50", "REAL"), ("inference_time_ms_p95", "REAL"), ("inference_time_ms_p99", "REAL"),
     ]
 
     def _init_schema(self) -> None:
@@ -293,6 +303,11 @@ class MetricsDB:
                 "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
                 "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
                 "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
+                "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
+                "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
+                "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+                "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+                "prefix_cache_hit_rate",
             ]:
                 if row.get(f) is None:
                     val = getattr(last_snapshot, f, None)

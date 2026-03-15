@@ -327,6 +327,25 @@ def sum_metric(
     return total
 
 
+_METRIC_ALIASES = {
+    "vllm:generation_tokens_total": "vllm:generation_tokens",
+    "vllm:prompt_tokens_total":     "vllm:prompt_tokens",
+    "vllm:request_success_total":   "vllm:request_success",
+    "vllm:num_preemptions_total":   "vllm:num_preemptions",
+    "vllm:gpu_cache_usage_perc":    "vllm:kv_cache_usage_perc",
+    "vllm:prefix_cache_queries_total": "vllm:prefix_cache_queries",
+    "vllm:prefix_cache_hits_total":    "vllm:prefix_cache_hits",
+}
+
+
+def sum_metric_compat(text: str, name: str, **kw) -> float:
+    """sum_metric with fallback to v0.10.0 metric names."""
+    val = sum_metric(text, name, **kw)
+    if val == 0.0 and name in _METRIC_ALIASES:
+        val = sum_metric(text, _METRIC_ALIASES[name], **kw)
+    return val
+
+
 def get_vllm_progress(
     endpoint_url: str, *, model_name: str | None = None
 ) -> tuple[int, int]:

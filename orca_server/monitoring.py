@@ -11,7 +11,7 @@ from typing import Generator
 
 import requests as _requests
 
-from orca_server.job_manager import METRIC_LINE_RE, parse_labels, sum_metric
+from orca_server.job_manager import METRIC_LINE_RE, parse_labels, sum_metric, sum_metric_compat
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,22 @@ class MetricsSnapshot:
     e2e_ms_p50: float | None = None
     e2e_ms_p95: float | None = None
     e2e_ms_p99: float | None = None
+    # Per-phase latency (vLLM v0.10.0+ only, None on v0)
+    queue_time_ms_p50: float | None = None
+    queue_time_ms_p95: float | None = None
+    queue_time_ms_p99: float | None = None
+    prefill_time_ms_p50: float | None = None
+    prefill_time_ms_p95: float | None = None
+    prefill_time_ms_p99: float | None = None
+    decode_time_ms_p50: float | None = None
+    decode_time_ms_p95: float | None = None
+    decode_time_ms_p99: float | None = None
+    # Inference time = total RUNNING phase (prefill + decode), V1 only
+    inference_time_ms_p50: float | None = None
+    inference_time_ms_p95: float | None = None
+    inference_time_ms_p99: float | None = None
+    # Prefix cache (vLLM v0.10.0+ only)
+    prefix_cache_hit_rate: float | None = None
 
     @classmethod
     def from_prometheus_text(cls, job_id: str, text: str, timestamp: float) -> "MetricsSnapshot":
@@ -97,14 +113,14 @@ class MetricsSnapshot:
             text, "vllm:avg_prompt_throughput_toks_per_s"
         )
         # Token counters (vLLM >=0.10 — used to compute throughput via deltas)
-        snap.generation_tokens_total = sum_metric(text, "vllm:generation_tokens_total")
-        snap.prompt_tokens_total = sum_metric(text, "vllm:prompt_tokens_total")
-        snap.gpu_cache_usage_perc = sum_metric(text, "vllm:gpu_cache_usage_perc")
+        snap.generation_tokens_total = sum_metric_compat(text, "vllm:generation_tokens_total")
+        snap.prompt_tokens_total = sum_metric_compat(text, "vllm:prompt_tokens_total")
+        snap.gpu_cache_usage_perc = sum_metric_compat(text, "vllm:gpu_cache_usage_perc")
         snap.num_requests_running = int(sum_metric(text, "vllm:num_requests_running"))
         snap.num_requests_waiting = int(sum_metric(text, "vllm:num_requests_waiting"))
         snap.num_requests_swapped = int(sum_metric(text, "vllm:num_requests_swapped"))
-        snap.request_success_total = sum_metric(text, "vllm:request_success_total")
-        snap.num_preemptions_total = sum_metric(text, "vllm:num_preemptions_total")
+        snap.request_success_total = sum_metric_compat(text, "vllm:request_success_total")
+        snap.num_preemptions_total = sum_metric_compat(text, "vllm:num_preemptions_total")
         # Latency histograms
         snap.ttft_ms_p50 = histogram_quantile(text, "vllm:time_to_first_token_seconds", 0.50)
         snap.ttft_ms_p95 = histogram_quantile(text, "vllm:time_to_first_token_seconds", 0.95)
@@ -115,6 +131,24 @@ class MetricsSnapshot:
         snap.e2e_ms_p50 = histogram_quantile(text, "vllm:e2e_request_latency_seconds", 0.50)
         snap.e2e_ms_p95 = histogram_quantile(text, "vllm:e2e_request_latency_seconds", 0.95)
         snap.e2e_ms_p99 = histogram_quantile(text, "vllm:e2e_request_latency_seconds", 0.99)
+        # Per-phase latency (vLLM v0.10.0+)
+        snap.queue_time_ms_p50 = histogram_quantile(text, "vllm:request_queue_time_seconds", 0.50)
+        snap.queue_time_ms_p95 = histogram_quantile(text, "vllm:request_queue_time_seconds", 0.95)
+        snap.queue_time_ms_p99 = histogram_quantile(text, "vllm:request_queue_time_seconds", 0.99)
+        snap.prefill_time_ms_p50 = histogram_quantile(text, "vllm:request_prefill_time_seconds", 0.50)
+        snap.prefill_time_ms_p95 = histogram_quantile(text, "vllm:request_prefill_time_seconds", 0.95)
+        snap.prefill_time_ms_p99 = histogram_quantile(text, "vllm:request_prefill_time_seconds", 0.99)
+        snap.decode_time_ms_p50 = histogram_quantile(text, "vllm:request_decode_time_seconds", 0.50)
+        snap.decode_time_ms_p95 = histogram_quantile(text, "vllm:request_decode_time_seconds", 0.95)
+        snap.decode_time_ms_p99 = histogram_quantile(text, "vllm:request_decode_time_seconds", 0.99)
+        # Inference time = total RUNNING phase (vLLM v0.10.0+)
+        snap.inference_time_ms_p50 = histogram_quantile(text, "vllm:request_inference_time_seconds", 0.50)
+        snap.inference_time_ms_p95 = histogram_quantile(text, "vllm:request_inference_time_seconds", 0.95)
+        snap.inference_time_ms_p99 = histogram_quantile(text, "vllm:request_inference_time_seconds", 0.99)
+        # Prefix cache hit rate (vLLM v0.10.0+)
+        queries = sum_metric_compat(text, "vllm:prefix_cache_queries_total")
+        hits = sum_metric_compat(text, "vllm:prefix_cache_hits_total")
+        snap.prefix_cache_hit_rate = round(hits / queries, 4) if queries > 0 else None
         return snap
 
     def to_dict(self) -> dict:
@@ -140,6 +174,19 @@ class MetricsSnapshot:
             "e2e_ms_p50": self.e2e_ms_p50,
             "e2e_ms_p95": self.e2e_ms_p95,
             "e2e_ms_p99": self.e2e_ms_p99,
+            "queue_time_ms_p50": self.queue_time_ms_p50,
+            "queue_time_ms_p95": self.queue_time_ms_p95,
+            "queue_time_ms_p99": self.queue_time_ms_p99,
+            "prefill_time_ms_p50": self.prefill_time_ms_p50,
+            "prefill_time_ms_p95": self.prefill_time_ms_p95,
+            "prefill_time_ms_p99": self.prefill_time_ms_p99,
+            "decode_time_ms_p50": self.decode_time_ms_p50,
+            "decode_time_ms_p95": self.decode_time_ms_p95,
+            "decode_time_ms_p99": self.decode_time_ms_p99,
+            "inference_time_ms_p50": self.inference_time_ms_p50,
+            "inference_time_ms_p95": self.inference_time_ms_p95,
+            "inference_time_ms_p99": self.inference_time_ms_p99,
+            "prefix_cache_hit_rate": self.prefix_cache_hit_rate,
         }
 
 
@@ -211,6 +258,9 @@ class _JobCollector:
             "generation_toks_per_s": round(gen_tps, 2),
             "prompt_toks_per_s": round(prompt_tps, 2),
             "window_actual_sec": round(dt, 2),
+            "kv_cache_usage_perc": current.gpu_cache_usage_perc,
+            "queue_time_ms_p50": current.queue_time_ms_p50,
+            "queue_time_ms_p95": current.queue_time_ms_p95,
         }
 
         if self._baseline_snap is not None:
@@ -236,9 +286,9 @@ class _JobCollector:
                 r.raise_for_status()
                 snap = MetricsSnapshot.from_prometheus_text(self.job_id, r.text, time.time())
 
-                # Compute throughput from counter deltas (vLLM >=0.10 removed the gauge)
-                # With VLLM_LOG_STATS_INTERVAL=1, counters flush every second
-                if snap.avg_generation_throughput_toks_per_s == 0 and _prev_snap is not None:
+                # Always compute throughput from counter deltas (more accurate than
+                # the gauge, which was a moving average removed in V1 anyway)
+                if _prev_snap is not None:
                     dt = snap.timestamp - _prev_snap.timestamp
                     if dt > 0:
                         snap.avg_generation_throughput_toks_per_s = (
