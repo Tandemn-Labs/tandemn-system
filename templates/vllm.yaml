@@ -25,7 +25,7 @@ file_mounts:
   /data:
     mode: MOUNT
     source: s3://tandemn_orca/test
-  ~/batch_runner.py: ./templates/vllm_batch_runner.py
+  ~/batch_runner.py: ./templates/vllm_batch_runner_server.py
   ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py
 
 setup: |
@@ -48,7 +48,7 @@ setup: |
   # This generic template is for L40S and other GPUs that work with vLLM 0.10.0
   # ========================================================================
   echo "=== Installing vLLM 0.10.0 ==="
-  uv pip install "vllm==0.10.0"
+  uv pip install "vllm==0.10.0" aiohttp pynvml
 
   # Verify PyTorch CUDA
   python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Available:', torch.cuda.is_available())"

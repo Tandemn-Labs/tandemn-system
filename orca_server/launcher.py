@@ -13,6 +13,8 @@ import yaml
 
 from orca_server.config import (
     HF_TOKEN,
+    ORCA_API_KEY,
+    ORCA_SERVER_URL,
     S3_MODEL_BUCKET,
     S3_MODEL_PREFIX,
     VLLM_PORT,
@@ -196,6 +198,9 @@ async def sp_launch_vllm_batch(
         yaml_data["resources"] = resources_config
         yaml_data["file_mounts"]["/data"]["source"] = s3_base
         yaml_data["envs"]["HF_TOKEN"] = hf_token
+        yaml_data["envs"]["ORCA_SERVER_URL"] = ORCA_SERVER_URL
+        yaml_data["envs"]["JOB_ID"] = config.decision_id
+        yaml_data["envs"]["ORCA_API_KEY"] = ORCA_API_KEY
 
         # Add S3 model weight mount if requested
         if request.s3_models:
@@ -223,6 +228,9 @@ async def sp_launch_vllm_batch(
             "run": run_string,
             "file_mounts./data.source": s3_base,
             "envs.HF_TOKEN": hf_token,
+            "envs.ORCA_SERVER_URL": ORCA_SERVER_URL,
+            "envs.JOB_ID": config.decision_id,
+            "envs.ORCA_API_KEY": ORCA_API_KEY,
         }
 
         # Add S3 model weight mount if requested
@@ -272,6 +280,23 @@ async def sp_launch_vllm_batch(
             get_job_tracker().update_progress(config.decision_id, 1.0)
             get_job_tracker().update_status(config.decision_id, "succeeded" if is_success else "failed")
 
+            if is_success:
+                from orca_server.monitoring import get_metrics_collector
+                from orca_server.metrics_db import get_metrics_db
+                last_snap = get_metrics_collector().get_latest(config.decision_id)
+                try:
+                    get_metrics_db().push_run(
+                        job_id=config.decision_id,
+                        metrics_csv_path=str(base_dir / "metrics.csv"),
+                        actual_region=actual_region,
+                        actual_market=actual_market,
+                        solver=solver,
+                        job_dirname=job_dirname,
+                        last_snapshot=last_snap,
+                    )
+                except Exception as db_err:
+                    job_logger.warning(f"[MetricsDB] Push failed: {db_err}")
+
             # Rename dir with success-/failed- prefix
             status = "success" if is_success else "failed"
             prefixed_dirname = prefix_job_dirname(job_dirname, status)
@@ -296,6 +321,8 @@ async def sp_launch_vllm_batch(
             elif not failed_dir.exists():
                 failed_dir.mkdir(parents=True, exist_ok=True)
         finally:
+            from orca_server.monitoring import get_metrics_collector
+            get_metrics_collector().stop_collecting(config.decision_id)
             if quota_tracker is not None:
                 quota_tracker.release_cluster(config.decision_id)
             cm.unregister(config.decision_id)
@@ -328,6 +355,10 @@ async def sp_launch_vllm_batch(
         head_ip = getattr(handle, 'head_ip', None)
         if head_ip:
             jt.set_head_ip(config.decision_id, head_ip)
+            from orca_server.monitoring import get_metrics_collector
+            endpoint_url = f"http://{head_ip}:{VLLM_PORT}"
+            jt.set_endpoint_url(config.decision_id, endpoint_url)
+            get_metrics_collector().start_collecting(config.decision_id, endpoint_url)
 
         # Stream logs in background and download when done
         threading.Thread(target=monitor_and_download, args=(job_id,), daemon=True).start()

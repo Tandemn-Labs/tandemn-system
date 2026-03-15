@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import math
 import uuid
@@ -9,19 +10,21 @@ import json
 from typing import Optional
 
 import sky
-from fastapi import FastAPI, Form, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Form, Header, UploadFile, File, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
 from orca_server.config import (
     CHUNK_SIZE_BYTES,
     INSTANCE_TO_GPU,
+    ORCA_API_KEY,
     PLACEMENT_PRIORITY,
     PLACEMENT_SOLVER,
     S3_UPLOAD_BUCKET,
     S3_UPLOAD_PREFIX,
 )
+from orca_server.monitoring import MetricsSnapshot
 from orca_server.input_parser import parse_input_file_stats
 from orca_server.job_manager import get_cluster_manager, get_job_tracker, jobtracker_snapshot
 from orca_server.launcher import (
@@ -69,6 +72,11 @@ async def lifespan(app: FastAPI):
 
     # Initialize quota tracker (replays persisted reservations from SQLite)
     app.state.quota_tracker = VPCQuotaTracker()
+
+    from orca_server.monitoring import get_metrics_collector
+    from orca_server.metrics_db import get_metrics_db
+    app.state.metrics_collector = get_metrics_collector()
+    app.state.metrics_db = get_metrics_db()
 
     # Reconcile stale reservations against live SkyPilot clusters
     try:
@@ -146,6 +154,136 @@ async def list_jobs():
             }
             for jid, rec in tracker.jobs.items()
         ]}
+
+
+@app.get("/job/{job_id}/metrics")
+async def get_job_metrics(job_id: str):
+    """Get latest live metrics snapshot for a running job."""
+    snap = app.state.metrics_collector.get_latest(job_id)
+    if snap is None:
+        raise HTTPException(404, f"No metrics for {job_id}")
+    return snap.to_dict()
+
+
+@app.get("/job/{job_id}/metrics/stream")
+async def stream_job_metrics(job_id: str):
+    """SSE stream of live metrics for a running job (1 event/sec)."""
+    async def _gen():
+        loop = asyncio.get_running_loop()
+        gen = app.state.metrics_collector.sse_generator(job_id)
+        while True:
+            try:
+                chunk = await loop.run_in_executor(None, next, gen)
+                yield chunk
+            except StopIteration:
+                break
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus exposition of live metrics for all active jobs."""
+    text = app.state.metrics_collector.prometheus_exposition()
+    return Response(content=text, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
+@app.post("/job/{job_id}/metrics/ingest")
+async def ingest_job_metrics(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Called by in-cluster sidecar every 5s with an accumulated batch of Prometheus snapshots."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = await request.json()
+    snapshots_raw = body.get("snapshots", [])
+
+    # Update progress bar if runner included done/total counts
+    done = body.get("done")
+    total = body.get("total")
+    if done is not None and total and total > 0:
+        from orca_server.job_manager import get_job_tracker
+        get_job_tracker().update_progress(job_id, done / total)
+
+    if not snapshots_raw:
+        return {"ok": True, "ingested": 0}
+
+    mc = app.state.metrics_collector
+    db = app.state.metrics_db
+
+    ingested = 0
+    batch_for_db = []
+
+    for item in snapshots_raw:
+        ts   = item.get("timestamp", time.time())
+        text = item.get("prometheus_text", "")
+        if not text.strip():
+            continue
+
+        snap = MetricsSnapshot.from_prometheus_text(job_id, text, ts)
+
+        # Write into ring buffer for live SSE / REST
+        with mc._lock:
+            jc = mc._jobs.get(job_id)
+        if jc:
+            with jc.lock:
+                jc.buffer.append(snap)
+                # Don't add to _unflushed — we persist directly below
+
+        batch_for_db.append(snap.to_dict())
+        ingested += 1
+
+    # Persist timeseries directly (sidecar already batched; skip 60s flush timer)
+    if batch_for_db:
+        try:
+            db.append_timeseries(job_id, batch_for_db)
+        except Exception as e:
+            logger.warning("[Ingest] timeseries write failed for %s: %s", job_id, e)
+
+    return {"ok": True, "ingested": ingested}
+
+
+@app.get("/analytics/runs")
+async def list_analytics_runs(
+    model: Optional[str] = None,
+    gpu: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List completed runs with optional model/gpu filters."""
+    runs = app.state.metrics_db.list_runs(
+        model=model, gpu=gpu, limit=min(limit, 200), offset=offset
+    )
+    return {"status": "success", "count": len(runs), "runs": runs}
+
+
+@app.get("/analytics/runs/{run_id}")
+async def get_analytics_run(run_id: int):
+    """Get a single completed run by DB ID."""
+    run = app.state.metrics_db.get_run(run_id)
+    if run is None:
+        raise HTTPException(404, f"Run {run_id} not found")
+    return {"status": "success", "run": run}
+
+
+@app.get("/analytics/runs/{run_id}/timeseries")
+async def get_run_timeseries(
+    run_id: int,
+    start: Optional[float] = None,
+    end: Optional[float] = None,
+):
+    """Full timeseries for a completed run. Supports optional unix timestamp range."""
+    run = app.state.metrics_db.get_run(run_id)
+    if run is None:
+        raise HTTPException(404, f"Run {run_id} not found")
+    ts = app.state.metrics_db.get_timeseries(run["job_id"], start=start, end=end)
+    return {"status": "success", "job_id": run["job_id"], "count": len(ts), "timeseries": ts}
 
 
 # A: Stats on input file computed instead of from request
