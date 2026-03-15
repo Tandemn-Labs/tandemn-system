@@ -152,6 +152,8 @@ class _JobCollector:
         self.lock = threading.Lock()
         self._stop_event = threading.Event()
         self._poll = endpoint_url is not None
+        self._baseline_snap: MetricsSnapshot | None = None
+        self._baseline_time: float | None = None
         if self._poll:
             self._thread = threading.Thread(
                 target=self._poll_loop,
@@ -175,6 +177,54 @@ class _JobCollector:
     def latest(self) -> MetricsSnapshot | None:
         with self.lock:
             return self.buffer[-1] if self.buffer else None
+
+    def set_baseline(self) -> None:
+        with self.lock:
+            if self.buffer:
+                self._baseline_snap = self.buffer[-1]
+                self._baseline_time = self._baseline_snap.timestamp
+            else:
+                self._baseline_time = time.time()
+
+    def get_sustained_throughput(self, window_sec: float = 60.0) -> dict | None:
+        with self.lock:
+            if len(self.buffer) < 2:
+                return None
+            current = self.buffer[-1]
+            earliest_allowed = self._baseline_time or self.buffer[0].timestamp
+            window_start = max(current.timestamp - window_sec, earliest_allowed)
+            oldest = None
+            for snap in self.buffer:
+                if snap.timestamp >= window_start:
+                    oldest = snap
+                    break
+            if oldest is None or oldest is current:
+                return None
+            dt = current.timestamp - oldest.timestamp
+            if dt < 1.0:
+                return None
+
+        gen_tps = (current.generation_tokens_total - oldest.generation_tokens_total) / dt
+        prompt_tps = (current.prompt_tokens_total - oldest.prompt_tokens_total) / dt
+
+        result = {
+            "generation_toks_per_s": round(gen_tps, 2),
+            "prompt_toks_per_s": round(prompt_tps, 2),
+            "window_actual_sec": round(dt, 2),
+        }
+
+        if self._baseline_snap is not None:
+            epoch_dt = current.timestamp - self._baseline_snap.timestamp
+            if epoch_dt > 1.0:
+                result["epoch_generation_toks_per_s"] = round(
+                    (current.generation_tokens_total - self._baseline_snap.generation_tokens_total) / epoch_dt, 2
+                )
+                result["epoch_prompt_toks_per_s"] = round(
+                    (current.prompt_tokens_total - self._baseline_snap.prompt_tokens_total) / epoch_dt, 2
+                )
+                result["since_baseline_sec"] = round(epoch_dt, 2)
+
+        return result
 
     def _poll_loop(self) -> None:
         last_flush = time.time()
@@ -282,6 +332,17 @@ class MetricsCollector:
             snaps = list(jc.buffer)[-n:]
         return [s.to_dict() for s in snaps]
 
+    def set_baseline(self, job_id: str) -> None:
+        with self._lock:
+            jc = self._jobs.get(job_id)
+        if jc:
+            jc.set_baseline()
+
+    def get_sustained_throughput(self, job_id: str, window_sec: float = 60.0) -> dict | None:
+        with self._lock:
+            jc = self._jobs.get(job_id)
+        return jc.get_sustained_throughput(window_sec) if jc else None
+
     def active_job_ids(self) -> list[str]:
         with self._lock:
             return list(self._jobs.keys())
@@ -337,7 +398,11 @@ class MetricsCollector:
                 still_active = job_id in self._jobs
             snap = self.get_latest(job_id)
             if snap:
-                yield f"data: {json.dumps(snap.to_dict())}\n\n"
+                data = snap.to_dict()
+                sustained = self.get_sustained_throughput(job_id)
+                if sustained:
+                    data["sustained"] = sustained
+                yield f"data: {json.dumps(data)}\n\n"
             elif not still_active:
                 yield f"data: {json.dumps({'status': 'completed'})}\n\n"
                 return
