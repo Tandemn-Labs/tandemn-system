@@ -50,6 +50,7 @@ INT_FIELDS: set[str] = {
     "vocab_size", "num_experts_active",
     "is_moe", "model_fits_single_gpu",
     "is_lmcache", "is_continuous_batching", "spec_decode", "cuda_graphs",
+    "crosses_node_boundary",
     "gpu_samples", "scheduler_samples",
 }
 
@@ -76,7 +77,10 @@ FLOAT_FIELDS: set[str] = {
     "running_avg", "running_max", "waiting_avg", "waiting_max",
     "swapped_avg", "swapped_max",
     "kv_cache_util_pct_avg", "kv_cache_util_pct_max",
-    "model_size_gb", "vram_headroom_gb",
+    "model_size_gb", "vram_headroom_gb", "params_per_gpu",
+    "attention_heads_per_kv_head", "kv_heads_per_tp",
+    "bandwidth_per_param", "flops_per_param",
+    "cost_per_1m_tokens_prefill_usd", "cost_per_1m_tokens_decode_usd",
     "gpu_bandwidth_gbps", "gpu_tflops_fp16",
 }
 
@@ -152,12 +156,26 @@ CREATE TABLE IF NOT EXISTS runs (
     model_size_gb REAL,
     model_fits_single_gpu INTEGER,
     vram_headroom_gb REAL,
+    params_per_gpu REAL,
+    attention_heads_per_kv_head REAL,
+    kv_heads_per_tp REAL,
+    model_config_json TEXT,
+
+    -- Derived (hardware efficiency)
+    bandwidth_per_param REAL,
+    flops_per_param REAL,
+    crosses_node_boundary INTEGER,
+
+    -- Derived (prefill/decode cost)
+    cost_per_1m_tokens_prefill_usd REAL,
+    cost_per_1m_tokens_decode_usd REAL,
 
     -- Feature flags
     is_lmcache INTEGER DEFAULT 0,
     is_continuous_batching INTEGER DEFAULT 1,
     spec_decode INTEGER DEFAULT 0,
     cuda_graphs INTEGER DEFAULT 1,
+    kv_offload_target TEXT,
 
     -- Raw metrics dump
     raw_metrics TEXT,
