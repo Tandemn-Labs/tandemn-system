@@ -27,6 +27,7 @@ from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.magic import VPCMagic
 from orca_server.config import AWS_INSTANCE_TO_GPU
+from orca_server.utils import make_job_id as _make_job_id
 from utils.utils import load_aws_quota_csv
 
 logger = logging.getLogger(__name__)
@@ -489,7 +490,7 @@ class RooflineAWSAllocation(VPCMagic):
         # num_nodes = num_instances * replicas (solver computes instances_needed correctly)
         data_parallel_replicas = max(1, result.num_instances // result.pp_stages)
         return MagicOutput(
-            decision_id=f"gangmuk-{uuid.uuid4()}",
+            decision_id=_make_job_id(req.model_name),
             engine=req.engine or "vllm",
             instance_type=result.instance_family,
             replicas=data_parallel_replicas,
@@ -510,7 +511,7 @@ class RooflineAWSAllocation(VPCMagic):
             MagicOutput with conservative defaults
         """
         return MagicOutput(
-            decision_id=f"gangmuk-{uuid.uuid4()}",
+            decision_id=_make_job_id(req.model_name),
             engine=req.engine or "vllm",
             instance_type="g6e.12xlarge",
             replicas=1,
@@ -530,7 +531,7 @@ class RooflineAWSAllocation(VPCMagic):
             MagicOutput with online serving defaults
         """
         return MagicOutput(
-            decision_id=f"gangmuk-{uuid.uuid4()}",
+            decision_id=_make_job_id(req.model_name),
             engine=req.engine or "vllm",
             instance_type="g6e.12xlarge",
             replicas=1,
@@ -621,14 +622,10 @@ class RooflineAWSAllocation(VPCMagic):
 
         # Convert to MagicOutput list
         outputs = []
-        decision_id_base = f"gangmuk-{uuid.uuid4()}"
-
         for i, result in enumerate(results):
             data_parallel_replicas = max(1, result.num_instances // result.pp_stages)
             output = MagicOutput(
-                decision_id=f"{decision_id_base}-opt{i + 1}"
-                if i > 0
-                else decision_id_base,
+                decision_id=_make_job_id(req.model_name),
                 engine=req.engine or "vllm",
                 instance_type=result.instance_family,
                 replicas=data_parallel_replicas,

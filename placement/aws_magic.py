@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import uuid
 
 from models.resources import MagicOutput
+from orca_server.utils import make_job_id as _make_job_id
 import pandas as pd
 
 from openai import OpenAI
@@ -77,7 +78,7 @@ class AWSAllocation(VPCMagic):
         if isinstance(request, BatchedRequest):
             candidate = self.process_batch(request)
             return MagicOutput(
-                decision_id=f"mo-{uuid.uuid4()}",
+                decision_id=_make_job_id(request.model_name),
                 engine="vllm",
                 instance_type=candidate.instance_type,
                 tp_size=candidate.tp,
