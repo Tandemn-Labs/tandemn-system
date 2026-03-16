@@ -700,18 +700,32 @@ def cmd_progress(args):
                 except Exception:
                     pass
 
+                # Try to get chunk-level progress for chunked jobs
+                chunk_line = ""
+                try:
+                    cr = api("get", f"/job/{job_id}/chunks/progress", timeout=2)
+                    if cr.status_code == 200:
+                        cp = cr.json()
+                        cp_total = cp.get("total", 0)
+                        cp_done = cp.get("completed", 0)
+                        cp_inflight = cp.get("inflight", 0)
+                        if cp_total > 0:
+                            chunk_line = f"{GREEN}{cp_done}{RESET}/{cp_total} chunks  {CYAN}{cp_inflight}{RESET} in-flight"
+                except Exception:
+                    pass
+
                 if status in ("succeeded", "failed"):
-                    # Final line: show completion bar
                     done_count = int(progress * total) if isinstance(total, int) else total
                     sys.stdout.write(f"\r  {bar(progress, 50)}  {done_count}/{total}  [{status}]")
-                    sys.stdout.write(f"\n  {DIM}{metrics_line}{RESET}  " if metrics_line else "")
+                    extra = f"  {chunk_line}" if chunk_line else ""
+                    sys.stdout.write(f"\n  {DIM}{metrics_line}{extra}{RESET}  " if metrics_line or chunk_line else "")
                     sys.stdout.flush()
                     break
 
                 if running > 0 or status == "generating":
-                    # During generation: show progress bar based on done/total
                     done_frac = done_reqs / total if isinstance(total, int) and total > 0 else 0
-                    sys.stdout.write(f"\r  {bar(done_frac, 50)}  {done_reqs}/{total} done  {running} in-flight  [{c(status, GREEN)}]  ")
+                    chunk_info = f"  {chunk_line}" if chunk_line else ""
+                    sys.stdout.write(f"\r  {bar(done_frac, 50)}  {done_reqs}/{total} done  {running} in-flight{chunk_info}  [{c(status, GREEN)}]  ")
                     sys.stdout.write(f"\n  {DIM}{metrics_line}{RESET}  \033[1A")
                 else:
                     # Show current phase
