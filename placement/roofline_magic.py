@@ -498,6 +498,9 @@ class RooflineAWSAllocation(VPCMagic):
             pp_size=result.pp_stages,
             max_model_len=result.max_supported_context,
             num_instances=result.num_instances,
+            throughput_tokens_per_sec=result.throughput_tokens_per_sec,
+            cost_per_hour=result.cost_per_hour,
+            cost_per_million_tokens=result.cost_per_million_tokens,
         )
 
     def _fallback_config(self, req: BatchedRequest) -> MagicOutput:
@@ -633,6 +636,9 @@ class RooflineAWSAllocation(VPCMagic):
                 pp_size=result.pp_stages,
                 max_model_len=result.max_supported_context,
                 num_instances=result.num_instances,
+                throughput_tokens_per_sec=result.throughput_tokens_per_sec,
+                cost_per_hour=result.cost_per_hour,
+                cost_per_million_tokens=result.cost_per_million_tokens,
             )
             outputs.append(output)
             logger.info(

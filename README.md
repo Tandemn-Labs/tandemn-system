@@ -69,7 +69,7 @@ orca plan   <model> <input>     Show placement plan without launching
 Options for `deploy` and `plan`:
 
 ```
---slo <hours>           Deadline in hours (default: 4)
+--slo <hours>           Deadline: plain hours (4), fractional (0.5h), or minutes (30m) (default: 4)
 --max-output-tokens N   Max tokens per response (default: 1024)
 --gpu <type>            Override GPU type (e.g. A100, L40S, H100)
 --tp / --pp             Override tensor / pipeline parallelism

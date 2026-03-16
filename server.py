@@ -561,23 +561,27 @@ async def test_placement(request: BatchedRequest):
     Accepts the same BatchedRequest as /submit/batch but only runs the solver
     and returns the placement decision(s) with performance/cost estimates.
     """
-    # Download S3 input if needed, then parse local file for stats
-    local_input, tmp_cleanup = await _resolve_input_file(request.input_file)
-    try:
-        num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
-            local_input, model_name=request.model_name
+    # If the client already sent parsed stats, skip the S3 download entirely
+    if request.num_lines is not None and request.avg_input_tokens is not None and request.max_input_tokens is not None:
+        num_lines = request.num_lines
+        avg_input_tokens = request.avg_input_tokens
+        max_input_tokens = request.max_input_tokens
+    else:
+        local_input, tmp_cleanup = await _resolve_input_file(request.input_file)
+        try:
+            num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
+                local_input, model_name=request.model_name
+            )
+        finally:
+            if tmp_cleanup:
+                os.unlink(tmp_cleanup)
+        request = request.model_copy(
+            update={
+                "num_lines": num_lines,
+                "avg_input_tokens": avg_input_tokens,
+                "max_input_tokens": max_input_tokens,
+            }
         )
-    finally:
-        if tmp_cleanup:
-            os.unlink(tmp_cleanup)
-
-    request = request.model_copy(
-        update={
-            "num_lines": num_lines,
-            "avg_input_tokens": avg_input_tokens,
-            "max_input_tokens": max_input_tokens,
-        }
-    )
 
     use_solver = request.placement_solver or PLACEMENT_SOLVER
     solver_log = ""
@@ -654,16 +658,21 @@ async def test_placement(request: BatchedRequest):
 
         configs = []
         for mo in magic_outputs:
-            configs.append(
-                {
-                    "instance_type": mo.instance_type,
-                    "gpu_type": INSTANCE_TO_GPU.get(mo.instance_type, "unknown"),
-                    "tp_size": mo.tp_size,
-                    "pp_size": mo.pp_size,
-                    "num_instances": mo.num_instances or mo.num_nodes,
-                    "max_model_len": mo.max_model_len,
-                }
-            )
+            cfg = {
+                "instance_type": mo.instance_type,
+                "gpu_type": INSTANCE_TO_GPU.get(mo.instance_type, "unknown"),
+                "tp_size": mo.tp_size,
+                "pp_size": mo.pp_size,
+                "num_instances": mo.num_instances or mo.num_nodes,
+                "max_model_len": mo.max_model_len,
+            }
+            if mo.throughput_tokens_per_sec is not None:
+                cfg["throughput_tokens_per_sec"] = mo.throughput_tokens_per_sec
+            if mo.cost_per_hour is not None:
+                cfg["cost_per_hour"] = mo.cost_per_hour
+            if mo.cost_per_million_tokens is not None:
+                cfg["cost_per_million_tokens"] = mo.cost_per_million_tokens
+            configs.append(cfg)
     else:
         return {
             "status": "error",
