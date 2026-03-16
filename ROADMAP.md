@@ -12,7 +12,7 @@ The big one. Today, a single vLLM replica processes the entire input file sequen
 
 - **CLI-side chunking.** The CLI detects large input files, splits them into chunks (1000 lines each), uploads each chunk to S3, and populates a Redis queue on the control plane with chunk IDs.
 - **Replica pull model.** Each vLLM replica pulls its next chunk from the Redis queue. Two chunks are present on a replica at any time: one actively running, one in a prefetch buffer. The gap between chunk transitions should be near-zero.
-- **Rate-limited injection.** When a chunk arrives at a replica, it does not blast all requests into vLLM at once. Instead, it reads `max_num_seqs` from the vLLM server config and sustains exactly that many concurrent requests. At any time `t`, the vLLM server should have `max_num_seqs` in-flight requests (currently hardcoded to 256) as long as work remains.
+- **Rate-limited injection.** When a chunk arrives at a replica, it does not blast all requests into vLLM at once. Instead, it reads `max_concurrency` from vLLM's KV cache config (`get_max_concurrency_for_kv_cache_config` in vLLM V1) and sustains exactly that many concurrent requests. `max_concurrency = num_kv_cache_blocks / blocks_per_request` — it reflects how many requests can be served simultaneously given available KV cache memory and `max_model_len`. At any time `t`, the vLLM server should have `max_concurrency` in-flight requests as long as work remains. This is more accurate than `max_num_seqs` (a scheduler cap), since `max_concurrency` is derived from actual memory availability.
 
 ### Fault Tolerance
 
