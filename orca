@@ -22,6 +22,14 @@ Examples:
 """
 import argparse
 import json
+
+def _hours(value):
+    """Accept '4', '0.5', '0.1h', '2h', '30m', '90m' as hours."""
+    s = str(value).strip()
+    if s.lower().endswith("m"):
+        return float(s[:-1]) / 60
+    return float(s.rstrip("hH"))
+
 import os
 import re
 import sys
@@ -376,22 +384,16 @@ def cmd_plan(args):
         ]
         print(box(lines, title="WORKLOAD"))
 
-    # Upload input so server can parse it
     print()
-    if input_file.startswith("s3://"):
-        s3_input = input_file
-    else:
-        step("Uploading input file to storage...")
-        s3_input = upload_to_server(input_file)
-        step(f"Uploaded to {c(s3_input, DIM)}")
-
     step("Running Orca placement solver...")
     t0 = time.time()
 
+    # For plan, send locally-parsed stats directly — no S3 upload needed
+    # (the file only needs to be in S3 for deploy, where the EC2 node fetches it)
     payload = {
         "placement_solver": "user_specified" if args.gpu else "roofline",
         "user_id": "orca-cli",
-        "input_file": s3_input,
+        "input_file": input_file if input_file.startswith("s3://") else "s3://plan-dry-run/placeholder",
         "output_file": "output.jsonl",
         "avg_output_tokens": args.max_output_tokens,
         "max_output_tokens": args.max_output_tokens,
@@ -405,6 +407,11 @@ def cmd_plan(args):
         "placement": "aws",
         "log_level": args.log_level,
     }
+    # Inject locally-parsed stats so server skips the S3 download
+    if not is_s3:
+        payload["num_lines"] = stats["num_lines"]
+        payload["avg_input_tokens"] = stats["avg_input_tokens"]
+        payload["max_input_tokens"] = stats["max_input_tokens"]
 
     if args.gpu:
         payload["gpu_type"] = args.gpu
@@ -446,10 +453,10 @@ def cmd_plan(args):
             ]
             tps = cfg.get("throughput_tokens_per_sec")
             if tps:
-                lines.append(f"{DIM}Throughput:{RESET}  {c(f'{tps:.0f}', GREEN)} tok/s")
+                lines.append(f"{DIM}Est. tput:{RESET}   {c(f'{tps:.0f}', GREEN)} tok/s")
             cph = cfg.get("cost_per_hour")
             if cph:
-                lines.append(f"{DIM}Cost:{RESET}        ${cph:.2f}/hr")
+                lines.append(f"{DIM}Est. cost:{RESET}   ${cph:.2f}/hr {DIM}(on-demand){RESET}")
             if cfg.get("quota_warning"):
                 lines.append(f"{YELLOW}Quota:{RESET}       {cfg['quota_warning']}")
             print(box(lines, title="FEASIBILITY CHECK"))
@@ -487,10 +494,10 @@ def cmd_plan(args):
         ]
         tps = cfg.get("throughput_tokens_per_sec")
         if tps:
-            lines.append(f"{DIM}Throughput:{RESET}  {c(f'{tps:.0f}', GREEN)} tok/s")
+            lines.append(f"{DIM}Est. tput:{RESET}   {c(f'{tps:.0f}', GREEN)} tok/s")
         cph = cfg.get("cost_per_hour")
         if cph:
-            lines.append(f"{DIM}Cost:{RESET}        ${cph:.2f}/hr")
+            lines.append(f"{DIM}Est. cost:{RESET}   ${cph:.2f}/hr {DIM}(on-demand){RESET}")
         print(box(lines, title=f"CONFIG {rank_label}"))
         print()
 
@@ -1068,7 +1075,7 @@ Examples:
     p_deploy = subparsers.add_parser("deploy", help="Deploy a model for batch inference")
     p_deploy.add_argument("model_name", help="Model name (e.g., Qwen/Qwen3-32B)")
     p_deploy.add_argument("input_file", help="Path to JSONL batch file (local or s3://)")
-    p_deploy.add_argument("--slo", type=int, default=4, help="SLO deadline in hours (default: 4)")
+    p_deploy.add_argument("--slo", type=_hours, default=4, help="SLO deadline in hours, e.g. 4, 0.5h, 30m (default: 4)")
     p_deploy.add_argument("--max-output-tokens", type=int, default=1024, help="Max output tokens per request")
     p_deploy.add_argument("--output", "-o", help="Output file name (default: output.jsonl)")
     p_deploy.add_argument("--gpu", help="GPU type (e.g., L40S, A100, H100). Triggers user_specified solver.")
@@ -1083,7 +1090,7 @@ Examples:
     p_plan = subparsers.add_parser("plan", help="Run solver and show placement plan (no launch)")
     p_plan.add_argument("model_name", help="Model name (e.g., Qwen/Qwen3-32B)")
     p_plan.add_argument("input_file", help="Path to JSONL batch file (local or s3://)")
-    p_plan.add_argument("--slo", type=int, default=4, help="SLO deadline in hours (default: 4)")
+    p_plan.add_argument("--slo", type=_hours, default=4, help="SLO deadline in hours, e.g. 4, 0.5h, 30m (default: 4)")
     p_plan.add_argument("--max-output-tokens", type=int, default=1024, help="Max output tokens per request")
     p_plan.add_argument("--verbose", "-v", action="store_true", help="Show full solver log")
     p_plan.add_argument("--gpu", help="GPU type (e.g., L40S, A100, H100). Triggers user_specified solver.")

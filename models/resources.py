@@ -12,6 +12,10 @@ class MagicOutput(BaseModel):
     replicas: int
     max_model_len: Optional[int] = None  # Max context length for vLLM --max-model-len
     num_instances: Optional[int] = None  # Total instances needed (from solver). Overrides pp_size*replicas when set.
+    # Solver estimates (populated by roofline solver, None for fallback/user_specified)
+    throughput_tokens_per_sec: Optional[float] = None
+    cost_per_hour: Optional[float] = None
+    cost_per_million_tokens: Optional[float] = None
 
     @property
     def num_nodes(self) -> int:
