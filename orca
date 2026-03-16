@@ -75,19 +75,20 @@ def spinner(message, stop_event):
         f"{CYAN}~~~{BOLD}><(((o>{RESET}",
         f"{CYAN}~{BOLD}><(((o>{RESET}~",
     ]
-    width = 40
+    fish_len = 8  # visible length of ><(((o>
+    width = 30
     pos = 0
     frame = 0
     try:
         while not stop_event.is_set():
             orca = orca_frames[frame % len(orca_frames)]
-            # Orca swims left to right then wraps
             pad_left = pos % width
-            pad_right = max(0, width - pad_left - 10)
+            pad_right = max(0, width - pad_left - fish_len)
             water_left = f"{DIM}{'~' * pad_left}{RESET}"
             water_right = f"{DIM}{'~' * pad_right}{RESET}"
-            line = f"\r  {water_left}{orca}{water_right} {DIM}{message}{RESET}  "
-            sys.stdout.write(line)
+            line = f"\r  {water_left}{orca}{water_right} {DIM}{message}{RESET}"
+            # Overwrite any trailing chars from previous longer lines
+            sys.stdout.write(line + "    ")
             sys.stdout.flush()
             pos += 1
             frame += 1
@@ -245,9 +246,12 @@ def cmd_deploy(args):
         s3_input = upload_to_server(input_file)
         step(f"Uploaded to {c(s3_input, DIM)}")
 
-    # ── Phase 3: Submit to server ─────────────────────────────────────────
+    # ── Phase 3: Solve + Submit ───────────────────────────────────────────
     print()
-    step("Submitting job to Orca server...")
+    if args.gpu:
+        step(f"Running feasibility check: {c(args.gpu, CYAN)} TP={args.tp or 1} PP={args.pp or 1}...")
+    else:
+        step("Running placement solver...")
     payload = {
         "placement_solver": "user_specified" if args.gpu else "roofline",
         "user_id": "orca-cli",
@@ -279,7 +283,7 @@ def cmd_deploy(args):
             payload["force"] = True
 
     resp = api_with_spinner("post", "/submit/batch",
-                            message="Launching cluster...", json=payload)
+                            message="Solving placement + launching cluster...", json=payload)
     if resp.status_code not in (200, 201):
         print(f"\n  {RED}Server error ({resp.status_code}):{RESET} {resp.text}\n")
         sys.exit(1)
@@ -312,13 +316,19 @@ def cmd_deploy(args):
     if data.get("status") == "launched":
         job_id = data["job_id"]
         cfg = data.get("config", {})
+        solver_info = data.get("feasibility") or data.get("solver_info") or {}
+        sol = solver_info.get("solution") or {}
         success_lines = [
             f"{GREEN}{BOLD}Job launched successfully!{RESET}",
             f"",
             f"{DIM}Job ID:{RESET}    {c(job_id, CYAN+BOLD)}",
             f"{DIM}Instance:{RESET}  {cfg.get('instance_type', '?')}",
-            f"{DIM}Config:{RESET}   TP={cfg.get('tp_size', '?')} PP={cfg.get('pp_size', '?')}",
+            f"{DIM}Config:{RESET}    TP={cfg.get('tp_size', '?')} PP={cfg.get('pp_size', '?')}",
         ]
+        if sol.get("throughput_tokens_per_sec"):
+            success_lines.append(f"{DIM}Est. tps:{RESET}  {sol['throughput_tokens_per_sec']:.0f} tok/s")
+        if solver_info.get("max_model_len"):
+            success_lines.append(f"{DIM}Max ctx:{RESET}   {solver_info['max_model_len']}")
         if data.get("quota_warning"):
             success_lines.append(f"")
             success_lines.append(f"{YELLOW}Quota:{RESET}    {data['quota_warning']}")
@@ -841,11 +851,18 @@ def cmd_inspect(args):
             else:
                 populated += 1
                 if isinstance(v, float):
-                    if "pct" in f or "util" in f:
+                    if "per_sec" in f or "per_dollar" in f or "per_hour" in f:
+                        # Rate fields — no unit suffix
+                        lines.append(f"{DIM}{f}:{RESET} {c(f'{v:.1f}', WHITE)}")
+                    elif "pct" in f:
                         lines.append(f"{DIM}{f}:{RESET} {c(f'{v:.1f}%', GREEN)}")
+                    elif f == "gpu_memory_utilization":
+                        lines.append(f"{DIM}{f}:{RESET} {c(f'{v * 100:.0f}%', GREEN)}")
+                    elif "util" in f and v <= 1.0:
+                        lines.append(f"{DIM}{f}:{RESET} {c(f'{v * 100:.1f}%', GREEN)}")
                     elif "_ms_" in f:
                         lines.append(f"{DIM}{f}:{RESET} {c(f'{v:.1f}ms', CYAN)}")
-                    elif "sec" in f:
+                    elif "_sec" in f or f.endswith("_sec"):
                         lines.append(f"{DIM}{f}:{RESET} {c(f'{v:.1f}s', WHITE)}")
                     elif "usd" in f or "cost" in f or "price" in f:
                         lines.append(f"{DIM}{f}:{RESET} {c(f'${v:.4f}', YELLOW)}")
