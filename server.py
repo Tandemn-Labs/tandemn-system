@@ -48,6 +48,9 @@ from orca_server.job_templates import real_magic
 from quota.tracker import VPCQuotaTracker
 
 
+from orca_server.utils import make_job_id as _make_job_id
+
+
 async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:
     """If input_file is an S3 URI, download via storage backend to a temp file.
 
@@ -441,7 +444,7 @@ async def submit_batch(request: BatchedRequest):
         # Build MagicOutput directly (partitions_per_inst, num_instances already computed above)
         configs = [
             MagicOutput(
-                decision_id=f"mo-{uuid.uuid4()}",
+                decision_id=_make_job_id(request.model_name),
                 engine=request.engine or "vllm",
                 instance_type=instance_type,
                 tp_size=tp,
