@@ -52,6 +52,9 @@ class BatchedRequest(BaseModel):
     # Keep cluster alive after job completes (default: destroy)
     persist: Optional[bool] = False
 
+    # Use on-demand instances instead of spot (default: prefer spot)
+    prefer_spot: Optional[bool] = True
+
     # Load model weights from S3 instead of HuggingFace (faster, requires prior upload)
     s3_models: Optional[bool] = False
     # HuggingFace token for gated models (Llama, etc.)

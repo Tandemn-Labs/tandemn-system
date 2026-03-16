@@ -137,7 +137,7 @@ async def sp_launch_vllm_batch(
         instance_type=config.instance_type,
         num_nodes=num_nodes,
         quotas=quotas,
-        prefer_spot=True,
+        prefer_spot=getattr(request, "prefer_spot", True),
     )
 
     # Build resources with any_of for fallback regions
