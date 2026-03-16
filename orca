@@ -656,7 +656,7 @@ def cmd_status(args):
         status = j["status"]
         sc = GREEN if status == "succeeded" else (RED if status == "failed" else YELLOW)
         ts = datetime.fromtimestamp(j["created_at"]).strftime("%Y-%m-%d %H:%M")
-        pct = f"{j['progress']*100:.0f}%"
+        pct = "—" if status == "failed" else f"{j['progress']*100:.0f}%"
         model = j.get("model_name", "?")[:35]
         print(f"  {c(status, sc):<23} {pct:>10} {j.get('num_lines', '?'):>8} {model:<35} {DIM}{ts}{RESET}")
 
