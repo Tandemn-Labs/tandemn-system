@@ -48,6 +48,8 @@ def histogram_quantile(text: str, metric_name: str, quantile: float) -> float | 
     target = quantile * total
     prev_le, prev_count = 0.0, 0.0
     for le, count in buckets:
+        if le == float("inf"):
+            break  # don't interpolate into +Inf
         if count >= target:
             if count == prev_count:
                 result_s = prev_le
@@ -56,7 +58,8 @@ def histogram_quantile(text: str, metric_name: str, quantile: float) -> float | 
                 result_s = prev_le + frac * (le - prev_le)
             return result_s * 1000.0  # convert to ms
         prev_le, prev_count = le, count
-    return buckets[-1][0] * 1000.0
+    # All finite buckets exhausted — return the largest finite boundary
+    return prev_le * 1000.0 if prev_le > 0.0 else None
 
 
 @dataclass
