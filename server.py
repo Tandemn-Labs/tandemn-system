@@ -30,7 +30,9 @@ from orca_server.job_manager import get_cluster_manager, get_job_tracker, jobtra
 from orca_server.launcher import (
     sp_launch_vllm_batch_with_fallback,
     sp_launch_vllm_online,
+    launch_chunked_replicas,
 )
+from orca_server.chunk_manager import get_chunk_manager
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.roofline_magic import (
@@ -293,6 +295,120 @@ async def update_job_phase(
     return {"ok": True}
 
 
+@app.post("/job/{job_id}/chunks/pull")
+async def pull_chunk(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Replica calls to get next chunk. Returns 204 when queue is empty."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    replica_id = body.get("replica_id", "unknown")
+
+    cm = get_chunk_manager()
+    chunk_info = cm.pull_chunk(job_id, replica_id)
+    if chunk_info is None:
+        return Response(status_code=204)
+    return chunk_info
+
+
+@app.post("/job/{job_id}/chunks/complete")
+async def complete_chunk(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Replica reports chunk done. Triggers assembly when all chunks are complete."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    chunk_id = body.get("chunk_id")
+    replica_id = body.get("replica_id", "unknown")
+
+    cm = get_chunk_manager()
+    progress = cm.complete_chunk(job_id, chunk_id, replica_id)
+
+    # Update job tracker progress
+    if progress["total"] > 0:
+        frac = progress["completed"] / progress["total"]
+        get_job_tracker().update_progress(job_id, frac)
+
+    if progress["all_done"]:
+        asyncio.create_task(_assemble_output(job_id))
+
+    return progress
+
+
+@app.get("/job/{job_id}/chunks/progress")
+async def chunk_progress(
+    job_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    """Chunk-level progress for CLI."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    cm = get_chunk_manager()
+    progress = cm.get_progress(job_id)
+    if progress is None:
+        raise HTTPException(status_code=404, detail=f"No chunk queue for job {job_id}")
+    return progress
+
+
+async def _assemble_output(job_id: str):
+    """Combine per-chunk outputs into final ordered output.jsonl."""
+    job_logger = logging.getLogger(f"orca.job.{job_id}")
+    job_logger.info(f"[Assembly] Starting output assembly for {job_id}")
+
+    cm = get_chunk_manager()
+    meta = cm._r.hgetall(f"chunk:job:{job_id}:meta")
+    s3_output_base = meta.get("s3_output_base", "")
+    ordered_ids = cm.get_output_order(job_id)
+
+    combined_path = f"/tmp/assembly_{job_id}.jsonl"
+    try:
+        with open(combined_path, "w") as combined:
+            for cid in ordered_ids:
+                chunk_info = cm.get_chunk_info(job_id, cid)
+                s3_out = chunk_info.get("s3_output_path", "")
+                local_tmp = f"/tmp/assemble_{job_id}_{cid}.jsonl"
+                try:
+                    await storage_backend.download_file(s3_out, local_tmp, user="system")
+                except Exception as dl_err:
+                    job_logger.error(f"[Assembly] Failed to download {s3_out}: {dl_err}")
+                    continue
+                with open(local_tmp) as cf:
+                    for line in cf:
+                        combined.write(line)
+                os.unlink(local_tmp)
+
+        # Upload combined output
+        final_s3 = f"{s3_output_base}/output.jsonl"
+        await storage_backend.upload_file(combined_path, final_s3, user="system")
+        os.unlink(combined_path)
+        job_logger.info(f"[Assembly] Uploaded combined output to {final_s3}")
+
+        # Download to local outputs/
+        from orca_server.job_manager import download_output_from_s3
+        tracker = get_job_tracker()
+        rec = tracker.get(job_id)
+        if rec:
+            job_dirname = getattr(rec, '_job_dirname', job_id)
+            download_output_from_s3(final_s3, job_dirname, logger=job_logger)
+
+        get_job_tracker().update_status(job_id, "succeeded")
+        get_job_tracker().update_progress(job_id, 1.0)
+        cm.cleanup_job(job_id)
+        job_logger.info(f"[Assembly] Job {job_id} completed successfully")
+
+    except Exception as e:
+        job_logger.error(f"[Assembly] Failed for {job_id}: {e}")
+        get_job_tracker().update_status(job_id, "failed")
+        if os.path.exists(combined_path):
+            os.unlink(combined_path)
+
+
 @app.get("/job/{job_id}/throughput")
 async def get_job_throughput(job_id: str, window: float = 60.0):
     """Sustained throughput for the controller: rolling window + epoch (since baseline)."""
@@ -351,24 +467,30 @@ async def submit_batch(request: BatchedRequest):
     - "roofline": Deterministic roofline-based solver (default)
     - "user_specified": User provides GPU/TP/PP directly
     """
-    # Download S3 input if needed, then parse local file for stats
-    local_input, tmp_cleanup = await _resolve_input_file(request.input_file)
-    try:
-        num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
-            local_input, model_name=request.model_name
-        )
-    finally:
-        if tmp_cleanup:
-            os.unlink(tmp_cleanup)
+    # For chunked jobs the CLI already parsed stats and uploaded chunks — skip file download
+    if request.chunks and request.num_lines is not None and request.avg_input_tokens is not None:
+        num_lines = request.num_lines
+        avg_input_tokens = request.avg_input_tokens
+        max_input_tokens = request.max_input_tokens
+    else:
+        # Download S3 input if needed, then parse local file for stats
+        local_input, tmp_cleanup = await _resolve_input_file(request.input_file)
+        try:
+            num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
+                local_input, model_name=request.model_name
+            )
+        finally:
+            if tmp_cleanup:
+                os.unlink(tmp_cleanup)
 
-    # Update request with parsed values (these override any user-provided values)
-    request = request.model_copy(
-        update={
-            "num_lines": num_lines,
-            "avg_input_tokens": avg_input_tokens,
-            "max_input_tokens": max_input_tokens,
-        }
-    )
+        # Update request with parsed values (these override any user-provided values)
+        request = request.model_copy(
+            update={
+                "num_lines": num_lines,
+                "avg_input_tokens": avg_input_tokens,
+                "max_input_tokens": max_input_tokens,
+            }
+        )
 
     # Collect log messages before the job logger is created
     early_messages = []
@@ -521,7 +643,60 @@ async def submit_batch(request: BatchedRequest):
                 },
             }
 
-    # Launch with fallback support
+    # ── Chunked path: CLI already split + uploaded chunks to S3 ──
+    if request.chunks and len(request.chunks) > 1:
+        effective_replicas = request.replicas or len(request.chunks)
+        primary = configs[0]
+        job_id = primary.decision_id
+
+        # S3 output base (same bucket as first chunk)
+        first_chunk_s3 = request.chunks[0]["s3_input_path"]
+        s3_base = "/".join(first_chunk_s3.split("/")[:3])
+        from orca_server.job_manager import generate_job_dirname
+        job_dirname = generate_job_dirname(request, use_solver, primary.tp_size, primary.pp_size, primary.instance_type)
+        s3_output_base = f"{s3_base}/{job_dirname}"
+
+        cm = get_chunk_manager()
+        cm.create_job_queue(job_id, request.chunks, request.model_name, s3_output_base)
+
+        msg = f"[Chunked] {len(request.chunks)} chunks, {effective_replicas} replicas"
+        logger.info(msg)
+        early_messages.append(("INFO", msg))
+
+        success = await launch_chunked_replicas(
+            request, primary, effective_replicas,
+            solver=use_solver, early_messages=early_messages,
+            quota_tracker=get_quota_tracker(),
+            persist=getattr(request, "persist", False),
+        )
+
+        if success:
+            return {
+                "status": "launched",
+                "job_id": job_id,
+                "config": {
+                    "instance_type": primary.instance_type,
+                    "tp_size": primary.tp_size,
+                    "pp_size": primary.pp_size,
+                },
+                "chunks": len(request.chunks),
+                "replicas": effective_replicas,
+                "input_stats": {
+                    "num_lines": num_lines,
+                    "avg_input_tokens": avg_input_tokens,
+                    "max_input_tokens": max_input_tokens,
+                },
+                "quota_warning": quota_warning,
+                "message": f"Chunked job launched with {effective_replicas} replicas. Track: GET /job/{job_id}",
+            }
+        else:
+            return {
+                "status": "error",
+                "job_id": job_id,
+                "message": "Failed to launch chunked replicas",
+            }
+
+    # ── Single-cluster path (existing, unchanged) ──
     success, used_config = await sp_launch_vllm_batch_with_fallback(
         request, configs, solver=use_solver, early_messages=early_messages,
         quota_tracker=get_quota_tracker(),
@@ -665,6 +840,7 @@ async def test_placement(request: BatchedRequest):
                 "pp_size": mo.pp_size,
                 "num_instances": mo.num_instances or mo.num_nodes,
                 "max_model_len": mo.max_model_len,
+                "replicas": mo.replicas,
             }
             if mo.throughput_tokens_per_sec is not None:
                 cfg["throughput_tokens_per_sec"] = mo.throughput_tokens_per_sec
