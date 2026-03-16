@@ -258,7 +258,7 @@ async def sp_launch_vllm_batch(
     output_s3_path = f"{s3_output_dir}/{request.output_file}"
     job_logger.info(f"[Job] Output will be saved to: {s3_output_dir}/")
 
-    def monitor_and_download(job_id):
+    def monitor_and_download(job_id, *, actual_region, actual_market, solver):
         """Background thread: stream logs, then download output when done."""
         try:
             sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
@@ -370,7 +370,9 @@ async def sp_launch_vllm_batch(
 
         # Stream logs in background and download when done
         t = threading.Thread(
-            target=monitor_and_download, args=(job_id,),
+            target=monitor_and_download,
+            args=(job_id,),
+            kwargs=dict(actual_region=actual_region, actual_market=actual_market, solver=solver),
             daemon=False, name=f"orca-monitor-{config.decision_id[:12]}",
         )
         cm.register_thread(config.decision_id, t)
