@@ -63,6 +63,11 @@ class BatchedRequest(BaseModel):
     openrouter_api_key: Optional[str] = None
     # Solver log level: "debug", "info", "warning" (default: "info")
     log_level: Optional[str] = None
+    # Chunked distributed batch inference
+    replicas: Optional[int] = None       # Replica count (from CLI --replicas or solver)
+    chunk_size: Optional[int] = None     # Lines per chunk (default: 1000)
+    chunks: Optional[list[dict]] = None  # [{chunk_id, s3_input_path, num_lines}, ...] — CLI uploads
+
     # Only change the ModelSpecificCofig
     # right now its just vllm, but we can interject the parameters here
     vllm_specific_config: Optional[vLLMSpecificConfig] = None
