@@ -44,7 +44,7 @@ python server.py
 Run a batch job:
 
 ```bash
-orca deploy Qwen/Qwen2.5-72B-Instruct input.jsonl --slo 4
+./orca deploy Qwen/Qwen2.5-72B-Instruct input.jsonl --slo 4
 ```
 
 Orca parses the input file, runs the placement solver, and launches on the cheapest viable spot configuration. No GPU selection required.
@@ -52,7 +52,7 @@ Orca parses the input file, runs the placement solver, and launches on the cheap
 Track progress:
 
 ```bash
-orca progress
+./orca progress
 ```
 
 ---
@@ -62,8 +62,8 @@ orca progress
 ### Deployment
 
 ```
-orca deploy <model> <input>     Run a batch job (solver picks GPU automatically)
-orca plan   <model> <input>     Show placement plan without launching
+./orca deploy <model> <input>     Run a batch job (solver picks GPU automatically)
+./orca plan   <model> <input>     Show placement plan without launching
 ```
 
 Options for `deploy` and `plan`:
@@ -81,20 +81,20 @@ Options for `deploy` and `plan`:
 ### Monitoring
 
 ```
-orca progress [job_id]          Live progress bar with throughput and queue depth
-orca status                     List all jobs
-orca metrics <job_id> [-w]      Latest vLLM metrics snapshot (--watch for 2s refresh)
-orca stream <job_id>            Stream live metrics table (1 event/sec via SSE)
-orca logs [cluster]             Stream logs from a SkyPilot cluster
-orca clusters                   Show active clusters
+./orca progress [job_id]          Live progress bar with throughput and queue depth
+./orca status                     List all jobs
+./orca metrics <job_id> [-w]      Latest vLLM metrics snapshot (--watch for 2s refresh)
+./orca stream <job_id>            Stream live metrics table (1 event/sec via SSE)
+./orca logs [cluster]             Stream logs from a SkyPilot cluster
+./orca clusters                   Show active clusters
 ```
 
 ### Analytics
 
 ```
-orca history [--model X] [--gpu Y]   Browse completed runs
-orca inspect <run_id>                Full run report (latency, throughput, cost, GPU util)
-orca timeseries <run_id>             Scheduler timeseries for a completed run
+./orca history [--model X] [--gpu Y]   Browse completed runs
+./orca inspect <run_id>                Full run report (latency, throughput, cost, GPU util)
+./orca timeseries <run_id>             Scheduler timeseries for a completed run
 ```
 
 ---
@@ -102,7 +102,7 @@ orca timeseries <run_id>             Scheduler timeseries for a completed run
 ## How It Works
 
 ```
-                   orca deploy Qwen/Qwen2.5-72B-Instruct batch.jsonl --slo 4
+                   ./orca deploy Qwen/Qwen2.5-72B-Instruct batch.jsonl --slo 4
                                          |
                                          v
                               +---------------------+
