@@ -11,10 +11,9 @@ import requests
 import sky
 import yaml
 
+from orca_server import config as _cfg
 from orca_server.config import (
     HF_TOKEN,
-    ORCA_API_KEY,
-    ORCA_SERVER_URL,
     S3_MODEL_BUCKET,
     S3_MODEL_PREFIX,
     VLLM_PORT,
@@ -201,9 +200,9 @@ async def sp_launch_vllm_batch(
         yaml_data["resources"] = resources_config
         yaml_data["file_mounts"]["/data"]["source"] = s3_base
         yaml_data["envs"]["HF_TOKEN"] = hf_token
-        yaml_data["envs"]["ORCA_SERVER_URL"] = ORCA_SERVER_URL
+        yaml_data["envs"]["ORCA_SERVER_URL"] = _cfg.ORCA_SERVER_URL
         yaml_data["envs"]["JOB_ID"] = config.decision_id
-        yaml_data["envs"]["ORCA_API_KEY"] = ORCA_API_KEY
+        yaml_data["envs"]["ORCA_API_KEY"] = _cfg.ORCA_API_KEY
 
         # Add S3 model weight mount if requested
         if request.s3_models:
@@ -231,9 +230,9 @@ async def sp_launch_vllm_batch(
             "run": run_string,
             "file_mounts./data.source": s3_base,
             "envs.HF_TOKEN": hf_token,
-            "envs.ORCA_SERVER_URL": ORCA_SERVER_URL,
+            "envs.ORCA_SERVER_URL": _cfg.ORCA_SERVER_URL,
             "envs.JOB_ID": config.decision_id,
-            "envs.ORCA_API_KEY": ORCA_API_KEY,
+            "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,
         }
 
         # Add S3 model weight mount if requested
@@ -521,10 +520,10 @@ async def _launch_chunked_replica(
         "resources": resources_config,
         "run": run_string,
         "envs.HF_TOKEN": hf_token,
-        "envs.ORCA_SERVER_URL": ORCA_SERVER_URL,
+        "envs.ORCA_SERVER_URL": _cfg.ORCA_SERVER_URL,
         "envs.JOB_ID": parent_job_id,
         "envs.REPLICA_ID": replica_id,
-        "envs.ORCA_API_KEY": ORCA_API_KEY,
+        "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,
         "envs.AVG_INPUT_TOKENS": str(request.avg_input_tokens or 2000),
         "envs.AVG_OUTPUT_TOKENS": str(request.avg_output_tokens or 500),
     }

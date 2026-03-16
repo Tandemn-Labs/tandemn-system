@@ -163,6 +163,33 @@ Local files are uploaded to S3 automatically. S3 URIs (`s3://...`) are passed th
 
 ---
 
+## Trying Locally?
+
+The control plane runs on your laptop, but EC2 replicas need to reach it (for metrics, chunk pulling, etc.). The easiest way is a Cloudflare Tunnel — one command, no account required, no firewall changes:
+
+```bash
+# Install once
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+chmod +x cloudflared
+
+# Expose your local server (run alongside python server.py)
+./cloudflared tunnel --url http://localhost:26336
+# → https://random-words.trycloudflare.com
+```
+
+Then add the URL to your `.env`:
+
+```bash
+ORCA_SERVER_URL=https://random-words.trycloudflare.com
+ORCA_API_KEY=some-secret-key   # optional but recommended since the tunnel is public
+```
+
+Restart the server and the EC2 replicas will be able to call back to your laptop. The URL changes each time you restart `cloudflared` — copy the new one into `.env` and restart `server.py`.
+
+For a persistent setup, use [Tailscale](https://tailscale.com) (mesh VPN, stable IPs, encrypted) or deploy the control plane on a small EC2 instance in the same VPC.
+
+---
+
 ## API
 
 The control plane exposes a REST API at `http://localhost:26336`:

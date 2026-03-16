@@ -1072,6 +1072,18 @@ async def multipart_complete(
 
 
 if __name__ == "__main__":
+    import argparse as _ap
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=26336)
+    _parser = _ap.ArgumentParser(description="Orca control plane server")
+    _parser.add_argument("--url", help="Public URL for this server (e.g. Cloudflare tunnel URL). Overrides ORCA_SERVER_URL env var.")
+    _parser.add_argument("--port", type=int, default=26336)
+    _args = _parser.parse_args()
+
+    if _args.url:
+        from orca_server import config as _cfg
+        _cfg.ORCA_SERVER_URL = _args.url
+        os.environ["ORCA_SERVER_URL"] = _args.url
+        print(f"[Server] ORCA_SERVER_URL set to {_args.url}")
+
+    uvicorn.run(app, host="0.0.0.0", port=_args.port)

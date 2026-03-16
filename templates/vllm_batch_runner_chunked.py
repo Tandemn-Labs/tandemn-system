@@ -289,21 +289,46 @@ def report_chunk_complete(chunk_id: str) -> dict:
 
 
 def download_chunk(s3_input_path: str, local_path: str) -> bool:
-    """Download a chunk from S3."""
-    result = subprocess.run(
-        ["aws", "s3", "cp", s3_input_path, local_path],
-        capture_output=True, text=True, timeout=120,
-    )
-    return result.returncode == 0
+    """Download a chunk via the control plane's storage streaming endpoint."""
+    try:
+        # Strip s3://bucket/ prefix to get the file path for the download endpoint
+        # s3://tandemn-orca/uploads/orca-cli/file.jsonl → uploads/orca-cli/file.jsonl
+        parts = s3_input_path.replace("s3://", "").split("/", 1)
+        if len(parts) < 2:
+            print(f"[Runner] Invalid S3 path: {s3_input_path}")
+            return False
+        file_path = parts[1]
+
+        resp = requests.get(
+            f"{ORCA_URL}/storage/download/chunk-runner/{file_path}",
+            timeout=120,
+            stream=True,
+        )
+        resp.raise_for_status()
+        with open(local_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return True
+    except Exception as e:
+        print(f"[Runner] Download failed for {s3_input_path}: {e}")
+        return False
 
 
 def upload_chunk_output(local_path: str, s3_output_path: str) -> bool:
-    """Upload chunk output to S3."""
-    result = subprocess.run(
-        ["aws", "s3", "cp", local_path, s3_output_path],
-        capture_output=True, text=True, timeout=120,
-    )
-    return result.returncode == 0
+    """Upload chunk output via the control plane's storage endpoint."""
+    try:
+        with open(local_path, "rb") as f:
+            resp = requests.post(
+                f"{ORCA_URL}/storage/upload",
+                files={"file": (os.path.basename(local_path), f)},
+                data={"user": "chunk-runner", "remote_path": s3_output_path},
+                timeout=120,
+            )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[Runner] Upload failed for {s3_output_path}: {e}")
+        return False
 
 
 def load_requests(input_file: str) -> List[Dict[str, Any]]:
