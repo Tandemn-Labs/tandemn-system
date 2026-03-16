@@ -771,7 +771,7 @@ def cmd_inspect(args):
 
     # If it looks like a job_id (mo-...), search by job_id
     if run_id.startswith("mo-"):
-        resp = api("get", "/analytics/runs", params={"limit": 200}, timeout=10)
+        resp = api("get", "/analytics/runs", params={"limit": 200}, timeout=30)
         if resp.status_code != 200:
             print(f"\n  {RED}Error:{RESET} {resp.text}\n")
             return
@@ -868,7 +868,7 @@ def cmd_timeseries(args):
 
     # Resolve job_id to run_id
     if run_id.startswith("mo-"):
-        resp = api("get", "/analytics/runs", params={"limit": 200}, timeout=10)
+        resp = api("get", "/analytics/runs", params={"limit": 200}, timeout=30)
         runs = resp.json().get("runs", []) if resp.status_code == 200 else []
         match = [r for r in runs if r.get("job_id") == run_id]
         if not match:
