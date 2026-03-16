@@ -421,7 +421,7 @@ async def submit_batch(request: BatchedRequest):
             instance_type=instance_type,
             num_nodes=num_instances,
             quotas=quotas,
-            prefer_spot=True,
+            prefer_spot=getattr(request, "prefer_spot", True),
         )
         if not viable_regions:
             quota_warning = f"No quota for {instance_type} in any region. Launch will likely fail."
@@ -617,7 +617,7 @@ async def test_placement(request: BatchedRequest):
             instance_type=instance_type,
             num_nodes=num_instances,
             quotas=quotas,
-            prefer_spot=True,
+            prefer_spot=getattr(request, "prefer_spot", True),
         )
         quota_warning = None
         if not viable_regions:
