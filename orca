@@ -202,6 +202,36 @@ def upload_to_server(local_path: str, user: str = "orca-cli") -> str:
     return resp.json()["storage_uri"]
 
 
+def split_and_upload_chunks(input_file: str, chunk_size: int) -> list:
+    """Split a local JSONL file into chunks, upload each to S3, return chunk metadata."""
+    import tempfile as _tf
+    chunks = []
+    current_lines = []
+    chunk_idx = 0
+
+    def _flush(lines, idx):
+        cid = f"c{idx:04d}"
+        tmp = _tf.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False)
+        tmp.writelines(lines)
+        tmp.close()
+        s3_uri = upload_to_server(tmp.name)
+        os.unlink(tmp.name)
+        return {"chunk_id": cid, "s3_input_path": s3_uri, "num_lines": len(lines)}
+
+    with open(input_file) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            current_lines.append(line)
+            if len(current_lines) >= chunk_size:
+                chunks.append(_flush(current_lines, chunk_idx))
+                current_lines = []
+                chunk_idx += 1
+    if current_lines:
+        chunks.append(_flush(current_lines, chunk_idx))
+    return chunks
+
+
 # ─── Animated print helpers ─────────────────────────────────────────────────
 def step(msg, icon="▸"):
     print(f"  {CYAN}{icon}{RESET} {msg}")
@@ -244,26 +274,16 @@ def cmd_deploy(args):
         ]
         print(box(lines, title="WORKLOAD"))
 
-    # ── Phase 2: Upload input file to server ──────────────────────────────
+    # ── Phase 2: Determine replica count + chunk if needed ──────────────
     print()
-    if input_file.startswith("s3://"):
-        s3_input = input_file
-        step(f"Using S3 path: {c(s3_input, DIM)}")
-    else:
-        step("Uploading input file to storage...")
-        s3_input = upload_to_server(input_file)
-        step(f"Uploaded to {c(s3_input, DIM)}")
+    chunk_size = getattr(args, 'chunk_size', None) or 1000
+    effective_replicas = getattr(args, 'replicas', None) or 0
 
-    # ── Phase 3: Solve + Submit ───────────────────────────────────────────
-    print()
-    if args.gpu:
-        step(f"Running feasibility check: {c(args.gpu, CYAN)} TP={args.tp or 1} PP={args.pp or 1}...")
-    else:
-        step("Running placement solver...")
+    # Build common payload fields
     payload = {
         "placement_solver": "user_specified" if args.gpu else "roofline",
         "user_id": "orca-cli",
-        "input_file": s3_input,
+        "input_file": "s3://placeholder/chunked",  # overwritten below
         "output_file": args.output or "output.jsonl",
         "avg_output_tokens": args.max_output_tokens,
         "max_output_tokens": args.max_output_tokens,
@@ -290,6 +310,71 @@ def cmd_deploy(args):
             payload["pp_size"] = args.pp
         if args.force:
             payload["force"] = True
+
+    # Inject parsed stats so server can skip S3 download
+    if not is_s3:
+        payload["num_lines"] = stats["num_lines"]
+        payload["avg_input_tokens"] = stats["avg_input_tokens"]
+        payload["max_input_tokens"] = stats["max_input_tokens"]
+
+    if effective_replicas > 1:
+        # Path A: --replicas N → chunk immediately
+        step(f"Chunking {stats['num_lines'] if not is_s3 else '?'} requests into {chunk_size}-line chunks for {effective_replicas} replicas...")
+        chunk_infos = split_and_upload_chunks(input_file, chunk_size)
+        step(f"Uploaded {c(str(len(chunk_infos)), GREEN+BOLD)} chunks to S3")
+
+        payload["chunks"] = chunk_infos
+        payload["replicas"] = effective_replicas
+    elif effective_replicas == 0 and not args.gpu:
+        # Path B: No --replicas → ask solver for replica count first
+        step("Running placement solver...")
+        plan_resp = api_with_spinner("post", "/test/placement",
+                                      message="Running solver...", json=payload)
+        if plan_resp.status_code not in (200, 201):
+            print(f"\n  {RED}Server error ({plan_resp.status_code}):{RESET} {plan_resp.text}\n")
+            sys.exit(1)
+        plan_data = plan_resp.json()
+        if plan_data.get("status") == "error":
+            print(f"\n  {RED}Solver error:{RESET} {plan_data.get('message', 'Unknown')}")
+            sys.exit(1)
+
+        placements = plan_data.get("placements", [])
+        solver_replicas = placements[0].get("replicas", 1) if placements else 1
+
+        if solver_replicas > 1 and not is_s3:
+            step(f"Solver recommends {c(str(solver_replicas), CYAN+BOLD)} replicas. Chunking...")
+            chunk_infos = split_and_upload_chunks(input_file, chunk_size)
+            step(f"Uploaded {c(str(len(chunk_infos)), GREEN+BOLD)} chunks to S3")
+
+            payload["chunks"] = chunk_infos
+            payload["replicas"] = solver_replicas
+        else:
+            # Single replica — upload full file
+            if is_s3:
+                s3_input = input_file
+                step(f"Using S3 path: {c(s3_input, DIM)}")
+            else:
+                step("Uploading input file to storage...")
+                s3_input = upload_to_server(input_file)
+                step(f"Uploaded to {c(s3_input, DIM)}")
+            payload["input_file"] = s3_input
+    else:
+        # Single replica (explicit --replicas 1 or --gpu) — upload full file
+        if is_s3:
+            s3_input = input_file
+            step(f"Using S3 path: {c(s3_input, DIM)}")
+        else:
+            step("Uploading input file to storage...")
+            s3_input = upload_to_server(input_file)
+            step(f"Uploaded to {c(s3_input, DIM)}")
+        payload["input_file"] = s3_input
+
+    # ── Phase 3: Submit ──────────────────────────────────────────────────
+    print()
+    if args.gpu:
+        step(f"Running feasibility check: {c(args.gpu, CYAN)} TP={args.tp or 1} PP={args.pp or 1}...")
+    elif not payload.get("chunks"):
+        step("Submitting job...")
 
     resp = api_with_spinner("post", "/submit/batch",
                             message="Solving placement + launching cluster...", json=payload)
@@ -334,6 +419,10 @@ def cmd_deploy(args):
             f"{DIM}Instance:{RESET}  {cfg.get('instance_type', '?')}",
             f"{DIM}Config:{RESET}    TP={cfg.get('tp_size', '?')} PP={cfg.get('pp_size', '?')}",
         ]
+        if data.get("chunks"):
+            success_lines.append(f"{DIM}Chunks:{RESET}    {data['chunks']}")
+        if data.get("replicas"):
+            success_lines.append(f"{DIM}Replicas:{RESET}  {data['replicas']}")
         if sol.get("throughput_tokens_per_sec"):
             success_lines.append(f"{DIM}Est. tps:{RESET}  {sol['throughput_tokens_per_sec']:.0f} tok/s")
         if solver_info.get("max_model_len"):
@@ -1084,6 +1173,8 @@ Examples:
     p_deploy.add_argument("--force", action="store_true", help="Skip feasibility check, launch anyway")
     p_deploy.add_argument("--persist", action="store_true", help="Keep cluster alive after job completes (default: destroy)")
     p_deploy.add_argument("--on-demand", action="store_true", help="Use on-demand instances instead of spot")
+    p_deploy.add_argument("--replicas", type=int, default=None, help="Number of replica clusters (auto if omitted)")
+    p_deploy.add_argument("--chunk-size", type=int, default=None, help="Lines per chunk for multi-replica (default: 1000)")
     p_deploy.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
 
     # plan
