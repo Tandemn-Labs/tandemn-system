@@ -1000,6 +1000,29 @@ async def download_file_from_storage(user: str, file_path: str):
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 
+@app.get("/storage/download_s3")
+async def download_s3_file(path: str, user: str = "default"):
+    """Download a file by full S3 URI (s3://bucket/key). Used by chunked runners."""
+    if not path.startswith("s3://"):
+        raise HTTPException(status_code=400, detail="path must be a full s3:// URI")
+    try:
+        logger.info(f"[Storage] download_s3 path={path} user={user}")
+        filename = path.split("/")[-1] or "download"
+
+        async def file_stream_iterator():
+            async for chunk in storage_backend.stream_file(path, user):
+                yield chunk
+
+        return StreamingResponse(
+            file_stream_iterator(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        logger.error(f"[Storage] Error downloading S3 file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+
 @app.delete("/storage/delete/{user}/{file_path:path}")
 async def delete_file_from_storage(user: str, file_path: str):
     """Delete a file from storage backend."""

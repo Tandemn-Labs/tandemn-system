@@ -311,16 +311,11 @@ def report_chunk_complete(chunk_id: str) -> dict:
 
 
 def download_chunk(s3_input_path: str, local_path: str) -> bool:
-    """Download a chunk via the control plane's storage streaming endpoint (with retries)."""
-    parts = s3_input_path.replace("s3://", "").split("/", 1)
-    if len(parts) < 2:
-        print(f"[Runner] Invalid S3 path: {s3_input_path}")
-        return False
-    file_path = parts[1]
-
+    """Download a chunk via the control plane's S3 download endpoint (with retries)."""
     def _download():
         resp = requests.get(
-            f"{ORCA_URL}/storage/download/chunk-runner/{file_path}",
+            f"{ORCA_URL}/storage/download_s3",
+            params={"path": s3_input_path, "user": "chunk-runner"},
             timeout=120,
             stream=True,
         )
