@@ -66,6 +66,7 @@ def histogram_quantile(text: str, metric_name: str, quantile: float) -> float | 
 class MetricsSnapshot:
     job_id: str
     timestamp: float
+    replica_id: str | None = None
     # vLLM gauges
     avg_generation_throughput_toks_per_s: float = 0.0
     avg_prompt_throughput_toks_per_s: float = 0.0
@@ -158,6 +159,7 @@ class MetricsSnapshot:
         return {
             "job_id": self.job_id,
             "timestamp": self.timestamp,
+            "replica_id": self.replica_id,
             "avg_generation_throughput_toks_per_s": self.avg_generation_throughput_toks_per_s,
             "avg_prompt_throughput_toks_per_s": self.avg_prompt_throughput_toks_per_s,
             "gpu_cache_usage_perc": self.gpu_cache_usage_perc,
@@ -355,6 +357,7 @@ class _JobCollector:
 class MetricsCollector:
     def __init__(self):
         self._jobs: dict[str, _JobCollector] = {}
+        self._replicas: dict[str, _JobCollector] = {}  # "job_id:replica_id" → collector
         self._lock = threading.Lock()
 
     def start_collecting(self, job_id: str, endpoint_url: str | None = None) -> None:
@@ -363,6 +366,15 @@ class MetricsCollector:
                 return
             jc = _JobCollector(job_id, endpoint_url)
             self._jobs[job_id] = jc
+        jc.start()
+
+    def start_replica_collecting(self, job_id: str, replica_id: str) -> None:
+        key = f"{job_id}:{replica_id}"
+        with self._lock:
+            if key in self._replicas:
+                return
+            jc = _JobCollector(job_id, None)  # ingest-only, no polling
+            self._replicas[key] = jc
         jc.start()
 
     def stop_collecting(self, job_id: str) -> None:
@@ -375,6 +387,17 @@ class MetricsCollector:
         with self._lock:
             jc = self._jobs.get(job_id)
         return jc.latest() if jc else None
+
+    def get_replica_latest(self, job_id: str, replica_id: str) -> MetricsSnapshot | None:
+        key = f"{job_id}:{replica_id}"
+        with self._lock:
+            jc = self._replicas.get(key)
+        return jc.latest() if jc else None
+
+    def list_replica_ids(self, job_id: str) -> list[str]:
+        prefix = f"{job_id}:"
+        with self._lock:
+            return [k[len(prefix):] for k in self._replicas if k.startswith(prefix)]
 
     def get_recent(self, job_id: str, n: int = 60) -> list[dict]:
         with self._lock:

@@ -191,15 +191,20 @@ CREATE TABLE IF NOT EXISTS runs (
 
 _CREATE_TIMESERIES = """
 CREATE TABLE IF NOT EXISTS timeseries (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id    TEXT NOT NULL,
-    timestamp REAL NOT NULL,
-    metrics   TEXT NOT NULL
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT NOT NULL,
+    timestamp  REAL NOT NULL,
+    metrics    TEXT NOT NULL,
+    replica_id TEXT
 )
 """
 
 _CREATE_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_ts_job_time ON timeseries (job_id, timestamp)"
+)
+
+_CREATE_INDEX_REPLICA = (
+    "CREATE INDEX IF NOT EXISTS idx_ts_job_replica_time ON timeseries (job_id, replica_id, timestamp)"
 )
 
 
@@ -236,11 +241,16 @@ class MetricsDB:
             conn.execute(_CREATE_RUNS)
             conn.execute(_CREATE_TIMESERIES)
             conn.execute(_CREATE_INDEX)
+            conn.execute(_CREATE_INDEX_REPLICA)
             # Migrate: add columns that may be missing in existing DBs
             existing = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
             for col, dtype in self._MIGRATE_COLUMNS:
                 if col not in existing:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {dtype}")
+            # Migrate timeseries: add replica_id if missing
+            ts_cols = {r[1] for r in conn.execute("PRAGMA table_info(timeseries)").fetchall()}
+            if "replica_id" not in ts_cols:
+                conn.execute("ALTER TABLE timeseries ADD COLUMN replica_id TEXT")
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -249,26 +259,23 @@ class MetricsDB:
 
     def append_timeseries(self, job_id: str, snapshots: list[dict]) -> None:
         rows = [
-            (job_id, s.get("timestamp", time.time()), json.dumps(s))
+            (job_id, s.get("timestamp", time.time()), json.dumps(s), s.get("replica_id"))
             for s in snapshots
         ]
         try:
             with self._get_conn() as conn:
                 conn.executemany(
-                    "INSERT INTO timeseries (job_id, timestamp, metrics) VALUES (?, ?, ?)",
+                    "INSERT INTO timeseries (job_id, timestamp, metrics, replica_id) VALUES (?, ?, ?, ?)",
                     rows,
                 )
                 conn.commit()
         except sqlite3.OperationalError as e:
             if "no such table" not in str(e):
                 raise
-            # DB exists but is missing the timeseries table (created before this
-            # schema version). Re-run _init_schema() — CREATE TABLE IF NOT EXISTS
-            # is idempotent — then retry.
             self._init_schema()
             with self._get_conn() as conn:
                 conn.executemany(
-                    "INSERT INTO timeseries (job_id, timestamp, metrics) VALUES (?, ?, ?)",
+                    "INSERT INTO timeseries (job_id, timestamp, metrics, replica_id) VALUES (?, ?, ?, ?)",
                     rows,
                 )
                 conn.commit()

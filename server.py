@@ -218,6 +218,7 @@ async def ingest_job_metrics(
 
     body = await request.json()
     snapshots_raw = body.get("snapshots", [])
+    replica_id = body.get("replica_id")
 
     # Update progress bar if runner included done/total counts
     done = body.get("done")
@@ -232,6 +233,10 @@ async def ingest_job_metrics(
     mc = app.state.metrics_collector
     db = app.state.metrics_db
 
+    # Ensure per-replica collector exists
+    if replica_id:
+        mc.start_replica_collecting(job_id, replica_id)
+
     ingested = 0
     batch_for_db = []
     prev_snap = None
@@ -243,6 +248,7 @@ async def ingest_job_metrics(
             continue
 
         snap = MetricsSnapshot.from_prometheus_text(job_id, text, ts)
+        snap.replica_id = replica_id
 
         # Compute throughput from counter deltas (vLLM >=0.10 removed the gauge)
         if snap.avg_generation_throughput_toks_per_s == 0 and prev_snap is not None:
@@ -256,13 +262,21 @@ async def ingest_job_metrics(
                 ) / dt
         prev_snap = snap
 
-        # Write into ring buffer for live SSE / REST
+        # Write into aggregated job-level ring buffer
         with mc._lock:
             jc = mc._jobs.get(job_id)
         if jc:
             with jc.lock:
                 jc.buffer.append(snap)
-                # Don't add to _unflushed — we persist directly below
+
+        # Write into per-replica ring buffer
+        if replica_id:
+            rkey = f"{job_id}:{replica_id}"
+            with mc._lock:
+                rc = mc._replicas.get(rkey)
+            if rc:
+                with rc.lock:
+                    rc.buffer.append(snap)
 
         batch_for_db.append(snap.to_dict())
         ingested += 1

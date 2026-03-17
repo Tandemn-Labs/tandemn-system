@@ -138,7 +138,7 @@ def _sidecar_loop(stop_event: threading.Event):
 
         if time.time() - last_push >= SIDECAR_INTERVAL_SEC and buffer:
             try:
-                payload: dict = {"snapshots": buffer}
+                payload: dict = {"snapshots": buffer, "replica_id": REPLICA_ID}
                 try:
                     with open(PROGRESS_FILE) as pf:
                         prog = json.load(pf)
@@ -156,7 +156,7 @@ def _sidecar_loop(stop_event: threading.Event):
 
     if buffer:
         try:
-            requests.post(ingest_url, json={"snapshots": buffer}, headers=headers, timeout=5)
+            requests.post(ingest_url, json={"snapshots": buffer, "replica_id": REPLICA_ID}, headers=headers, timeout=5)
         except Exception:
             pass
 
