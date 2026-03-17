@@ -243,7 +243,7 @@ def header(msg):
 
 
 def _poll_replica_launch(job_id, num_replicas):
-    """Poll /job/{id}/replicas until all are provisioned, or Ctrl+C."""
+    """Poll /job/{id}/replicas until all settled or job completes, whichever comes first."""
     ORCA_FISH = "><(((o>~~~"
     PHASE_ICON = {
         "launching": f"{YELLOW}..{RESET}",
@@ -287,6 +287,17 @@ def _poll_replica_launch(job_id, num_replicas):
                 for p in seen.values()
             ):
                 break
+
+            # Exit early if job already finished (fewer replicas did all the work)
+            try:
+                jr = api("get", f"/job/{job_id}", timeout=3)
+                if jr.status_code == 200:
+                    status = jr.json().get("status")
+                    if status in ("succeeded", "failed"):
+                        print(f"\n  {DIM}Job already {status} — stop waiting for remaining replicas.{RESET}")
+                        break
+            except Exception:
+                pass
 
             time.sleep(5)
         else:
