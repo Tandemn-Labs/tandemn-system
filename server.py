@@ -262,7 +262,8 @@ async def ingest_job_metrics(
     mc = app.state.metrics_collector
     db = app.state.metrics_db
 
-    # Ensure per-replica collector exists
+    # Ensure job-level and per-replica collectors exist (auto-create on first ingest)
+    mc.start_collecting(job_id)
     if replica_id:
         mc.start_replica_collecting(job_id, replica_id)
 
