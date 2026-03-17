@@ -106,3 +106,11 @@ INSTANCE_VCPUS = {inst: vcpus for inst, (_, _, vcpus) in AWS_INSTANCES.items()}
 AWS_INSTANCE_TO_GPU = {
     inst: (gpu, count) for inst, (gpu, count, _) in AWS_INSTANCES.items()
 }
+
+# GPUs with compute capability < 8.0 — vLLM V1 engine is not supported
+_V1_UNSUPPORTED_GPUS = {"V100", "T4"}
+
+def supports_vllm_v1(instance_type: str) -> bool:
+    """Check if an instance type's GPU supports vLLM V1 engine (CC >= 8.0)."""
+    gpu = INSTANCE_TO_GPU.get(instance_type, "")
+    return gpu not in _V1_UNSUPPORTED_GPUS
