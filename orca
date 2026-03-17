@@ -863,62 +863,134 @@ def cmd_clusters(args):
 
 
 def cmd_destroy(args):
-    """Tear down Orca clusters."""
+    """Tear down Orca clusters, Redis state, and S3 uploads."""
     import subprocess as _sp
     print(LOGO)
     header("DESTROY")
 
-    if args.all:
-        # Find all mo-* clusters (Orca naming convention)
-        step("Finding Orca clusters...")
-        result = _sp.run(["sky", "status", "--format", "json"], capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            print(f"\n  {RED}Error:{RESET} Could not list clusters\n")
-            return
-        try:
-            clusters = json.loads(result.stdout)
-        except (json.JSONDecodeError, ValueError):
-            clusters = []
-
-        orca_clusters = [c["name"] for c in clusters if c.get("name", "").startswith("mo-")]
-        if not orca_clusters:
-            print(f"\n  {DIM}No Orca clusters found.{RESET}\n")
-            return
-
-        print()
-        for name in orca_clusters:
-            print(f"  {DIM}-{RESET} {name}")
-        print()
-
-        answer = input(f"  {YELLOW}Destroy {len(orca_clusters)} cluster(s)? [y/N]:{RESET} ").strip().lower()
-        if answer != "y":
-            print(f"\n  {DIM}Aborted.{RESET}\n")
-            return
-
-        for name in orca_clusters:
-            step(f"Destroying {c(name, CYAN)}...")
-            _sp.run(["sky", "down", "-y", name], check=False, timeout=300)
-        ok(f"Destroyed {len(orca_clusters)} cluster(s)")
-    elif args.job_id:
-        step(f"Destroying clusters for job {c(args.job_id, CYAN)}...")
-        # Find clusters matching job_id prefix
-        result = _sp.run(["sky", "status", "--format", "json"], capture_output=True, text=True, timeout=30)
-        try:
-            clusters = json.loads(result.stdout)
-        except (json.JSONDecodeError, ValueError):
-            clusters = []
-
-        matches = [c_["name"] for c_ in clusters if c_.get("name", "").startswith(args.job_id)]
-        if not matches:
-            print(f"\n  {DIM}No clusters found for {args.job_id}{RESET}\n")
-            return
-
-        for name in matches:
-            step(f"Destroying {c(name, CYAN)}...")
-            _sp.run(["sky", "down", "-y", name], check=False, timeout=300)
-        ok(f"Destroyed {len(matches)} cluster(s)")
-    else:
+    if not args.all and not args.job_id:
         print(f"\n  {DIM}Specify --all or a job_id.{RESET}\n")
+        return
+
+    # ── 1. Discover SkyPilot clusters ────────────────────────────────────
+    step("Finding Orca clusters...")
+    result = _sp.run(["sky", "status", "--format", "json"], capture_output=True, text=True, timeout=30)
+    try:
+        clusters = json.loads(result.stdout) if result.returncode == 0 else []
+    except (json.JSONDecodeError, ValueError):
+        clusters = []
+
+    if args.all:
+        orca_clusters = [cl["name"] for cl in clusters if cl.get("name", "").startswith("mo-")]
+    else:
+        orca_clusters = [cl["name"] for cl in clusters if cl.get("name", "").startswith(args.job_id)]
+
+    # ── 2. Discover Redis chunk keys ─────────────────────────────────────
+    redis_keys = []
+    redis_jobs = set()
+    try:
+        import redis as _redis
+        r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+        r.ping()
+        all_chunk_keys = r.keys("chunk:job:*")
+        if args.all:
+            redis_keys = all_chunk_keys
+        else:
+            redis_keys = [k for k in all_chunk_keys if args.job_id in k]
+        # Extract unique job IDs
+        for k in redis_keys:
+            parts = k.split(":")
+            if len(parts) >= 3:
+                redis_jobs.add(parts[2])
+    except Exception:
+        pass
+
+    # ── 3. Discover S3 paths from Redis chunk metadata ─────────────────
+    s3_files = []  # individual S3 URIs to delete
+    try:
+        if redis_jobs and r:
+            for jid in sorted(redis_jobs):
+                order_key = f"chunk:job:{jid}:output_order"
+                chunk_ids = r.lrange(order_key, 0, -1)
+                for cid in chunk_ids:
+                    info = r.hgetall(f"chunk:job:{jid}:chunk:{cid}")
+                    inp = info.get("s3_input_path", "")
+                    out = info.get("s3_output_path", "")
+                    if inp:
+                        s3_files.append(inp)
+                    if out:
+                        s3_files.append(out)
+                # Also the assembled output.jsonl
+                meta = r.hgetall(f"chunk:job:{jid}:meta")
+                out_base = meta.get("s3_output_base", "")
+                if out_base:
+                    s3_files.append(f"{out_base}/output.jsonl")
+    except Exception:
+        pass
+
+    # ── 4. Show summary and confirm ──────────────────────────────────────
+    total_items = len(orca_clusters) + (1 if redis_keys else 0) + len(s3_files)
+    if total_items == 0:
+        target = "Orca" if args.all else args.job_id
+        print(f"\n  {DIM}Nothing to clean up for {target}.{RESET}\n")
+        return
+
+    print()
+    if orca_clusters:
+        print(f"  {BOLD}Clusters ({len(orca_clusters)}):{RESET}")
+        for name in orca_clusters:
+            print(f"    {DIM}-{RESET} {name}")
+    if redis_keys:
+        print(f"  {BOLD}Redis keys ({len(redis_keys)}):{RESET}  jobs: {', '.join(sorted(redis_jobs))}")
+    if s3_files:
+        print(f"  {BOLD}S3 files ({len(s3_files)}):{RESET}  inputs + outputs for {', '.join(sorted(redis_jobs))}")
+    print()
+
+    answer = input(f"  {YELLOW}Destroy all of the above? [y/N]:{RESET} ").strip().lower()
+    if answer != "y":
+        print(f"\n  {DIM}Aborted.{RESET}\n")
+        return
+
+    # ── 5. Execute ───────────────────────────────────────────────────────
+    print()
+
+    # Clusters
+    for name in orca_clusters:
+        step(f"Destroying cluster {c(name, CYAN)}...")
+        _sp.run(["sky", "down", "-y", name], check=False, timeout=300)
+    if orca_clusters:
+        step(f"Destroyed {len(orca_clusters)} cluster(s)", icon=f"{GREEN}✔{RESET}")
+
+    # S3 — delete files via server's storage API
+    if s3_files:
+        step(f"Cleaning {len(s3_files)} S3 file(s) via server...")
+        deleted = 0
+        failed = 0
+        for path in s3_files:
+            try:
+                resp = api("delete", "/storage/delete_s3", params={"path": path, "user": "system"}, timeout=10)
+                if resp.status_code == 200:
+                    deleted += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+        msg = f"Deleted {deleted} S3 file(s)"
+        if failed:
+            msg += f"  {DIM}({failed} missing/already deleted){RESET}"
+        step(msg, icon=f"{GREEN}✔{RESET}")
+
+    # Redis — delete last (contains the S3 paths we just used)
+    if redis_keys:
+        step(f"Cleaning {len(redis_keys)} Redis keys...")
+        try:
+            pipe = r.pipeline()
+            for k in redis_keys:
+                pipe.delete(k)
+            pipe.execute()
+            step(f"Cleaned {len(redis_keys)} Redis keys ({len(redis_jobs)} job(s))", icon=f"{GREEN}✔{RESET}")
+        except Exception as e:
+            print(f"  {RED}Redis cleanup failed:{RESET} {e}")
 
     print()
 

@@ -1089,6 +1089,25 @@ async def delete_file_from_storage(user: str, file_path: str):
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
 
 
+@app.delete("/storage/delete_s3")
+async def delete_s3_file(path: str, user: str = "default"):
+    """Delete a file by full S3 URI (s3://bucket/key)."""
+    if not path.startswith("s3://"):
+        raise HTTPException(status_code=400, detail="path must be a full s3:// URI")
+    try:
+        logger.info(f"[Storage] delete_s3 path={path} user={user}")
+        success = await storage_backend.delete_file(path, user)
+        if success:
+            return {"status": "success", "path": path}
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to delete {path}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Storage] Error deleting S3 file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
+
+
 @app.get("/storage/exists/{user}/{file_path:path}")
 async def check_file_exists(user: str, file_path: str):
     """Check if a file exists in storage backend."""
