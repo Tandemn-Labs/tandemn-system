@@ -1172,9 +1172,14 @@ if __name__ == "__main__":
         import re as _re
         import signal as _sig
 
+        import shutil as _sh
+        _cf_bin = _sh.which("cloudflared") or os.path.join(os.path.dirname(__file__), "cloudflared")
+        if not os.path.isfile(_cf_bin):
+            print("[Server] ERROR: cloudflared not found on PATH or in repo root")
+            sys.exit(1)
         print(f"[Server] Starting Cloudflare tunnel on port {_args.port}...")
         _tunnel_proc = _sp.Popen(
-            ["cloudflared", "tunnel", "--url", f"http://localhost:{_args.port}"],
+            [_cf_bin, "tunnel", "--url", f"http://localhost:{_args.port}"],
             stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
         )
         _tunnel_url = None
