@@ -85,7 +85,7 @@ class TestMetricsSnapshot:
         snap = MetricsSnapshot.from_prometheus_text("job1", SAMPLE_PROM_TEXT, 1234567.0)
         d = snap.to_dict()
         expected_keys = {
-            "job_id", "timestamp",
+            "job_id", "timestamp", "replica_id",
             "avg_generation_throughput_toks_per_s", "avg_prompt_throughput_toks_per_s",
             "gpu_cache_usage_perc", "num_requests_running", "num_requests_waiting",
             "num_requests_swapped", "request_success_total", "num_preemptions_total",
