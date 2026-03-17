@@ -378,10 +378,15 @@ class MetricsCollector:
         jc.start()
 
     def stop_collecting(self, job_id: str) -> None:
+        prefix = f"{job_id}:"
         with self._lock:
             jc = self._jobs.pop(job_id, None)
+            replica_keys = [k for k in self._replicas if k.startswith(prefix)]
+            replica_collectors = [self._replicas.pop(k) for k in replica_keys]
         if jc:
             jc.stop()
+        for rc in replica_collectors:
+            rc.stop()
 
     def get_latest(self, job_id: str) -> MetricsSnapshot | None:
         with self._lock:
