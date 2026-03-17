@@ -1187,6 +1187,7 @@ if __name__ == "__main__":
     _args = _parser.parse_args()
 
     if _args.tunnel:
+        import sys
         import subprocess as _sp
         import re as _re
         import signal as _sig
