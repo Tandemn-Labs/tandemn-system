@@ -180,6 +180,35 @@ async def get_job_metrics(job_id: str):
     return snap.to_dict()
 
 
+@app.get("/job/{job_id}/replicas")
+async def get_job_replicas(job_id: str):
+    """Get per-replica state and metrics availability for a chunked job."""
+    cm = app.state.cluster_manager
+    mc = app.state.metrics_collector
+    states = cm.get_replica_states(job_id)
+    metrics_ids = set(mc.list_replica_ids(job_id))
+    replicas = []
+    for rid, info in states.items():
+        replicas.append({
+            "replica_id": rid,
+            "phase": info.get("phase", "unknown"),
+            "region": info.get("region"),
+            "market": info.get("market"),
+            "instance_type": info.get("instance_type"),
+            "has_metrics": rid in metrics_ids,
+        })
+    return {"replicas": replicas}
+
+
+@app.get("/job/{job_id}/replicas/{replica_id}/metrics")
+async def get_replica_metrics(job_id: str, replica_id: str):
+    """Get latest live metrics snapshot for a specific replica."""
+    snap = app.state.metrics_collector.get_replica_latest(job_id, replica_id)
+    if snap is None:
+        raise HTTPException(404, f"No metrics for replica {replica_id}")
+    return snap.to_dict()
+
+
 @app.get("/job/{job_id}/metrics/stream")
 async def stream_job_metrics(job_id: str):
     """SSE stream of live metrics for a running job (1 event/sec)."""

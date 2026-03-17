@@ -438,6 +438,13 @@ async def launch_chunked_replicas(
     # Each replica launch takes 5-15 min (SkyPilot provision + setup).
     # If we did this inline, the event loop would be blocked and chunk pull
     # requests from already-running replicas would timeout.
+
+    # Pre-register all replicas as "launching"
+    for i in range(num_replicas):
+        rid = f"{config.decision_id}-r{i}"
+        cm.set_replica_state(config.decision_id, rid, phase="launching")
+        cm.register_for_job(config.decision_id, rid)
+
     def _launch_replica_thread(i):
         import asyncio as _aio
         replica_id = f"{config.decision_id}-r{i}"
@@ -460,6 +467,7 @@ async def launch_chunked_replicas(
             loop.close()
         except Exception as e:
             job_logger.error(f"[Chunked] Failed to launch replica {replica_id}: {e}")
+            cm.set_replica_state(config.decision_id, replica_id, phase="failed")
 
     for i in range(num_replicas):
         t = threading.Thread(
@@ -559,16 +567,22 @@ async def _launch_chunked_replica(
     cm.register(replica_id, parent_job_id,
                 region=actual_region, market=actual_market,
                 instance_type=config.instance_type, num_instances=num_nodes)
+    cm.set_replica_state(parent_job_id, replica_id,
+                         phase="provisioned", region=actual_region,
+                         market=actual_market, instance_type=config.instance_type)
 
     def monitor_replica(sky_job_id):
         """Background thread: stream replica logs, tear down when done."""
+        cm.set_replica_state(parent_job_id, replica_id, phase="running")
         try:
             sky.tail_logs(cluster_name=replica_id, job_id=sky_job_id, follow=True)
             if job_logger:
                 job_logger.info(f"[Chunked] Replica {replica_id} completed")
+            cm.set_replica_state(parent_job_id, replica_id, phase="completed")
         except Exception as e:
             if job_logger:
                 job_logger.error(f"[Chunked] Replica {replica_id} error: {e}")
+            cm.set_replica_state(parent_job_id, replica_id, phase="failed")
         finally:
             if quota_tracker is not None:
                 quota_tracker.release_cluster(replica_id)

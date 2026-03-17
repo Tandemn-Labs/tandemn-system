@@ -129,6 +129,7 @@ class ClusterManager:
         self._threads: Dict[str, threading.Thread] = {}
         self._persist_set: set = set()
         self._job_clusters: Dict[str, list] = {}  # job_id → [cluster_names]
+        self._replica_states: Dict[str, Dict[str, dict]] = {}  # job_id → {replica_id → state}
         self.lock = Lock()
 
     def register(self, cluster_name: str, job_id: str, region: str = None,
@@ -169,6 +170,18 @@ class ClusterManager:
     def get_job_clusters(self, job_id: str) -> list:
         with self.lock:
             return list(self._job_clusters.get(job_id, []))
+
+    def set_replica_state(self, job_id: str, replica_id: str, **kwargs):
+        with self.lock:
+            if job_id not in self._replica_states:
+                self._replica_states[job_id] = {}
+            if replica_id not in self._replica_states[job_id]:
+                self._replica_states[job_id][replica_id] = {}
+            self._replica_states[job_id][replica_id].update(kwargs)
+
+    def get_replica_states(self, job_id: str) -> Dict[str, dict]:
+        with self.lock:
+            return dict(self._replica_states.get(job_id, {}))
 
     def get_active_threads(self) -> Dict[str, threading.Thread]:
         with self.lock:
