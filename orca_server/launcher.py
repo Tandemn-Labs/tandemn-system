@@ -434,30 +434,41 @@ async def launch_chunked_replicas(
 
     cm = get_cluster_manager()
 
-    for i in range(num_replicas):
+    # Launch all replicas in background threads so the server stays responsive.
+    # Each replica launch takes 5-15 min (SkyPilot provision + setup).
+    # If we did this inline, the event loop would be blocked and chunk pull
+    # requests from already-running replicas would timeout.
+    def _launch_replica_thread(i):
+        import asyncio as _aio
         replica_id = f"{config.decision_id}-r{i}"
         replica_config = config.model_copy(update={
             "decision_id": replica_id,
             "replicas": 1,
             "num_instances": config.pp_size,
         })
-
         job_logger.info(f"[Chunked] Launching replica {i}/{num_replicas}: {replica_id}")
-
         try:
-            await _launch_chunked_replica(
+            loop = _aio.new_event_loop()
+            loop.run_until_complete(_launch_chunked_replica(
                 request, replica_config, replica_id,
                 parent_job_id=config.decision_id,
                 job_dirname=job_dirname,
                 job_logger=job_logger,
                 quota_tracker=quota_tracker,
                 persist=persist,
-            )
+            ))
+            loop.close()
         except Exception as e:
             job_logger.error(f"[Chunked] Failed to launch replica {replica_id}: {e}")
-            # Continue launching remaining replicas
 
-    # Track all replica clusters under the parent job
+    for i in range(num_replicas):
+        t = threading.Thread(
+            target=_launch_replica_thread, args=(i,),
+            daemon=False, name=f"orca-launch-r{i}",
+        )
+        t.start()
+
+    # Track parent job (individual replicas register themselves on launch)
     cm.register(config.decision_id, config.decision_id,
                 instance_type=config.instance_type,
                 num_instances=num_replicas * config.pp_size)

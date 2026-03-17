@@ -247,6 +247,10 @@ def _estimate_max_concurrency_from_metrics() -> Optional[int]:
 # Chunk pull / complete / upload
 # ---------------------------------------------------------------------------
 
+_SENTINEL_QUEUE_EMPTY = "QUEUE_EMPTY"
+_SENTINEL_TRANSIENT_ERROR = "TRANSIENT_ERROR"
+
+
 def _auth_headers() -> dict:
     headers = {"Content-Type": "application/json"}
     if ORCA_KEY:
@@ -254,9 +258,23 @@ def _auth_headers() -> dict:
     return headers
 
 
-def pull_chunk_from_server() -> Optional[dict]:
-    """Pull next chunk from control plane. Returns chunk info or None if empty."""
-    try:
+def _retry(fn, description: str, max_attempts: int = 5, base_delay: float = 2.0):
+    """Retry with exponential backoff. Returns fn() result or raises on exhaustion."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except Exception as e:
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f"[Runner] {description} failed (attempt {attempt}/{max_attempts}): {e}")
+            if attempt < max_attempts:
+                print(f"[Runner] Retrying in {delay:.0f}s...")
+                time.sleep(delay)
+    raise RuntimeError(f"{description} failed after {max_attempts} attempts")
+
+
+def pull_chunk_from_server():
+    """Pull next chunk. Returns chunk dict, _SENTINEL_QUEUE_EMPTY, or _SENTINEL_TRANSIENT_ERROR."""
+    def _pull():
         resp = requests.post(
             f"{ORCA_URL}/job/{JOB_ID}/chunks/pull",
             json={"replica_id": REPLICA_ID},
@@ -264,17 +282,19 @@ def pull_chunk_from_server() -> Optional[dict]:
             timeout=30,
         )
         if resp.status_code == 204:
-            return None
+            return _SENTINEL_QUEUE_EMPTY
         resp.raise_for_status()
         return resp.json()
-    except Exception as e:
-        print(f"[Runner] Error pulling chunk: {e}")
-        return None
+
+    try:
+        return _retry(_pull, "Chunk pull", max_attempts=5)
+    except RuntimeError:
+        return _SENTINEL_TRANSIENT_ERROR
 
 
 def report_chunk_complete(chunk_id: str) -> dict:
-    """Report chunk completion to control plane."""
-    try:
+    """Report chunk completion to control plane (with retries)."""
+    def _complete():
         resp = requests.post(
             f"{ORCA_URL}/job/{JOB_ID}/chunks/complete",
             json={"chunk_id": chunk_id, "replica_id": REPLICA_ID},
@@ -283,22 +303,22 @@ def report_chunk_complete(chunk_id: str) -> dict:
         )
         resp.raise_for_status()
         return resp.json()
-    except Exception as e:
-        print(f"[Runner] Error reporting chunk complete: {e}")
+
+    try:
+        return _retry(_complete, f"Complete chunk {chunk_id}", max_attempts=5)
+    except RuntimeError:
         return {}
 
 
 def download_chunk(s3_input_path: str, local_path: str) -> bool:
-    """Download a chunk via the control plane's storage streaming endpoint."""
-    try:
-        # Strip s3://bucket/ prefix to get the file path for the download endpoint
-        # s3://tandemn-orca/uploads/orca-cli/file.jsonl → uploads/orca-cli/file.jsonl
-        parts = s3_input_path.replace("s3://", "").split("/", 1)
-        if len(parts) < 2:
-            print(f"[Runner] Invalid S3 path: {s3_input_path}")
-            return False
-        file_path = parts[1]
+    """Download a chunk via the control plane's storage streaming endpoint (with retries)."""
+    parts = s3_input_path.replace("s3://", "").split("/", 1)
+    if len(parts) < 2:
+        print(f"[Runner] Invalid S3 path: {s3_input_path}")
+        return False
+    file_path = parts[1]
 
+    def _download():
         resp = requests.get(
             f"{ORCA_URL}/storage/download/chunk-runner/{file_path}",
             timeout=120,
@@ -306,17 +326,19 @@ def download_chunk(s3_input_path: str, local_path: str) -> bool:
         )
         resp.raise_for_status()
         with open(local_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+            for data in resp.iter_content(chunk_size=8192):
+                f.write(data)
+
+    try:
+        _retry(_download, f"Download {s3_input_path}", max_attempts=3, base_delay=3.0)
         return True
-    except Exception as e:
-        print(f"[Runner] Download failed for {s3_input_path}: {e}")
+    except RuntimeError:
         return False
 
 
 def upload_chunk_output(local_path: str, s3_output_path: str) -> bool:
-    """Upload chunk output via the control plane's storage endpoint."""
-    try:
+    """Upload chunk output via the control plane's storage endpoint (with retries)."""
+    def _upload():
         with open(local_path, "rb") as f:
             resp = requests.post(
                 f"{ORCA_URL}/storage/upload",
@@ -325,9 +347,11 @@ def upload_chunk_output(local_path: str, s3_output_path: str) -> bool:
                 timeout=120,
             )
         resp.raise_for_status()
+
+    try:
+        _retry(_upload, f"Upload {s3_output_path}", max_attempts=3, base_delay=3.0)
         return True
-    except Exception as e:
-        print(f"[Runner] Upload failed for {s3_output_path}: {e}")
+    except RuntimeError:
         return False
 
 
@@ -344,18 +368,28 @@ def load_requests(input_file: str) -> List[Dict[str, Any]]:
 
 
 def pull_and_download_chunk() -> tuple:
-    """Pull a chunk from the queue and download it. Returns (chunk_info, requests) or (None, None)."""
-    chunk_info = pull_chunk_from_server()
-    if chunk_info is None:
-        return None, None
+    """Pull a chunk and download it.
 
+    Returns:
+        (chunk_info, requests) — normal chunk
+        (_SENTINEL_QUEUE_EMPTY, None) — queue is definitively empty
+        (_SENTINEL_TRANSIENT_ERROR, None) — couldn't reach server, should retry later
+        (chunk_info, []) — pulled but download failed
+    """
+    result = pull_chunk_from_server()
+    if result == _SENTINEL_QUEUE_EMPTY:
+        return _SENTINEL_QUEUE_EMPTY, None
+    if result == _SENTINEL_TRANSIENT_ERROR:
+        return _SENTINEL_TRANSIENT_ERROR, None
+
+    chunk_info = result
     cid = chunk_info.get("chunk_id", "unknown")
     s3_path = chunk_info.get("s3_input_path", "")
     local_path = f"/tmp/chunk_{JOB_ID}_{cid}.jsonl"
 
     print(f"[Runner] Downloading chunk {cid} from {s3_path}")
     if not download_chunk(s3_path, local_path):
-        print(f"[Runner] Failed to download chunk {cid}")
+        print(f"[Runner] Failed to download chunk {cid} after retries")
         return chunk_info, []
 
     reqs = load_requests(local_path)
@@ -578,16 +612,33 @@ def main():
 
         chunks_processed = 0
         total_requests = 0
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 10
 
         # Prefetch first chunk
         prefetch_future = executor.submit(pull_and_download_chunk)
 
         while True:
             chunk_info, chunk_requests = prefetch_future.result()
-            if chunk_info is None:
-                print("[Runner] No more chunks in queue")
+
+            # Definitively empty — all chunks consumed
+            if chunk_info == _SENTINEL_QUEUE_EMPTY:
+                print("[Runner] Queue empty — all chunks consumed")
                 break
 
+            # Transient error — server unreachable, back off and retry
+            if chunk_info == _SENTINEL_TRANSIENT_ERROR:
+                consecutive_errors += 1
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    print(f"[Runner] {MAX_CONSECUTIVE_ERRORS} consecutive errors — giving up")
+                    break
+                delay = min(30, 2 ** consecutive_errors)
+                print(f"[Runner] Server unreachable ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}), retrying in {delay}s...")
+                time.sleep(delay)
+                prefetch_future = executor.submit(pull_and_download_chunk)
+                continue
+
+            consecutive_errors = 0  # reset on success
             cid = chunk_info.get("chunk_id", "unknown")
             s3_output_path = chunk_info.get("s3_output_path", "")
 
@@ -595,7 +646,7 @@ def main():
             prefetch_future = executor.submit(pull_and_download_chunk)
 
             if not chunk_requests:
-                print(f"[Runner] Chunk {cid}: empty, skipping")
+                print(f"[Runner] Chunk {cid}: download failed, reporting complete (empty)")
                 report_chunk_complete(cid)
                 continue
 
