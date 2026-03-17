@@ -241,16 +241,16 @@ class MetricsDB:
             conn.execute(_CREATE_RUNS)
             conn.execute(_CREATE_TIMESERIES)
             conn.execute(_CREATE_INDEX)
-            conn.execute(_CREATE_INDEX_REPLICA)
             # Migrate: add columns that may be missing in existing DBs
             existing = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
             for col, dtype in self._MIGRATE_COLUMNS:
                 if col not in existing:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {dtype}")
-            # Migrate timeseries: add replica_id if missing
+            # Migrate timeseries: add replica_id if missing (must run before replica index)
             ts_cols = {r[1] for r in conn.execute("PRAGMA table_info(timeseries)").fetchall()}
             if "replica_id" not in ts_cols:
                 conn.execute("ALTER TABLE timeseries ADD COLUMN replica_id TEXT")
+            conn.execute(_CREATE_INDEX_REPLICA)
             conn.commit()
 
     # ------------------------------------------------------------------
