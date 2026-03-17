@@ -862,6 +862,67 @@ def cmd_clusters(args):
     _sp.run(["sky", "status"], check=False)
 
 
+def cmd_destroy(args):
+    """Tear down Orca clusters."""
+    import subprocess as _sp
+    print(LOGO)
+    header("DESTROY")
+
+    if args.all:
+        # Find all mo-* clusters (Orca naming convention)
+        step("Finding Orca clusters...")
+        result = _sp.run(["sky", "status", "--format", "json"], capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"\n  {RED}Error:{RESET} Could not list clusters\n")
+            return
+        try:
+            clusters = json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            clusters = []
+
+        orca_clusters = [c["name"] for c in clusters if c.get("name", "").startswith("mo-")]
+        if not orca_clusters:
+            print(f"\n  {DIM}No Orca clusters found.{RESET}\n")
+            return
+
+        print()
+        for name in orca_clusters:
+            print(f"  {DIM}-{RESET} {name}")
+        print()
+
+        answer = input(f"  {YELLOW}Destroy {len(orca_clusters)} cluster(s)? [y/N]:{RESET} ").strip().lower()
+        if answer != "y":
+            print(f"\n  {DIM}Aborted.{RESET}\n")
+            return
+
+        for name in orca_clusters:
+            step(f"Destroying {c(name, CYAN)}...")
+            _sp.run(["sky", "down", "-y", name], check=False, timeout=300)
+        ok(f"Destroyed {len(orca_clusters)} cluster(s)")
+    elif args.job_id:
+        step(f"Destroying clusters for job {c(args.job_id, CYAN)}...")
+        # Find clusters matching job_id prefix
+        result = _sp.run(["sky", "status", "--format", "json"], capture_output=True, text=True, timeout=30)
+        try:
+            clusters = json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            clusters = []
+
+        matches = [c_["name"] for c_ in clusters if c_.get("name", "").startswith(args.job_id)]
+        if not matches:
+            print(f"\n  {DIM}No clusters found for {args.job_id}{RESET}\n")
+            return
+
+        for name in matches:
+            step(f"Destroying {c(name, CYAN)}...")
+            _sp.run(["sky", "down", "-y", name], check=False, timeout=300)
+        ok(f"Destroyed {len(matches)} cluster(s)")
+    else:
+        print(f"\n  {DIM}Specify --all or a job_id.{RESET}\n")
+
+    print()
+
+
 def cmd_metrics(args):
     """Show live vLLM metrics for a job."""
     job_id = args.job_id
@@ -1301,6 +1362,11 @@ Examples:
     p_stream = subparsers.add_parser("stream", help="Stream live SSE metrics for a running job")
     p_stream.add_argument("job_id", help="Job ID to stream")
 
+    # destroy
+    p_destroy = subparsers.add_parser("destroy", help="Tear down Orca clusters")
+    p_destroy.add_argument("job_id", nargs="?", help="Job ID to destroy clusters for")
+    p_destroy.add_argument("--all", action="store_true", help="Destroy ALL Orca clusters")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1320,6 +1386,7 @@ Examples:
         "inspect": cmd_inspect,
         "timeseries": cmd_timeseries,
         "stream": cmd_stream,
+        "destroy": cmd_destroy,
     }
 
     commands[args.command](args)
