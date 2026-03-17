@@ -10,6 +10,9 @@ from orca_server.monitoring import (
     MetricsCollector,
     MetricsSnapshot,
     _JobCollector,
+    _merge_snapshots,
+    _SUM_FIELDS,
+    _AVG_FIELDS,
     histogram_quantile,
     POLL_INTERVAL_SEC,
     RING_BUFFER_SIZE,
@@ -512,3 +515,176 @@ class TestV1Engine:
             snap2.generation_tokens_total - snap1.generation_tokens_total
         ) / dt
         assert snap2.avg_generation_throughput_toks_per_s == pytest.approx(800.0)
+
+
+# ---------------------------------------------------------------------------
+# TestAggregatedMetrics — multi-replica merge logic
+# ---------------------------------------------------------------------------
+
+def _replica_snap(job_id: str, replica_id: str, ts: float, **kwargs) -> MetricsSnapshot:
+    snap = MetricsSnapshot(job_id=job_id, timestamp=ts, replica_id=replica_id)
+    for k, v in kwargs.items():
+        setattr(snap, k, v)
+    return snap
+
+
+class TestAggregatedMetrics:
+    def setup_method(self):
+        self.mc = MetricsCollector()
+
+    def _inject_replica(self, job_id: str, replica_id: str, snap: MetricsSnapshot):
+        """Push a snapshot into a replica collector."""
+        self.mc.start_replica_collecting(job_id, replica_id)
+        key = f"{job_id}:{replica_id}"
+        jc = self.mc._replicas[key]
+        with jc.lock:
+            jc.buffer.append(snap)
+
+    def test_sum_fields_are_summed(self):
+        s1 = _replica_snap("j", "r1", 10.0,
+                           avg_generation_throughput_toks_per_s=1200.0,
+                           avg_prompt_throughput_toks_per_s=300.0,
+                           generation_tokens_total=50000.0,
+                           prompt_tokens_total=10000.0,
+                           request_success_total=400.0,
+                           num_preemptions_total=1.0,
+                           num_requests_running=80,
+                           num_requests_waiting=5,
+                           num_requests_swapped=0)
+        s2 = _replica_snap("j", "r2", 12.0,
+                           avg_generation_throughput_toks_per_s=1100.0,
+                           avg_prompt_throughput_toks_per_s=280.0,
+                           generation_tokens_total=48000.0,
+                           prompt_tokens_total=9500.0,
+                           request_success_total=380.0,
+                           num_preemptions_total=2.0,
+                           num_requests_running=75,
+                           num_requests_waiting=3,
+                           num_requests_swapped=1)
+        self._inject_replica("j", "r1", s1)
+        self._inject_replica("j", "r2", s2)
+
+        agg = self.mc.get_aggregated("j")
+        assert agg is not None
+        assert agg.avg_generation_throughput_toks_per_s == pytest.approx(2300.0)
+        assert agg.avg_prompt_throughput_toks_per_s == pytest.approx(580.0)
+        assert agg.generation_tokens_total == pytest.approx(98000.0)
+        assert agg.prompt_tokens_total == pytest.approx(19500.0)
+        assert agg.request_success_total == pytest.approx(780.0)
+        assert agg.num_preemptions_total == pytest.approx(3.0)
+        assert agg.num_requests_running == 155
+        assert agg.num_requests_waiting == 8
+        assert agg.num_requests_swapped == 1
+
+    def test_avg_fields_are_averaged(self):
+        s1 = _replica_snap("j", "r1", 10.0,
+                           gpu_cache_usage_perc=0.60,
+                           prefix_cache_hit_rate=0.80,
+                           ttft_ms_p50=25.0, ttft_ms_p95=50.0, ttft_ms_p99=80.0,
+                           e2e_ms_p50=100.0)
+        s2 = _replica_snap("j", "r2", 12.0,
+                           gpu_cache_usage_perc=0.40,
+                           prefix_cache_hit_rate=0.60,
+                           ttft_ms_p50=35.0, ttft_ms_p95=70.0, ttft_ms_p99=120.0,
+                           e2e_ms_p50=200.0)
+        self._inject_replica("j", "r1", s1)
+        self._inject_replica("j", "r2", s2)
+
+        agg = self.mc.get_aggregated("j")
+        assert agg.gpu_cache_usage_perc == pytest.approx(0.50)
+        assert agg.prefix_cache_hit_rate == pytest.approx(0.70)
+        assert agg.ttft_ms_p50 == pytest.approx(30.0)
+        assert agg.ttft_ms_p95 == pytest.approx(60.0)
+        assert agg.ttft_ms_p99 == pytest.approx(100.0)
+        assert agg.e2e_ms_p50 == pytest.approx(150.0)
+
+    def test_avg_skips_nones(self):
+        s1 = _replica_snap("j", "r1", 10.0, ttft_ms_p50=40.0, prefix_cache_hit_rate=None)
+        s2 = _replica_snap("j", "r2", 10.0, ttft_ms_p50=None, prefix_cache_hit_rate=0.5)
+        self._inject_replica("j", "r1", s1)
+        self._inject_replica("j", "r2", s2)
+
+        agg = self.mc.get_aggregated("j")
+        assert agg.ttft_ms_p50 == pytest.approx(40.0)  # only r1
+        assert agg.prefix_cache_hit_rate == pytest.approx(0.5)  # only r2
+
+    def test_all_avg_none_gives_none(self):
+        s1 = _replica_snap("j", "r1", 10.0, ttft_ms_p50=None)
+        s2 = _replica_snap("j", "r2", 10.0, ttft_ms_p50=None)
+        self._inject_replica("j", "r1", s1)
+        self._inject_replica("j", "r2", s2)
+
+        agg = self.mc.get_aggregated("j")
+        assert agg.ttft_ms_p50 is None
+
+    def test_timestamp_is_max(self):
+        s1 = _replica_snap("j", "r1", 100.0)
+        s2 = _replica_snap("j", "r2", 200.0)
+        self._inject_replica("j", "r1", s1)
+        self._inject_replica("j", "r2", s2)
+
+        agg = self.mc.get_aggregated("j")
+        assert agg.timestamp == pytest.approx(200.0)
+
+    def test_metadata(self):
+        s1 = _replica_snap("j", "r1", 10.0)
+        self._inject_replica("j", "r1", s1)
+
+        agg = self.mc.get_aggregated("j")
+        assert agg.job_id == "j"
+        assert agg.replica_id is None  # aggregated view
+
+    def test_fallback_no_replicas(self):
+        """Single-cluster job (no replicas) falls back to get_latest."""
+        jc = _JobCollector("j-single", None)
+        snap = MetricsSnapshot("j-single", 5.0)
+        snap.avg_generation_throughput_toks_per_s = 999.0
+        with jc.lock:
+            jc.buffer.append(snap)
+        with self.mc._lock:
+            self.mc._jobs["j-single"] = jc
+
+        agg = self.mc.get_aggregated("j-single")
+        assert agg is not None
+        assert agg.avg_generation_throughput_toks_per_s == pytest.approx(999.0)
+
+    def test_fallback_empty_replica_buffers(self):
+        """Replicas exist but have empty buffers — falls back to _jobs."""
+        self.mc.start_replica_collecting("j", "r1")
+        # Don't push any snapshots to replica
+        jc = _JobCollector("j", None)
+        snap = MetricsSnapshot("j", 5.0)
+        snap.avg_generation_throughput_toks_per_s = 42.0
+        with jc.lock:
+            jc.buffer.append(snap)
+        with self.mc._lock:
+            self.mc._jobs["j"] = jc
+
+        agg = self.mc.get_aggregated("j")
+        assert agg is not None
+        assert agg.avg_generation_throughput_toks_per_s == pytest.approx(42.0)
+
+    def test_merge_snapshots_direct(self):
+        """Test the _merge_snapshots helper directly."""
+        snaps = [
+            _replica_snap("j", "r1", 10.0,
+                          avg_generation_throughput_toks_per_s=500.0,
+                          gpu_cache_usage_perc=0.3),
+            _replica_snap("j", "r2", 20.0,
+                          avg_generation_throughput_toks_per_s=700.0,
+                          gpu_cache_usage_perc=0.5),
+        ]
+        merged = _merge_snapshots("j", snaps)
+        assert merged.job_id == "j"
+        assert merged.timestamp == pytest.approx(20.0)
+        assert merged.replica_id is None
+        assert merged.avg_generation_throughput_toks_per_s == pytest.approx(1200.0)
+        assert merged.gpu_cache_usage_perc == pytest.approx(0.4)
+
+    def test_sum_treats_none_as_zero(self):
+        """Sum fields should treat None (default for optional) as 0."""
+        s1 = MetricsSnapshot(job_id="j", timestamp=1.0, replica_id="r1")
+        s2 = MetricsSnapshot(job_id="j", timestamp=1.0, replica_id="r2")
+        s2.avg_generation_throughput_toks_per_s = 100.0
+        merged = _merge_snapshots("j", [s1, s2])
+        assert merged.avg_generation_throughput_toks_per_s == pytest.approx(100.0)

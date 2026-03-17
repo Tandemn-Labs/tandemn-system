@@ -888,16 +888,18 @@ def cmd_destroy(args):
 
     # ── 1. Discover SkyPilot clusters ────────────────────────────────────
     step("Finding Orca clusters...")
-    result = _sp.run(["sky", "status", "--format", "json"], capture_output=True, text=True, timeout=30)
     try:
-        clusters = json.loads(result.stdout) if result.returncode == 0 else []
-    except (json.JSONDecodeError, ValueError):
-        clusters = []
+        import sky as _sky
+        _rid = _sky.status()
+        _all_clusters = _sky.stream_and_get(_rid)
+    except Exception as e:
+        print(f"  {YELLOW}Warning:{RESET} Could not query SkyPilot: {e}")
+        _all_clusters = []
 
     if args.all:
-        orca_clusters = [cl["name"] for cl in clusters if cl.get("name", "").startswith("mo-")]
+        orca_clusters = [c.name for c in _all_clusters if c.name.startswith("mo-")]
     else:
-        orca_clusters = [cl["name"] for cl in clusters if cl.get("name", "").startswith(args.job_id)]
+        orca_clusters = [c.name for c in _all_clusters if c.name.startswith(args.job_id)]
 
     # ── 2. Discover Redis chunk keys ─────────────────────────────────────
     redis_keys = []
@@ -971,7 +973,11 @@ def cmd_destroy(args):
     # Clusters
     for name in orca_clusters:
         step(f"Destroying cluster {c(name, CYAN)}...")
-        _sp.run(["sky", "down", "-y", name], check=False, timeout=300)
+        try:
+            _rid = _sky.down(name)
+            _sky.stream_and_get(_rid)
+        except Exception as e:
+            print(f"  {YELLOW}Warning:{RESET} Failed to destroy {name}: {e}")
     if orca_clusters:
         step(f"Destroyed {len(orca_clusters)} cluster(s)", icon=f"{GREEN}✔{RESET}")
 
@@ -1009,11 +1015,77 @@ def cmd_destroy(args):
     print()
 
 
+def _render_snap(md, label):
+    """Render a single metrics snapshot into display lines."""
+    tps = md.get("avg_generation_throughput_toks_per_s", 0)
+    kv = md.get("gpu_cache_usage_perc", 0) * 100
+    running = md.get("num_requests_running", 0)
+    waiting = md.get("num_requests_waiting", 0)
+    done = int(md.get("request_success_total", 0))
+    ttft = md.get("ttft_ms_p50")
+    tpot = md.get("tpot_ms_p50")
+    lines = [
+        f"{DIM}Throughput:{RESET}   {c(f'{tps:.0f}', GREEN+BOLD)} tok/s",
+        f"{DIM}KV Cache:{RESET}     {bar(kv / 100, 30)}",
+        f"{DIM}Running:{RESET}      {c(str(running), CYAN)}   {DIM}Waiting:{RESET} {waiting}",
+        f"{DIM}Completed:{RESET}    {done}",
+    ]
+    if ttft is not None:
+        lines.append(f"{DIM}TTFT p50:{RESET}     {ttft:.1f}ms")
+    if tpot is not None:
+        lines.append(f"{DIM}TPOT p50:{RESET}     {tpot:.1f}ms")
+    return box(lines, title=label)
+
+
 def cmd_metrics(args):
     """Show live vLLM metrics for a job."""
     job_id = args.job_id
     watch = args.watch
     replica = getattr(args, 'replica', None)
+    compare = getattr(args, 'compare', False)
+
+    if compare:
+        print(LOGO)
+        header("METRICS COMPARISON")
+
+        def _fetch_compare():
+            # Aggregated
+            agg_resp = api("get", f"/job/{job_id}/metrics", timeout=5)
+            if agg_resp.status_code != 200:
+                return f"  {RED}No aggregated metrics for {job_id}.{RESET}"
+            # Replica list
+            rep_resp = api("get", f"/job/{job_id}/replicas", timeout=5)
+            replicas = rep_resp.json().get("replicas", []) if rep_resp.status_code == 200 else []
+
+            output = _render_snap(agg_resp.json(), "AGGREGATED (fleet total)")
+            for r in replicas:
+                rid = r["replica_id"]
+                rr = api("get", f"/job/{job_id}/replicas/{rid}/metrics", timeout=5)
+                if rr.status_code == 200:
+                    output += "\n" + _render_snap(rr.json(), f"REPLICA: {rid}")
+                else:
+                    output += f"\n  {DIM}{rid}: no metrics yet{RESET}"
+            return output
+
+        if watch:
+            step(f"Comparing replicas for: {c(job_id, CYAN+BOLD)} (Ctrl+C to stop)")
+            print()
+            prev_lines = 0
+            try:
+                while True:
+                    rendered = _fetch_compare()
+                    if prev_lines:
+                        sys.stdout.write(f"\033[{prev_lines}A\033[J")
+                    print(rendered)
+                    sys.stdout.flush()
+                    prev_lines = rendered.count("\n") + 1
+                    time.sleep(2)
+            except KeyboardInterrupt:
+                print(f"\n\n  {DIM}Stopped.{RESET}")
+        else:
+            print(_fetch_compare())
+        print()
+        return
 
     def _fetch_and_render():
         if replica:
@@ -1429,6 +1501,7 @@ Examples:
     p_metrics.add_argument("job_id", help="Job ID to inspect")
     p_metrics.add_argument("--watch", "-w", action="store_true", help="Refresh every 2s")
     p_metrics.add_argument("--replica", "-r", help="Show metrics for a specific replica (e.g. mo-xxx-r0)")
+    p_metrics.add_argument("--compare", "-c", action="store_true", help="Show aggregated + per-replica side by side")
 
     # history
     p_history = subparsers.add_parser("history", help="Show completed run history")

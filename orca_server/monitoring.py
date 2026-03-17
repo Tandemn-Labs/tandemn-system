@@ -195,6 +195,42 @@ class MetricsSnapshot:
         }
 
 
+_SUM_FIELDS = {
+    "avg_generation_throughput_toks_per_s",
+    "avg_prompt_throughput_toks_per_s",
+    "generation_tokens_total",
+    "prompt_tokens_total",
+    "request_success_total",
+    "num_preemptions_total",
+    "num_requests_running",
+    "num_requests_waiting",
+    "num_requests_swapped",
+}
+
+_AVG_FIELDS = {
+    "gpu_cache_usage_perc",
+    "prefix_cache_hit_rate",
+    "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
+    "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
+    "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
+    "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
+    "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
+    "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+    "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+}
+
+
+def _merge_snapshots(job_id: str, snaps: list[MetricsSnapshot]) -> MetricsSnapshot:
+    """Merge per-replica snapshots into a single aggregated view."""
+    merged = MetricsSnapshot(job_id=job_id, timestamp=max(s.timestamp for s in snaps))
+    for f in _SUM_FIELDS:
+        setattr(merged, f, sum(getattr(s, f, 0) or 0 for s in snaps))
+    for f in _AVG_FIELDS:
+        vals = [v for s in snaps if (v := getattr(s, f, None)) is not None]
+        setattr(merged, f, sum(vals) / len(vals) if vals else None)
+    return merged
+
+
 class _JobCollector:
     def __init__(self, job_id: str, endpoint_url: str | None):
         self.job_id = job_id
@@ -404,6 +440,17 @@ class MetricsCollector:
         with self._lock:
             return [k[len(prefix):] for k in self._replicas if k.startswith(prefix)]
 
+    def get_aggregated(self, job_id: str) -> MetricsSnapshot | None:
+        """Return a merged view across all replicas, or fall back to get_latest."""
+        replica_ids = self.list_replica_ids(job_id)
+        if not replica_ids:
+            return self.get_latest(job_id)
+        snaps = [s for rid in replica_ids
+                 if (s := self.get_replica_latest(job_id, rid)) is not None]
+        if not snaps:
+            return self.get_latest(job_id)
+        return _merge_snapshots(job_id, snaps)
+
     def get_recent(self, job_id: str, n: int = 60) -> list[dict]:
         with self._lock:
             jc = self._jobs.get(job_id)
@@ -435,8 +482,11 @@ class MetricsCollector:
         ]
         with self._lock:
             items = list(self._jobs.items())
-        for job_id, jc in items:
-            snap = jc.latest()
+        agg_snaps = {}
+        for job_id, _jc in items:
+            agg_snaps[job_id] = self.get_aggregated(job_id)
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
             if snap is None:
                 continue
             lines.append(
@@ -447,8 +497,8 @@ class MetricsCollector:
             "# HELP orca_job_kv_cache_util KV cache utilization (0-1)",
             "# TYPE orca_job_kv_cache_util gauge",
         ]
-        for job_id, jc in items:
-            snap = jc.latest()
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
             if snap is None:
                 continue
             lines.append(f'orca_job_kv_cache_util{{job_id="{job_id}"}} {snap.gpu_cache_usage_perc}')
@@ -456,8 +506,8 @@ class MetricsCollector:
             "# HELP orca_job_requests_running Running requests",
             "# TYPE orca_job_requests_running gauge",
         ]
-        for job_id, jc in items:
-            snap = jc.latest()
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
             if snap is None:
                 continue
             lines.append(f'orca_job_requests_running{{job_id="{job_id}"}} {snap.num_requests_running}')
@@ -465,8 +515,8 @@ class MetricsCollector:
             "# HELP orca_job_requests_waiting Waiting requests",
             "# TYPE orca_job_requests_waiting gauge",
         ]
-        for job_id, jc in items:
-            snap = jc.latest()
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
             if snap is None:
                 continue
             lines.append(f'orca_job_requests_waiting{{job_id="{job_id}"}} {snap.num_requests_waiting}')
@@ -477,7 +527,7 @@ class MetricsCollector:
         while True:
             with self._lock:
                 still_active = job_id in self._jobs
-            snap = self.get_latest(job_id)
+            snap = self.get_aggregated(job_id)
             if snap:
                 data = snap.to_dict()
                 sustained = self.get_sustained_throughput(job_id)

@@ -174,7 +174,7 @@ async def list_jobs():
 @app.get("/job/{job_id}/metrics")
 async def get_job_metrics(job_id: str):
     """Get latest live metrics snapshot for a running job."""
-    snap = app.state.metrics_collector.get_latest(job_id)
+    snap = app.state.metrics_collector.get_aggregated(job_id)
     if snap is None:
         raise HTTPException(404, f"No metrics for {job_id}")
     return snap.to_dict()
@@ -1164,7 +1164,39 @@ if __name__ == "__main__":
     _parser = _ap.ArgumentParser(description="Orca control plane server")
     _parser.add_argument("--url", help="Public URL for this server (e.g. Cloudflare tunnel URL). Overrides ORCA_SERVER_URL env var.")
     _parser.add_argument("--port", type=int, default=26336)
+    _parser.add_argument("--tunnel", action="store_true", help="Auto-start a Cloudflare tunnel and use its URL")
     _args = _parser.parse_args()
+
+    if _args.tunnel:
+        import subprocess as _sp
+        import re as _re
+        import signal as _sig
+
+        print(f"[Server] Starting Cloudflare tunnel on port {_args.port}...")
+        _tunnel_proc = _sp.Popen(
+            ["cloudflared", "tunnel", "--url", f"http://localhost:{_args.port}"],
+            stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
+        )
+        _tunnel_url = None
+        for _line in iter(_tunnel_proc.stdout.readline, ""):
+            _m = _re.search(r"(https://[a-z0-9-]+\.trycloudflare\.com)", _line)
+            if _m:
+                _tunnel_url = _m.group(1)
+                break
+        if not _tunnel_url:
+            print("[Server] ERROR: Could not detect Cloudflare tunnel URL")
+            _tunnel_proc.kill()
+            sys.exit(1)
+        _args.url = _tunnel_url
+        print(f"[Server] Tunnel ready: {_tunnel_url}")
+
+        def _cleanup_tunnel(*_a):
+            _tunnel_proc.terminate()
+            _tunnel_proc.wait(timeout=5)
+        import atexit
+        atexit.register(_cleanup_tunnel)
+        _sig.signal(_sig.SIGINT, lambda *_a: (atexit._run_exitfuncs(), sys.exit(0)))
+        _sig.signal(_sig.SIGTERM, lambda *_a: (atexit._run_exitfuncs(), sys.exit(0)))
 
     if _args.url:
         from orca_server import config as _cfg
