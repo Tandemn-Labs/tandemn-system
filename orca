@@ -242,6 +242,56 @@ def header(msg):
     print(f"  {BOLD}{MAGENTA}{'━' * 60}{RESET}")
 
 
+def _poll_replica_launch(job_id, num_replicas):
+    """Poll /job/{id}/replicas until all are provisioned, or Ctrl+C."""
+    ORCA_FISH = "><(((o>~~~"
+    PHASE_ICON = {
+        "launching": f"{YELLOW}..{RESET}",
+        "provisioned": f"{GREEN}ok{RESET}",
+        "running": f"{GREEN}ok{RESET}",
+        "completed": f"{GREEN}ok{RESET}",
+        "failed": f"{RED}!!{RESET}",
+    }
+    print(f"\n  {CYAN}{ORCA_FISH}{RESET} launching {num_replicas} replicas...\n")
+    seen = {}  # replica_id → last printed phase
+    try:
+        while True:
+            try:
+                resp = api("get", f"/job/{job_id}/replicas", timeout=5)
+                if resp.status_code != 200:
+                    time.sleep(5)
+                    continue
+                replicas = resp.json().get("replicas", [])
+            except Exception:
+                time.sleep(5)
+                continue
+
+            for r in replicas:
+                rid = r["replica_id"]
+                phase = r.get("phase", "launching")
+                if rid in seen and seen[rid] == phase:
+                    continue
+                seen[rid] = phase
+                icon = PHASE_ICON.get(phase, f"{DIM}?{RESET}")
+                # Short replica label: r0, r1 from "mo-xxx-r0"
+                short = rid.rsplit("-", 1)[-1] if "-r" in rid else rid[-6:]
+                region = r.get("region") or ""
+                market = r.get("market") or ""
+                loc = f"({region}, {market})" if region else ""
+                print(f"  [{icon}] {short}  {DIM}{rid}{RESET}  {loc}")
+
+            # Exit when all replicas are past "launching"
+            if len(seen) >= num_replicas and all(
+                p in ("provisioned", "running", "completed", "failed")
+                for p in seen.values()
+            ):
+                break
+
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print(f"\n  {DIM}Replicas continue launching in background.{RESET}")
+
+
 # ─── Commands ────────────────────────────────────────────────────────────────
 def cmd_deploy(args):
     """Deploy a model for batch inference."""
@@ -412,6 +462,8 @@ def cmd_deploy(args):
         cfg = data.get("config", {})
         solver_info = data.get("feasibility") or data.get("solver_info") or {}
         sol = solver_info.get("solution") or {}
+        num_chunks = data.get("chunks", 0)
+        num_replicas = data.get("replicas", 0)
         success_lines = [
             f"{GREEN}{BOLD}Job launched successfully!{RESET}",
             f"",
@@ -419,10 +471,10 @@ def cmd_deploy(args):
             f"{DIM}Instance:{RESET}  {cfg.get('instance_type', '?')}",
             f"{DIM}Config:{RESET}    TP={cfg.get('tp_size', '?')} PP={cfg.get('pp_size', '?')}",
         ]
-        if data.get("chunks"):
-            success_lines.append(f"{DIM}Chunks:{RESET}    {data['chunks']}")
-        if data.get("replicas"):
-            success_lines.append(f"{DIM}Replicas:{RESET}  {data['replicas']}")
+        if num_chunks:
+            success_lines.append(f"{DIM}Chunks:{RESET}    {num_chunks}")
+        if num_replicas:
+            success_lines.append(f"{DIM}Replicas:{RESET}  {num_replicas}")
         if sol.get("throughput_tokens_per_sec"):
             success_lines.append(f"{DIM}Est. tps:{RESET}  {sol['throughput_tokens_per_sec']:.0f} tok/s")
         if solver_info.get("max_model_len"):
@@ -434,6 +486,10 @@ def cmd_deploy(args):
         success_lines.append(f"Track progress: {c('orca progress ' + job_id, WHITE+BOLD)}")
         print()
         print(box(success_lines, title="SUCCESS"))
+
+        # Poll replica launch progress for chunked jobs
+        if num_replicas and num_replicas > 1:
+            _poll_replica_launch(job_id, num_replicas)
     else:
         print(f"\n  {RED}Launch failed:{RESET} {data.get('message', 'Unknown error')}")
         if data.get("detail"):
@@ -810,9 +866,13 @@ def cmd_metrics(args):
     """Show live vLLM metrics for a job."""
     job_id = args.job_id
     watch = args.watch
+    replica = getattr(args, 'replica', None)
 
     def _fetch_and_render():
-        resp = api("get", f"/job/{job_id}/metrics", timeout=5)
+        if replica:
+            resp = api("get", f"/job/{job_id}/replicas/{replica}/metrics", timeout=5)
+        else:
+            resp = api("get", f"/job/{job_id}/metrics", timeout=5)
         if resp.status_code == 404:
             return None, f"  {RED}No metrics available for {job_id}.{RESET}"
         if resp.status_code != 200:
@@ -1221,6 +1281,7 @@ Examples:
     p_metrics = subparsers.add_parser("metrics", help="Show live vLLM metrics for a job")
     p_metrics.add_argument("job_id", help="Job ID to inspect")
     p_metrics.add_argument("--watch", "-w", action="store_true", help="Refresh every 2s")
+    p_metrics.add_argument("--replica", "-r", help="Show metrics for a specific replica (e.g. mo-xxx-r0)")
 
     # history
     p_history = subparsers.add_parser("history", help="Show completed run history")
