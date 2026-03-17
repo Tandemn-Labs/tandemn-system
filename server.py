@@ -83,6 +83,21 @@ async def lifespan(app: FastAPI):
     app.state.metrics_collector = get_metrics_collector()
     app.state.metrics_db = get_metrics_db()
 
+    # Redis health check — required for chunked multi-replica jobs
+    try:
+        import redis as _redis
+        from orca_server.config import REDIS_URL
+        _r = _redis.from_url(REDIS_URL, socket_connect_timeout=3, socket_timeout=3)
+        _r.ping()
+        logger.info(f"[Redis] Connected at {REDIS_URL}")
+        app.state.redis_available = True
+    except Exception as _e:
+        logger.warning(
+            f"[Redis] Unavailable at {REDIS_URL}: {_e} — "
+            "chunked multi-replica jobs will fail. Single-cluster jobs unaffected."
+        )
+        app.state.redis_available = False
+
     # Reconcile stale reservations against live SkyPilot clusters
     try:
         request_id = sky.status()
@@ -688,6 +703,10 @@ async def submit_batch(request: BatchedRequest):
             }
 
     # ── Chunked path: CLI already split + uploaded chunks to S3 ──
+    if request.chunks and len(request.chunks) > 1 and not getattr(app.state, "redis_available", False):
+        raise HTTPException(503, "Redis unavailable — chunked multi-replica jobs require Redis. "
+                            "Start Redis and restart the server.")
+
     if request.chunks and len(request.chunks) > 1:
         effective_replicas = request.replicas or len(request.chunks)
         primary = configs[0]
