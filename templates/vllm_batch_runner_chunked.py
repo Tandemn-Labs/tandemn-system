@@ -292,6 +292,20 @@ def pull_chunk_from_server():
         return _SENTINEL_TRANSIENT_ERROR
 
 
+def check_chunk_progress() -> dict:
+    """Check chunk-level progress from control plane."""
+    try:
+        resp = requests.get(
+            f"{ORCA_URL}/job/{JOB_ID}/chunks/progress",
+            headers=_auth_headers(), timeout=10,
+        )
+        if resp.ok:
+            return resp.json()
+    except Exception:
+        pass
+    return {}
+
+
 def report_chunk_complete(chunk_id: str) -> dict:
     """Report chunk completion to control plane (with retries)."""
     def _complete():
@@ -362,35 +376,83 @@ def load_requests(input_file: str) -> List[Dict[str, Any]]:
     return reqs
 
 
+def _renew_lease_loop(chunk_id: str, stop_event: threading.Event, stolen_flag: list):
+    """Background thread: renews chunk lease every CHUNK_RENEW_INTERVAL_SEC seconds.
+
+    Renews immediately on start (covers the prefetch gap — the chunk may have
+    been sitting in inflight since the prefetch, and its lease could be close
+    to expiry by the time the main loop starts processing it).
+    """
+    interval = int(os.getenv("CHUNK_RENEW_INTERVAL_SEC", "30"))
+    first = True
+    while not stop_event.is_set():
+        if not first:
+            stop_event.wait(timeout=interval)
+            if stop_event.is_set():
+                break
+        first = False
+        try:
+            resp = requests.post(
+                f"{ORCA_URL}/job/{JOB_ID}/chunks/renew",
+                json={"chunk_id": chunk_id, "replica_id": REPLICA_ID},
+                headers=_auth_headers(),
+                timeout=10,
+            )
+            if resp.ok and not resp.json().get("renewed", True):
+                print(f"[Runner] Lease for chunk {chunk_id} was reclaimed — stopping renewal")
+                stolen_flag[0] = True
+                stop_event.set()
+        except Exception:
+            pass  # transient — renewal failure is non-fatal
+
+
 def pull_and_download_chunk() -> tuple:
-    """Pull a chunk and download it.
+    """Pull a chunk, start its lease renewal, and download it.
+
+    Renewal begins immediately after pull — this keeps the lease alive while
+    the chunk sits in a prefetch Future waiting for the main loop to consume it.
 
     Returns:
-        (chunk_info, requests) — normal chunk
-        (_SENTINEL_QUEUE_EMPTY, None) — queue is definitively empty
-        (_SENTINEL_TRANSIENT_ERROR, None) — couldn't reach server, should retry later
-        (chunk_info, []) — pulled but download failed
+        (chunk_info, requests, renewal_ctx) — normal chunk
+        (_SENTINEL_QUEUE_EMPTY, None, None) — queue is definitively empty
+        (_SENTINEL_TRANSIENT_ERROR, None, None) — couldn't reach server
+        (chunk_info, [], renewal_ctx) — pulled but download failed
+
+    renewal_ctx is (stop_event, stolen_flag, thread) — caller takes ownership.
     """
     result = pull_chunk_from_server()
     if result == _SENTINEL_QUEUE_EMPTY:
-        return _SENTINEL_QUEUE_EMPTY, None
+        return _SENTINEL_QUEUE_EMPTY, None, None
     if result == _SENTINEL_TRANSIENT_ERROR:
-        return _SENTINEL_TRANSIENT_ERROR, None
+        return _SENTINEL_TRANSIENT_ERROR, None, None
 
     chunk_info = result
     cid = chunk_info.get("chunk_id", "unknown")
+
+    # Start renewal immediately — keeps lease alive during prefetch wait
+    renewal_stop = threading.Event()
+    lease_stolen = [False]
+    renewal_thread = threading.Thread(
+        target=_renew_lease_loop,
+        args=(cid, renewal_stop, lease_stolen),
+        daemon=True,
+        name=f"lease-renew-{cid}",
+    )
+    renewal_thread.start()
+    renewal_ctx = (renewal_stop, lease_stolen, renewal_thread)
+
     s3_path = chunk_info.get("s3_input_path", "")
     local_path = f"/tmp/chunk_{JOB_ID}_{cid}.jsonl"
 
     print(f"[Runner] Downloading chunk {cid} from {s3_path}")
     if not download_chunk(s3_path, local_path):
         print(f"[Runner] Failed to download chunk {cid} after retries")
-        return chunk_info, []
+        return chunk_info, [], renewal_ctx
 
     reqs = load_requests(local_path)
     os.unlink(local_path)
     print(f"[Runner] Chunk {cid}: {len(reqs)} requests")
-    return chunk_info, reqs
+    return chunk_info, reqs, renewal_ctx
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +664,9 @@ def main():
         sidecar_thread.start()
 
         # 4. Chunk processing loop with prefetch
+        # Renewal threads start inside pull_and_download_chunk() — this keeps
+        # the prefetched chunk's lease alive while the GPU processes the current
+        # chunk. The main loop takes ownership of the renewal context.
         _report_phase("generating")
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chunk-prefetch")
 
@@ -610,14 +675,24 @@ def main():
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 10
 
-        # Prefetch first chunk
+        # Prefetch first chunk (renewal starts immediately inside)
         prefetch_future = executor.submit(pull_and_download_chunk)
 
         while True:
-            chunk_info, chunk_requests = prefetch_future.result()
+            chunk_info, chunk_requests, renewal_ctx = prefetch_future.result()
 
-            # Definitively empty — all chunks consumed
+            # Queue empty — but maybe other replicas' chunks will be reclaimed
             if chunk_info == _SENTINEL_QUEUE_EMPTY:
+                progress = check_chunk_progress()
+                if progress.get("all_done"):
+                    print("[Runner] All chunks done — exiting")
+                    break
+                inflight = progress.get("inflight", 0)
+                if inflight > 0:
+                    print(f"[Runner] Queue empty but {inflight} chunk(s) still inflight — waiting for possible reclaim...")
+                    time.sleep(15)
+                    prefetch_future = executor.submit(pull_and_download_chunk)
+                    continue
                 print("[Runner] Queue empty — all chunks consumed")
                 break
 
@@ -637,12 +712,24 @@ def main():
             cid = chunk_info.get("chunk_id", "unknown")
             s3_output_path = chunk_info.get("s3_output_path", "")
 
-            # Immediately prefetch next chunk while GPU works
+            # Take ownership of renewal context from prefetch
+            renewal_stop, lease_stolen, renewal_thread = renewal_ctx
+
+            # If lease was already stolen during prefetch wait, skip this chunk
+            if lease_stolen[0]:
+                print(f"[Runner] Chunk {cid} lease was reclaimed during prefetch — skipping")
+                prefetch_future = executor.submit(pull_and_download_chunk)
+                continue
+
+            # Prefetch next chunk while GPU works (renewal starts inside)
             prefetch_future = executor.submit(pull_and_download_chunk)
 
             if not chunk_requests:
                 print(f"[Runner] Chunk {cid}: download failed, reporting complete (empty)")
-                report_chunk_complete(cid)
+                renewal_stop.set()
+                renewal_thread.join(timeout=5)
+                if not lease_stolen[0]:
+                    report_chunk_complete(cid)
                 continue
 
             # Process chunk
@@ -661,6 +748,13 @@ def main():
             else:
                 print(f"[Runner] Failed to upload chunk {cid} output")
             os.unlink(local_output)
+
+            # Stop renewal and check if lease was stolen while we were processing
+            renewal_stop.set()
+            renewal_thread.join(timeout=5)
+            if lease_stolen[0]:
+                print(f"[Runner] Chunk {cid} lease was reclaimed, skipping complete")
+                continue
 
             # Report completion
             progress = report_chunk_complete(cid)

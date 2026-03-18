@@ -157,3 +157,157 @@ def test_chunk_info_updated_on_complete(cm, job_id):
     info = cm.get_chunk_info(job_id, "c0000")
     assert info["status"] == "completed"
     assert float(info["completed_at"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Lease / fault tolerance tests
+# ---------------------------------------------------------------------------
+
+def test_pull_chunk_sets_lease(cm, job_id):
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    before = time.time()
+    c = cm.pull_chunk(job_id, "replica-0")
+    assert c is not None
+    lease_until = float(c["lease_until"])
+    assert lease_until > before, "lease_until should be in the future after pull"
+
+
+def test_reclaim_expired_chunk(cm, job_id):
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+
+    # Force lease expiry on c0000
+    from orca_server.chunk_manager import _chunk_key
+    cm._r.hset(_chunk_key(job_id, "c0000"), "lease_until", time.time() - 1)
+
+    result = cm.reclaim_expired_chunks(job_id)
+    assert result["reclaimed"] == 1
+    assert result["failed"] == 0
+
+    progress = cm.get_progress(job_id)
+    assert progress["inflight"] == 0
+    assert progress["pending"] == 3  # c0001, c0002 still pending + reclaimed c0000
+
+
+def test_reclaim_respects_valid_lease(cm, job_id):
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+
+    # Lease is still valid (set far in future)
+    from orca_server.chunk_manager import _chunk_key
+    cm._r.hset(_chunk_key(job_id, "c0000"), "lease_until", time.time() + 600)
+
+    result = cm.reclaim_expired_chunks(job_id)
+    assert result["reclaimed"] == 0
+    assert result["failed"] == 0
+
+    progress = cm.get_progress(job_id)
+    assert progress["inflight"] == 1
+
+
+def test_reclaim_max_retries(cm, job_id):
+    from orca_server.chunk_manager import _chunk_key
+    from orca_server.config import CHUNK_MAX_RETRIES
+
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+
+    # Set retry_count to max_retries - 1 and expire the lease so one more reclaim hits the limit
+    cm._r.hset(_chunk_key(job_id, "c0000"), mapping={
+        "lease_until": time.time() - 1,
+        "retry_count": CHUNK_MAX_RETRIES - 1,
+    })
+
+    result = cm.reclaim_expired_chunks(job_id)
+    assert result["failed"] == 1
+    assert result["reclaimed"] == 0
+
+    failed_ids = cm.get_failed_chunk_ids(job_id)
+    assert "c0000" in failed_ids
+
+    progress = cm.get_progress(job_id)
+    assert progress["failed"] == 1
+    assert progress["inflight"] == 0
+
+
+def test_renew_lease_success(cm, job_id):
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+
+    before = time.time()
+    result = cm.renew_lease(job_id, "c0000", "replica-0")
+    assert result["renewed"] is True
+    assert result["lease_until"] > before
+
+    from orca_server.chunk_manager import _chunk_key
+    stored = float(cm._r.hget(_chunk_key(job_id, "c0000"), "lease_until"))
+    assert abs(stored - result["lease_until"]) < 1.0
+
+
+def test_renew_lease_wrong_replica(cm, job_id):
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+
+    result = cm.renew_lease(job_id, "c0000", "replica-IMPOSTOR")
+    assert result["renewed"] is False
+    assert "lease_until" not in result
+
+
+def test_complete_chunk_idempotent(cm, job_id):
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+
+    p1 = cm.complete_chunk(job_id, "c0000", "replica-0")
+    p2 = cm.complete_chunk(job_id, "c0000", "replica-0")
+
+    assert p1["completed"] == 1
+    assert p2["completed"] == 1  # not 2
+
+
+def test_all_done_with_failed_chunks(cm, job_id):
+    from orca_server.chunk_manager import _chunk_key
+    from orca_server.config import CHUNK_MAX_RETRIES
+
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+    cm.pull_chunk(job_id, "replica-1")
+    cm.pull_chunk(job_id, "replica-0")
+
+    cm.complete_chunk(job_id, "c0000", "replica-0")
+    cm.complete_chunk(job_id, "c0001", "replica-1")
+
+    # Force c0002 to fail via max retries
+    cm._r.hset(_chunk_key(job_id, "c0002"), mapping={
+        "lease_until": time.time() - 1,
+        "retry_count": CHUNK_MAX_RETRIES - 1,
+    })
+    cm.reclaim_expired_chunks(job_id)
+
+    progress = cm.get_progress(job_id)
+    assert progress["completed"] == 2
+    assert progress["failed"] == 1
+    assert progress["all_done"] is True
+
+
+def test_complete_promotes_from_failed(cm, job_id):
+    """If a chunk is failed (reclaim exhausted retries) but a slow replica actually
+    finishes it, complete_chunk should promote it out of the failed set."""
+    from orca_server.chunk_manager import _chunk_key
+    from orca_server.config import CHUNK_MAX_RETRIES
+
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+
+    # Force c0000 into failed set
+    cm._r.hset(_chunk_key(job_id, "c0000"), mapping={
+        "lease_until": time.time() - 1,
+        "retry_count": CHUNK_MAX_RETRIES - 1,
+    })
+    cm.reclaim_expired_chunks(job_id)
+    assert "c0000" in cm.get_failed_chunk_ids(job_id)
+
+    # Slow replica completes the chunk anyway
+    progress = cm.complete_chunk(job_id, "c0000", "replica-0")
+    assert "c0000" not in cm.get_failed_chunk_ids(job_id)
+    assert progress["completed"] == 1
+    assert progress["failed"] == 0  # promoted out of failed

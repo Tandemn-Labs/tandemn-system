@@ -846,6 +846,7 @@ def cmd_status(args):
 
 def cmd_logs(args):
     """Stream logs from a running or completed job."""
+    import sky
     print(LOGO)
     header("LOGS")
 
@@ -853,17 +854,23 @@ def cmd_logs(args):
     if not cluster:
         step("Fetching active clusters...")
         print()
-        import subprocess as _sp
-        _sp.run(["sky", "status"], check=False)
+        request_id = sky.status()
+        clusters = sky.get(request_id)
+        if clusters:
+            for cl in clusters:
+                name = cl.get("name", "?")
+                status = cl.get("status", "?")
+                print(f"  {name}  ({status})")
+        else:
+            print(f"  {DIM}No active clusters.{RESET}")
         print(f"\n  {DIM}Run with cluster name to stream logs:{RESET}")
         print(f"  {WHITE}orca logs <cluster_name>{RESET}\n")
         return
 
     step(f"Streaming logs for: {c(cluster, CYAN+BOLD)}")
     print()
-    import subprocess as _sp
     try:
-        _sp.run(["sky", "logs", cluster], check=False)
+        sky.tail_logs(cluster_name=cluster, job_id=None, follow=True)
     except KeyboardInterrupt:
         print(f"\n\n  {DIM}Stopped streaming.{RESET}")
 

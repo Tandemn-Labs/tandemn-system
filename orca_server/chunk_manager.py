@@ -5,6 +5,7 @@ Each chunked job has:
   - A FIFO pending queue (replicas pull from)
   - An inflight set (chunks being processed)
   - A completed set (done chunks)
+  - A failed set (chunks that exhausted retries)
   - Per-chunk metadata hashes
   - An ordered list for output assembly
 """
@@ -15,7 +16,7 @@ from typing import Optional
 
 import redis
 
-from orca_server.config import REDIS_URL
+from orca_server.config import REDIS_URL, CHUNK_LEASE_TTL_SEC, CHUNK_MAX_RETRIES
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ def _inflight_key(job_id: str) -> str:
 def _completed_key(job_id: str) -> str:
     return f"{_PREFIX}:{job_id}:completed"
 
+def _failed_key(job_id: str) -> str:
+    return f"{_PREFIX}:{job_id}:failed"
+
 def _chunk_key(job_id: str, chunk_id: str) -> str:
     return f"{_PREFIX}:{job_id}:chunk:{chunk_id}"
 
@@ -42,11 +46,56 @@ def _output_order_key(job_id: str) -> str:
     return f"{_PREFIX}:{job_id}:output_order"
 
 
+# Atomically scan inflight set, reclaim expired leases, move exhausted chunks to failed.
+# KEYS: [inflight_key, pending_key, failed_key]
+# ARGV: [job_prefix, now_float, max_retries]
+# Returns: [reclaimed_count, failed_count]
+_RECLAIM_LUA = """
+local inflight_key = KEYS[1]
+local pending_key  = KEYS[2]
+local failed_key   = KEYS[3]
+local job_prefix   = ARGV[1]
+local now          = tonumber(ARGV[2])
+local max_retries  = tonumber(ARGV[3])
+
+local members   = redis.call('SMEMBERS', inflight_key)
+local reclaimed = 0
+local failed    = 0
+
+for _, cid in ipairs(members) do
+    local chunk_key   = job_prefix .. ':chunk:' .. cid
+    local lease_until = tonumber(redis.call('HGET', chunk_key, 'lease_until')) or 0
+    if lease_until > 0 and lease_until < now then
+        local retry_count = (tonumber(redis.call('HGET', chunk_key, 'retry_count')) or 0) + 1
+        if retry_count >= max_retries then
+            redis.call('SREM', inflight_key, cid)
+            redis.call('SADD', failed_key, cid)
+            redis.call('HSET', chunk_key,
+                'status', 'failed',
+                'retry_count', tostring(retry_count))
+            failed = failed + 1
+        else
+            redis.call('SREM', inflight_key, cid)
+            redis.call('RPUSH', pending_key, cid)
+            redis.call('HSET', chunk_key,
+                'status', 'pending',
+                'retry_count', tostring(retry_count),
+                'lease_until', '0')
+            reclaimed = reclaimed + 1
+        end
+    end
+end
+
+return {reclaimed, failed}
+"""
+
+
 class ChunkManager:
     """Redis-backed chunk queue for distributing work across replicas."""
 
     def __init__(self, redis_url: str = REDIS_URL):
         self._r = redis.from_url(redis_url, decode_responses=True)
+        self._reclaim_script = self._r.register_script(_RECLAIM_LUA)
 
     def create_job_queue(
         self,
@@ -86,6 +135,8 @@ class ChunkManager:
                 "replica_id": "",
                 "started_at": 0,
                 "completed_at": 0,
+                "lease_until": 0,
+                "retry_count": 0,
             })
 
             # FIFO queue
@@ -100,21 +151,33 @@ class ChunkManager:
     def pull_chunk(self, job_id: str, replica_id: str) -> Optional[dict]:
         """Pull next chunk from the pending queue.
 
+        If the queue is empty but inflight chunks exist, attempts passive reclaim
+        of any expired leases before giving up.
+
         Returns chunk info dict, or None if queue is empty.
         """
         cid = self._r.lpop(_pending_key(job_id))
+
         if cid is None:
-            return None
+            # Passive reclaim: if replicas are alive, lease renewals keep chunks
+            # from expiring. Only reclaim if inflight exists and leases are stale.
+            if self._r.scard(_inflight_key(job_id)) > 0:
+                result = self.reclaim_expired_chunks(job_id)
+                if result["reclaimed"] > 0:
+                    cid = self._r.lpop(_pending_key(job_id))
+            if cid is None:
+                return None
 
         # Move to inflight
         self._r.sadd(_inflight_key(job_id), cid)
 
-        # Update chunk metadata
+        # Update chunk metadata (preserve retry_count — it accumulates across attempts)
         now = time.time()
         self._r.hset(_chunk_key(job_id, cid), mapping={
             "status": "inflight",
             "replica_id": replica_id,
             "started_at": now,
+            "lease_until": now + CHUNK_LEASE_TTL_SEC,
         })
 
         # Read full chunk info
@@ -123,14 +186,51 @@ class ChunkManager:
         info["job_id"] = job_id
         return info
 
+    def renew_lease(self, job_id: str, chunk_id: str, replica_id: str) -> dict:
+        """Extend lease for a chunk currently owned by replica_id.
+
+        Returns {"renewed": True, "lease_until": float} on success.
+        Returns {"renewed": False} if another replica owns the chunk or it was reclaimed.
+        """
+        chunk_key = _chunk_key(job_id, chunk_id)
+        status, current_replica = self._r.hmget(chunk_key, "status", "replica_id")
+        if status != "inflight" or current_replica != replica_id:
+            return {"renewed": False}
+        now = time.time()
+        new_lease = now + CHUNK_LEASE_TTL_SEC
+        self._r.hset(chunk_key, "lease_until", new_lease)
+        return {"renewed": True, "lease_until": new_lease}
+
+    def reclaim_expired_chunks(self, job_id: str) -> dict:
+        """Atomically reclaim inflight chunks whose leases have expired.
+
+        Chunks exceeding CHUNK_MAX_RETRIES are moved to the failed set.
+        All others are re-queued in pending.
+
+        Returns {"reclaimed": N, "failed": M}.
+        """
+        result = self._reclaim_script(
+            keys=[_inflight_key(job_id), _pending_key(job_id), _failed_key(job_id)],
+            args=[f"{_PREFIX}:{job_id}", time.time(), CHUNK_MAX_RETRIES],
+        )
+        return {"reclaimed": int(result[0]), "failed": int(result[1])}
+
     def complete_chunk(self, job_id: str, chunk_id: str, replica_id: str) -> dict:
         """Mark chunk as completed and return progress.
 
-        Returns dict with total, completed, pending, inflight, all_done.
+        Idempotent: if already completed, returns current progress without
+        double-counting.
+
+        Returns dict with total, completed, pending, inflight, failed, all_done.
         """
+        # Idempotency guard — two replicas may race to complete a reclaimed chunk
+        if self._r.sismember(_completed_key(job_id), chunk_id):
+            return self.get_progress(job_id)
+
         now = time.time()
         pipe = self._r.pipeline()
         pipe.srem(_inflight_key(job_id), chunk_id)
+        pipe.srem(_failed_key(job_id), chunk_id)   # promote from failed if reclaim raced us
         pipe.sadd(_completed_key(job_id), chunk_id)
         pipe.hset(_chunk_key(job_id, chunk_id), mapping={
             "status": "completed",
@@ -150,13 +250,15 @@ class ChunkManager:
         pending = self._r.llen(_pending_key(job_id))
         inflight = self._r.scard(_inflight_key(job_id))
         completed = self._r.scard(_completed_key(job_id))
+        failed = self._r.scard(_failed_key(job_id))
 
         return {
             "total": total,
             "pending": pending,
             "inflight": inflight,
             "completed": completed,
-            "all_done": completed >= total and total > 0,
+            "failed": failed,
+            "all_done": (completed + failed) >= total and total > 0,
         }
 
     def get_output_order(self, job_id: str) -> list[str]:
@@ -170,6 +272,10 @@ class ChunkManager:
             info["chunk_id"] = chunk_id
         return info
 
+    def get_failed_chunk_ids(self, job_id: str) -> set:
+        """Return set of chunk IDs that exhausted retries and permanently failed."""
+        return self._r.smembers(_failed_key(job_id))
+
     def cleanup_job(self, job_id: str) -> None:
         """Remove all Redis keys for a job."""
         # Get all chunk IDs from output order
@@ -180,6 +286,8 @@ class ChunkManager:
         pipe.delete(_pending_key(job_id))
         pipe.delete(_inflight_key(job_id))
         pipe.delete(_completed_key(job_id))
+        pipe.delete(_failed_key(job_id))
+        pipe.delete(f"{_PREFIX}:{job_id}:assembling")
         pipe.delete(_output_order_key(job_id))
         for cid in chunk_ids:
             pipe.delete(_chunk_key(job_id, cid))

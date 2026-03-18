@@ -43,6 +43,10 @@ ORCA_API_KEY    = os.getenv("ORCA_API_KEY", "")
 # Redis (for chunked distributed batch)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DEFAULT_CHUNK_SIZE_LINES = int(os.getenv("CHUNK_SIZE_LINES", "1000"))
+CHUNK_LEASE_TTL_SEC    = int(os.getenv("CHUNK_LEASE_TTL_SEC", "600"))
+CHUNK_MAX_RETRIES      = int(os.getenv("CHUNK_MAX_RETRIES", "3"))
+CHUNK_RECLAIM_INTERVAL = int(os.getenv("CHUNK_RECLAIM_INTERVAL_SEC", "60"))
+CHUNK_RENEW_INTERVAL   = int(os.getenv("CHUNK_RENEW_INTERVAL_SEC", "30"))
 
 # --------------------------------------------------------------------------- #
 # Canonical AWS instance table

@@ -16,6 +16,7 @@ from fastapi.responses import Response, StreamingResponse
 logger = logging.getLogger(__name__)
 
 from orca_server.config import (
+    CHUNK_RECLAIM_INTERVAL,
     CHUNK_SIZE_BYTES,
     INSTANCE_TO_GPU,
     ORCA_API_KEY,
@@ -107,7 +108,44 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[Quota] Could not reconcile on startup: {e}")
 
+    # Active reclaim loop: scans all jobs every CHUNK_RECLAIM_INTERVAL seconds
+    # and re-queues inflight chunks whose leases have expired.
+    async def _reclaim_loop():
+        while True:
+            await asyncio.sleep(CHUNK_RECLAIM_INTERVAL)
+            if not getattr(app.state, "redis_available", False):
+                continue
+            try:
+                cm = get_chunk_manager()
+                keys = cm._r.keys("chunk:job:*:inflight")
+                for key in keys:
+                    # key format: "chunk:job:{job_id}:inflight"
+                    prefix = "chunk:job:"
+                    suffix = ":inflight"
+                    job_id = key[len(prefix):-len(suffix)]
+                    result = cm.reclaim_expired_chunks(job_id)
+                    if result["reclaimed"] or result["failed"]:
+                        logger.info(
+                            f"[Reclaim] {job_id}: reclaimed={result['reclaimed']} "
+                            f"failed={result['failed']}"
+                        )
+                    # If reclaim pushed a job to all_done, trigger assembly
+                    if result["failed"]:
+                        progress = cm.get_progress(job_id)
+                        if progress and progress["all_done"]:
+                            asyncio.create_task(_assemble_output(job_id))
+            except Exception as e:
+                logger.warning(f"[Reclaim] Error: {e}")
+
+    reclaim_task = asyncio.create_task(_reclaim_loop())
+
     yield
+
+    reclaim_task.cancel()
+    try:
+        await reclaim_task
+    except asyncio.CancelledError:
+        pass
 
     # Shutdown: join non-daemon monitor threads so they can finish teardown
     cm = app.state.cluster_manager
@@ -400,6 +438,24 @@ async def complete_chunk(
     return progress
 
 
+@app.post("/job/{job_id}/chunks/renew")
+async def renew_chunk_lease(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Replica calls every CHUNK_RENEW_INTERVAL to extend its lease on an inflight chunk."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    chunk_id = body.get("chunk_id")
+    replica_id = body.get("replica_id", "unknown")
+
+    cm = get_chunk_manager()
+    result = cm.renew_lease(job_id, chunk_id, replica_id)
+    return result
+
+
 @app.get("/job/{job_id}/chunks/progress")
 async def chunk_progress(
     job_id: str,
@@ -421,14 +477,34 @@ async def _assemble_output(job_id: str):
     job_logger.info(f"[Assembly] Starting output assembly for {job_id}")
 
     cm = get_chunk_manager()
+
+    # Assembly-once guard: prevent two concurrent triggers (reclaim loop + complete_chunk)
+    # from both running assembly. SETNX returns True only for the winner; 5-min TTL as safety net.
+    lock_key = f"chunk:job:{job_id}:assembling"
+    if not cm._r.set(lock_key, "1", nx=True, ex=300):
+        job_logger.info(f"[Assembly] Job {job_id} assembly already in progress, skipping")
+        return
+
     meta = cm._r.hgetall(f"chunk:job:{job_id}:meta")
+    if not meta:
+        job_logger.info(f"[Assembly] Job {job_id} metadata gone (already assembled?), skipping")
+        return
     s3_output_base = meta.get("s3_output_base", "")
     ordered_ids = cm.get_output_order(job_id)
+
+    failed_ids = cm.get_failed_chunk_ids(job_id)
+    if failed_ids:
+        job_logger.warning(
+            f"[Assembly] {len(failed_ids)} chunk(s) permanently failed and will be skipped: "
+            f"{sorted(failed_ids)}"
+        )
 
     combined_path = f"/tmp/assembly_{job_id}.jsonl"
     try:
         with open(combined_path, "w") as combined:
             for cid in ordered_ids:
+                if cid in failed_ids:
+                    continue
                 chunk_info = cm.get_chunk_info(job_id, cid)
                 s3_out = chunk_info.get("s3_output_path", "")
                 local_tmp = f"/tmp/assemble_{job_id}_{cid}.jsonl"
