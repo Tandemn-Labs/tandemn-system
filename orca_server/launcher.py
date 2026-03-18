@@ -57,16 +57,16 @@ async def sp_launch_vllm_batch_with_fallback(
                 request, config, solver, early_messages=early_messages,
                 quota_tracker=quota_tracker, persist=persist,
             )
-            print(f"[Launch] Success with config {i + 1}: {config.instance_type}")
+            logger.info(f"[Launch] Success with config {i + 1}: {config.instance_type}")
             return (True, config)
 
         except Exception as e:
-            print(f"[Launch] Config {i + 1} failed: {e}")
+            logger.warning(f"[Launch] Config {i + 1} failed: {e}")
             if i < len(configs) - 1:
-                print("[Launch] Trying next instance type...")
+                logger.info("[Launch] Trying next instance type...")
                 continue
             else:
-                print(f"[Launch] All {len(configs)} configs failed")
+                logger.error(f"[Launch] All {len(configs)} configs failed")
                 return (False, configs[0])
 
 
@@ -627,14 +627,14 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
 
     endpoint_url = f"http://{public_ip}:{VLLM_PORT}"
 
-    print(f"vLLM server launched at {endpoint_url}")
+    logger.info(f"vLLM server launched at {endpoint_url}")
 
     url = f"http://{public_ip}:{VLLM_PORT}/v1/models"
     response = requests.get(url, timeout=5)
     if (
         response.status_code == 200
     ):  # do sth here for a valid API up and sth else otherwise
-        print(f"vLLM server API is up at {endpoint_url}")
+        logger.info(f"vLLM server API is up at {endpoint_url}")
         return endpoint_url
     else:
         raise Exception(f"vLLM server API is not up at {endpoint_url}")

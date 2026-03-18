@@ -440,7 +440,7 @@ def poll_job_progress(
                 break
         except Exception as e:
             # keep polling, simple prototype, but log the error
-            print(f"[ERROR] Polling job {job_id} failed: {e}")
+            logger.error(f"[ERROR] Polling job {job_id} failed: {e}")
             pass
         time.sleep(interval_sec)
 
@@ -463,9 +463,9 @@ def jobtracker_snapshot(tracker: JobTracker) -> dict:
 def log_jobtracker_loop(tracker: JobTracker, interval_sec: int = 0.5):
     while True:
         snap = jobtracker_snapshot(tracker)
-        print("\n[JobTracker] snapshot:")
+        logger.debug("[JobTracker] snapshot:")
         for job_id, d in snap.items():
-            print(
+            logger.debug(
                 f"  - {job_id} status={d['status']} "
                 f"progress={d['progress'] * 100:.1f}% "
                 f"lines={d['num_lines']} head_ip={d['head_ip']} "
