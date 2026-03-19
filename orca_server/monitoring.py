@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SEC: float = 1.0
 RING_BUFFER_SIZE: int = 120
 FLUSH_INTERVAL_SEC: int = 60
+INSTANT_THROUGHPUT_WINDOW_SEC: float = float(os.environ.get("ORCA_THROUGHPUT_WINDOW_SEC", "10.0"))
 
 
 def _parse_histogram_buckets(text: str, metric_name: str) -> list[tuple[float, float]]:
@@ -277,8 +279,36 @@ class _JobCollector:
         self._flush()  # always flush on stop regardless of mode
 
     def latest(self) -> MetricsSnapshot | None:
+        """Return latest snapshot with throughput computed over a fixed window."""
         with self.lock:
-            return self.buffer[-1] if self.buffer else None
+            if not self.buffer:
+                return None
+            current = self.buffer[-1]
+            # Compute throughput over fixed window (matches vLLM's 10s internal avg)
+            target_time = current.timestamp - INSTANT_THROUGHPUT_WINDOW_SEC
+            older = None
+            for snap in self.buffer:
+                if snap.timestamp >= target_time:
+                    older = snap
+                    break
+            if older is not None and older is not current:
+                dt = current.timestamp - older.timestamp
+                if dt > 1.0:
+                    if current.live_gen_tokens_total > 0:
+                        current.avg_generation_throughput_toks_per_s = (
+                            current.live_gen_tokens_total - older.live_gen_tokens_total
+                        ) / dt
+                        current.avg_prompt_throughput_toks_per_s = (
+                            current.live_prompt_tokens_total - older.live_prompt_tokens_total
+                        ) / dt
+                    else:
+                        current.avg_generation_throughput_toks_per_s = (
+                            current.generation_tokens_total - older.generation_tokens_total
+                        ) / dt
+                        current.avg_prompt_throughput_toks_per_s = (
+                            current.prompt_tokens_total - older.prompt_tokens_total
+                        ) / dt
+            return current
 
     def set_baseline(self) -> None:
         with self.lock:

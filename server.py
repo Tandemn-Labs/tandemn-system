@@ -341,26 +341,10 @@ async def ingest_job_metrics(
         if live_prompt is not None:
             snap.live_prompt_tokens_total = float(live_prompt)
 
-        # Compute instantaneous throughput from counter deltas
-        if prev_snap is not None:
-            dt = snap.timestamp - prev_snap.timestamp
-            if dt > 0:
-                # Use live per-token counter (smooth) when available
-                if snap.live_gen_tokens_total > 0:
-                    snap.avg_generation_throughput_toks_per_s = (
-                        snap.live_gen_tokens_total - prev_snap.live_gen_tokens_total
-                    ) / dt
-                    snap.avg_prompt_throughput_toks_per_s = (
-                        snap.live_prompt_tokens_total - prev_snap.live_prompt_tokens_total
-                    ) / dt
-                else:
-                    snap.avg_generation_throughput_toks_per_s = (
-                        snap.generation_tokens_total - prev_snap.generation_tokens_total
-                    ) / dt
-                    snap.avg_prompt_throughput_toks_per_s = (
-                        snap.prompt_tokens_total - prev_snap.prompt_tokens_total
-                    ) / dt
-        prev_snap = snap
+        # Throughput is NOT computed here — it's computed from the ring buffer
+        # over a fixed window (INSTANT_THROUGHPUT_WINDOW_SEC, default 10s) when
+        # the snapshot is read via latest(). This avoids noisy rates from
+        # variable-interval sidecar batch items.
 
         # Merge GPU hardware utilization from sidecar payload
         gpu_sm = item.get("gpu_sm_util_pct")
