@@ -429,7 +429,7 @@ async def complete_chunk(
 
     # Update job tracker progress
     if progress["total"] > 0:
-        frac = progress["completed"] / progress["total"]
+        frac = (progress["completed"] + progress["failed"]) / progress["total"]
         get_job_tracker().update_progress(job_id, frac)
 
     if progress["all_done"]:
