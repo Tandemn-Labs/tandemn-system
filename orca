@@ -150,6 +150,7 @@ def parse_input_file(input_file: str) -> dict:
     """Parse a JSONL batch file and return stats."""
     prompts = []
     max_tokens_list = []
+    has_explicit_max_tokens = False
     with open(input_file) as f:
         for line in f:
             line = line.strip()
@@ -160,7 +161,12 @@ def parse_input_file(input_file: str) -> dict:
             messages = body.get("messages", [])
             text = " ".join(m.get("content", "") for m in messages)
             prompts.append(text)
-            max_tokens_list.append(body.get("max_tokens", 256))
+            mt = body.get("max_tokens")
+            if mt is not None:
+                has_explicit_max_tokens = True
+                max_tokens_list.append(mt)
+            else:
+                max_tokens_list.append(256)
 
     char_estimates = [max(1, len(p) // 4) for p in prompts]
     return {
@@ -169,6 +175,7 @@ def parse_input_file(input_file: str) -> dict:
         "max_input_tokens": max(char_estimates) if char_estimates else 0,
         "avg_max_output_tokens": sum(max_tokens_list) // max(1, len(max_tokens_list)),
         "max_output_tokens": max(max_tokens_list) if max_tokens_list else 256,
+        "has_explicit_max_tokens": has_explicit_max_tokens,
     }
 
 
@@ -326,6 +333,17 @@ def cmd_deploy(args):
     else:
         step("Parsing input file...")
         stats = parse_input_file(input_file)
+
+        # Output tokens: prefer JSONL per-request max_tokens over CLI default
+        if stats.get("has_explicit_max_tokens"):
+            effective_avg_output = stats["avg_max_output_tokens"]
+            effective_max_output = stats["max_output_tokens"]
+            step(f"Output tokens from JSONL: avg={effective_avg_output}, max={effective_max_output}")
+        else:
+            effective_avg_output = args.max_output_tokens
+            effective_max_output = args.max_output_tokens
+            step(f"Output tokens from CLI default: {effective_avg_output} (JSONL has no max_tokens)")
+
         print()
         lines = [
             f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
@@ -333,7 +351,8 @@ def cmd_deploy(args):
             f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
             f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
             f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
-            f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
+            f"{DIM}Avg output:{RESET} {effective_avg_output} tokens",
+            f"{DIM}Max output:{RESET} {effective_max_output} tokens",
             f"{DIM}SLO:{RESET}        {args.slo} hours",
         ]
         print(box(lines, title="WORKLOAD"))
@@ -343,14 +362,22 @@ def cmd_deploy(args):
     chunk_size = getattr(args, 'chunk_size', None) or 1000
     effective_replicas = getattr(args, 'replicas', None) or 0
 
+    # Output tokens: use JSONL-derived values if available, else CLI default
+    if not is_s3:
+        avg_out = effective_avg_output
+        max_out = effective_max_output
+    else:
+        avg_out = args.max_output_tokens
+        max_out = args.max_output_tokens
+
     # Build common payload fields
     payload = {
         "placement_solver": "user_specified" if args.gpu else "roofline",
         "user_id": "orca-cli",
         "input_file": "s3://placeholder/chunked",  # overwritten below
         "output_file": args.output or "output.jsonl",
-        "avg_output_tokens": args.max_output_tokens,
-        "max_output_tokens": args.max_output_tokens,
+        "avg_output_tokens": avg_out,
+        "max_output_tokens": max_out,
         "description": f"Orca CLI deploy: {model_name}",
         "task_type": "batch",
         "task_priority": "normal",
@@ -531,6 +558,16 @@ def cmd_plan(args):
     else:
         step("Parsing input file...")
         stats = parse_input_file(input_file)
+
+        if stats.get("has_explicit_max_tokens"):
+            effective_avg_output = stats["avg_max_output_tokens"]
+            effective_max_output = stats["max_output_tokens"]
+            step(f"Output tokens from JSONL: avg={effective_avg_output}, max={effective_max_output}")
+        else:
+            effective_avg_output = args.max_output_tokens
+            effective_max_output = args.max_output_tokens
+            step(f"Output tokens from CLI default: {effective_avg_output} (JSONL has no max_tokens)")
+
         print()
         lines = [
             f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
@@ -538,7 +575,8 @@ def cmd_plan(args):
             f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
             f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
             f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
-            f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
+            f"{DIM}Avg output:{RESET} {effective_avg_output} tokens",
+            f"{DIM}Max output:{RESET} {effective_max_output} tokens",
             f"{DIM}SLO:{RESET}        {args.slo} hours",
         ]
         print(box(lines, title="WORKLOAD"))
@@ -547,6 +585,13 @@ def cmd_plan(args):
     step("Running Orca placement solver...")
     t0 = time.time()
 
+    if not is_s3:
+        avg_out = effective_avg_output
+        max_out = effective_max_output
+    else:
+        avg_out = args.max_output_tokens
+        max_out = args.max_output_tokens
+
     # For plan, send locally-parsed stats directly — no S3 upload needed
     # (the file only needs to be in S3 for deploy, where the EC2 node fetches it)
     payload = {
@@ -554,8 +599,8 @@ def cmd_plan(args):
         "user_id": "orca-cli",
         "input_file": input_file if input_file.startswith("s3://") else "s3://plan-dry-run/placeholder",
         "output_file": "output.jsonl",
-        "avg_output_tokens": args.max_output_tokens,
-        "max_output_tokens": args.max_output_tokens,
+        "avg_output_tokens": avg_out,
+        "max_output_tokens": max_out,
         "description": f"Orca CLI plan: {model_name}",
         "task_type": "batch",
         "task_priority": "normal",

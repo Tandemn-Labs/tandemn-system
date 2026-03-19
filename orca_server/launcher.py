@@ -545,7 +545,7 @@ async def _launch_chunked_replica(
         "envs.REPLICA_ID": replica_id,
         "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,
         "envs.AVG_INPUT_TOKENS": str(request.avg_input_tokens or 2000),
-        "envs.AVG_OUTPUT_TOKENS": str(request.avg_output_tokens or 500),
+        "envs.AVG_OUTPUT_TOKENS": str(request.avg_output_tokens or 1024),
         "envs.VLLM_USE_V1": "1" if _cfg.supports_vllm_v1(config.instance_type) else "0",
     }
     update_yaml_file("templates/vllm_chunked.yaml", replace_yaml, yaml_output)
