@@ -912,6 +912,42 @@ def cmd_logs(args):
         print(f"  {WHITE}orca logs <cluster_name>{RESET}\n")
         return
 
+    # For chunked jobs, the SkyPilot cluster is <job_id>-r0, not <job_id>.
+    # Auto-discover replicas when the bare job_id doesn't match a cluster.
+    try:
+        request_id = sky.status(cluster_names=[cluster])
+        matches = sky.get(request_id)
+    except Exception:
+        matches = []
+
+    if not matches:
+        # Check if this is a chunked job with replica suffixes
+        try:
+            request_id = sky.status()
+            all_clusters = sky.get(request_id) or []
+            replicas = [cl["name"] for cl in all_clusters if cl["name"].startswith(f"{cluster}-r")]
+        except Exception:
+            replicas = []
+
+        if not replicas:
+            print(f"  {RED}Cluster '{cluster}' not found.{RESET}")
+            print(f"  {DIM}Tip: use 'orca clusters' to list active clusters.{RESET}\n")
+            return
+
+        if len(replicas) == 1:
+            cluster = replicas[0]
+        else:
+            print(f"  {DIM}Chunked job with {len(replicas)} replicas:{RESET}")
+            for i, r in enumerate(sorted(replicas)):
+                print(f"    {c(str(i + 1), CYAN)}. {r}")
+            try:
+                choice = input(f"\n  {YELLOW}Which replica? [1-{len(replicas)}]:{RESET} ").strip()
+                idx = int(choice) - 1
+                cluster = sorted(replicas)[idx]
+            except (ValueError, IndexError, EOFError):
+                cluster = sorted(replicas)[0]
+                print(f"  {DIM}Defaulting to {cluster}{RESET}")
+
     step(f"Streaming logs for: {c(cluster, CYAN+BOLD)}")
     print()
     try:
