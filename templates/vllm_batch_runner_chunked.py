@@ -225,20 +225,54 @@ def determine_max_concurrency() -> int:
     return min(result, 512)
 
 
+def _get_info_label(text: str, metric_name: str, label_key: str) -> Optional[str]:
+    """Extract a label value from a Prometheus info/gauge metric."""
+    for line in text.splitlines():
+        if not line or line[0] == "#":
+            continue
+        m = _METRIC_LINE_RE.match(line)
+        if not m or m.group("name") != metric_name:
+            continue
+        for part in (m.group("labels") or "").split(","):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            if k.strip() == label_key:
+                return v.strip().strip('"')
+    return None
+
+
 def _estimate_max_concurrency_from_metrics() -> Optional[int]:
-    """Estimate from Prometheus num_gpu_blocks metric."""
+    """Estimate from Prometheus num_gpu_blocks metric.
+
+    vLLM V1 moved num_gpu_blocks from a gauge to a label on cache_config_info.
+    Try the V1 info metric first, fall back to V0 gauge.
+    """
     try:
         text = requests.get(f"{BASE_URL}/metrics", timeout=10).text
-        num_gpu_blocks = sum_metric_compat(text, "vllm:num_gpu_blocks")
+
+        # V1: label on cache_config_info
+        blocks_str = _get_info_label(text, "vllm:cache_config_info", "num_gpu_blocks")
+        if blocks_str and blocks_str != "None":
+            num_gpu_blocks = int(blocks_str)
+            bs = _get_info_label(text, "vllm:cache_config_info", "block_size")
+            block_size = int(bs) if bs and bs != "None" else 16
+        else:
+            # V0: gauge metric
+            num_gpu_blocks = int(sum_metric_compat(text, "vllm:num_gpu_blocks"))
+            block_size = 16
+
         if num_gpu_blocks == 0:
             return None
-        block_size = 16  # vLLM V1 default
         avg_seq_len = (
             int(os.getenv("AVG_INPUT_TOKENS", "2000"))
             + int(os.getenv("AVG_OUTPUT_TOKENS", "500"))
         )
         blocks_per_request = max(1, avg_seq_len // block_size)
-        return max(1, int(num_gpu_blocks // blocks_per_request))
+        result = max(1, int(num_gpu_blocks // blocks_per_request))
+        print(f"[Runner] KV cache: {num_gpu_blocks} blocks × {block_size} tokens, "
+              f"avg_seq={avg_seq_len} → {blocks_per_request} blocks/req → max_concurrency={result}")
+        return result
     except Exception:
         return None
 
