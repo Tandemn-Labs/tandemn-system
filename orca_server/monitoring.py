@@ -108,6 +108,9 @@ class MetricsSnapshot:
     # GPU hardware utilization (from pynvml via sidecar)
     gpu_sm_util_pct: float = 0.0
     gpu_mem_bw_util_pct: float = 0.0
+    # Live per-token counters (from SSE stream via sidecar, smoother than Prometheus)
+    live_gen_tokens_total: float = 0.0
+    live_prompt_tokens_total: float = 0.0
 
     @classmethod
     def from_prometheus_text(cls, job_id: str, text: str, timestamp: float) -> "MetricsSnapshot":
@@ -197,6 +200,8 @@ class MetricsSnapshot:
             "prefix_cache_hit_rate": self.prefix_cache_hit_rate,
             "gpu_sm_util_pct": self.gpu_sm_util_pct,
             "gpu_mem_bw_util_pct": self.gpu_mem_bw_util_pct,
+            "live_gen_tokens_total": self.live_gen_tokens_total,
+            "live_prompt_tokens_total": self.live_prompt_tokens_total,
         }
 
 
@@ -205,6 +210,8 @@ _SUM_FIELDS = {
     "avg_prompt_throughput_toks_per_s",
     "generation_tokens_total",
     "prompt_tokens_total",
+    "live_gen_tokens_total",
+    "live_prompt_tokens_total",
     "request_success_total",
     "num_preemptions_total",
     "num_requests_running",
@@ -299,8 +306,13 @@ class _JobCollector:
             if dt < 1.0:
                 return None
 
-        gen_tps = (current.generation_tokens_total - oldest.generation_tokens_total) / dt
-        prompt_tps = (current.prompt_tokens_total - oldest.prompt_tokens_total) / dt
+        # Prefer live per-token counters (smooth) over Prometheus counters (bursty)
+        if current.live_gen_tokens_total > 0:
+            gen_tps = (current.live_gen_tokens_total - oldest.live_gen_tokens_total) / dt
+            prompt_tps = (current.live_prompt_tokens_total - oldest.live_prompt_tokens_total) / dt
+        else:
+            gen_tps = (current.generation_tokens_total - oldest.generation_tokens_total) / dt
+            prompt_tps = (current.prompt_tokens_total - oldest.prompt_tokens_total) / dt
 
         result = {
             "generation_toks_per_s": round(gen_tps, 2),
@@ -314,12 +326,14 @@ class _JobCollector:
         if self._baseline_snap is not None:
             epoch_dt = current.timestamp - self._baseline_snap.timestamp
             if epoch_dt > 1.0:
-                result["epoch_generation_toks_per_s"] = round(
-                    (current.generation_tokens_total - self._baseline_snap.generation_tokens_total) / epoch_dt, 2
-                )
-                result["epoch_prompt_toks_per_s"] = round(
-                    (current.prompt_tokens_total - self._baseline_snap.prompt_tokens_total) / epoch_dt, 2
-                )
+                if current.live_gen_tokens_total > 0:
+                    epoch_gen = (current.live_gen_tokens_total - self._baseline_snap.live_gen_tokens_total) / epoch_dt
+                    epoch_prompt = (current.live_prompt_tokens_total - self._baseline_snap.live_prompt_tokens_total) / epoch_dt
+                else:
+                    epoch_gen = (current.generation_tokens_total - self._baseline_snap.generation_tokens_total) / epoch_dt
+                    epoch_prompt = (current.prompt_tokens_total - self._baseline_snap.prompt_tokens_total) / epoch_dt
+                result["epoch_generation_toks_per_s"] = round(epoch_gen, 2)
+                result["epoch_prompt_toks_per_s"] = round(epoch_prompt, 2)
                 result["since_baseline_sec"] = round(epoch_dt, 2)
 
         return result

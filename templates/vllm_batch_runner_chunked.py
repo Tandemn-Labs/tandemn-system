@@ -122,6 +122,30 @@ def sum_metric_compat(text: str, name: str) -> float:
     return val
 
 
+class LiveTokenCounter:
+    """Cumulative token counter — incremented per-SSE-token by async send_one(),
+    read by sidecar thread. GIL-safe: single writer (event loop), single reader (sidecar)."""
+    __slots__ = ("_gen", "_prompt")
+
+    def __init__(self):
+        self._gen = 0
+        self._prompt = 0
+
+    def incr_gen(self, n: int = 1):
+        self._gen += n
+
+    def incr_prompt(self, n: int):
+        self._prompt += n
+
+    @property
+    def generation_tokens(self) -> int:
+        return self._gen
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self._prompt
+
+
 def _parse_labels(labels_blob: str) -> dict:
     out = {}
     if not labels_blob:
@@ -749,7 +773,7 @@ def build_metrics(
 # Sidecar (same as single-cluster runner)
 # ---------------------------------------------------------------------------
 
-def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor"] = None):
+def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor"] = None, live_counter: Optional["LiveTokenCounter"] = None):
     if not ORCA_URL:
         return
 
@@ -775,6 +799,10 @@ def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor
                         snap["gpu_sm_util_pct"] = round(sum(sm_vals) / len(sm_vals), 1)
                     if bw_vals:
                         snap["gpu_mem_bw_util_pct"] = round(sum(bw_vals) / len(bw_vals), 1)
+            # Inject live per-token counters (smooth, no completion-burst)
+            if live_counter:
+                snap["live_gen_tokens_total"] = live_counter.generation_tokens
+                snap["live_prompt_tokens_total"] = live_counter.prompt_tokens
             buffer.append(snap)
         except Exception:
             pass
@@ -1141,6 +1169,7 @@ async def send_one(
     semaphore: asyncio.Semaphore,
     req_dict: dict,
     model_name: str,
+    live_counter: Optional[LiveTokenCounter] = None,
 ) -> dict:
     body = req_dict.get("body", {})
     payload = {
@@ -1204,6 +1233,8 @@ async def send_one(
                             if ttft is None:
                                 ttft = (time.time() - t0) * 1000
                             content_parts.append(content)
+                            if live_counter:
+                                live_counter.incr_gen(1)
                         fr = choices[0].get("finish_reason")
                         if fr:
                             finish_reason = fr
@@ -1211,6 +1242,8 @@ async def send_one(
                     if usage:
                         prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
                         output_tokens = usage.get("completion_tokens", output_tokens)
+                        if live_counter and prompt_tokens:
+                            live_counter.incr_prompt(prompt_tokens)
         except Exception as e:
             return {
                 "status": "error",
@@ -1236,7 +1269,10 @@ async def send_one(
     }
 
 
-async def run_chunk(requests_list: List[Dict], model_name: str, max_concurrency: int) -> List[Dict]:
+async def run_chunk(
+    requests_list: List[Dict], model_name: str, max_concurrency: int,
+    live_counter: Optional[LiveTokenCounter] = None,
+) -> List[Dict]:
     """Process a single chunk of requests."""
     semaphore = asyncio.Semaphore(max_concurrency)
     connector = aiohttp.TCPConnector(limit=max_concurrency)
@@ -1244,7 +1280,7 @@ async def run_chunk(requests_list: List[Dict], model_name: str, max_concurrency:
     results = [None] * total
 
     async def _tracked(idx, req):
-        r = await send_one(session, semaphore, req, model_name)
+        r = await send_one(session, semaphore, req, model_name, live_counter)
         results[idx] = r
         return r
 
@@ -1364,11 +1400,12 @@ def main():
         # 4. Start GPU monitor + metrics poller
         gpu_monitor = GPUMonitor()
         metrics_poller = MetricsPoller()
+        live_counter = LiveTokenCounter()
 
-        # 5. Start sidecar (with GPU monitor reference for live util)
+        # 5. Start sidecar (with GPU monitor + live token counter)
         stop_sidecar = threading.Event()
         sidecar_thread = threading.Thread(
-            target=_sidecar_loop, args=(stop_sidecar, gpu_monitor),
+            target=_sidecar_loop, args=(stop_sidecar, gpu_monitor, live_counter),
             daemon=True, name="orca-sidecar",
         )
         sidecar_thread.start()
@@ -1456,7 +1493,7 @@ def main():
 
             # Process chunk
             print(f"[Runner] Processing chunk {cid}: {len(chunk_requests)} requests (concurrency={max_concurrency})")
-            results = asyncio.run(run_chunk(chunk_requests, args.model, max_concurrency))
+            results = asyncio.run(run_chunk(chunk_requests, args.model, max_concurrency, live_counter))
 
             num_ok = sum(1 for r in results if r and r.get("status") == "success")
             print(f"[Runner] Chunk {cid} done: {num_ok}/{len(results)} ok")

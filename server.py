@@ -333,16 +333,33 @@ async def ingest_job_metrics(
         snap = MetricsSnapshot.from_prometheus_text(job_id, text, ts)
         snap.replica_id = replica_id
 
-        # Compute throughput from counter deltas (vLLM >=0.10 removed the gauge)
-        if snap.avg_generation_throughput_toks_per_s == 0 and prev_snap is not None:
+        # Merge live per-token counters from SSE stream (smooth, no completion-burst)
+        live_gen = item.get("live_gen_tokens_total")
+        live_prompt = item.get("live_prompt_tokens_total")
+        if live_gen is not None:
+            snap.live_gen_tokens_total = float(live_gen)
+        if live_prompt is not None:
+            snap.live_prompt_tokens_total = float(live_prompt)
+
+        # Compute instantaneous throughput from counter deltas
+        if prev_snap is not None:
             dt = snap.timestamp - prev_snap.timestamp
             if dt > 0:
-                snap.avg_generation_throughput_toks_per_s = (
-                    snap.generation_tokens_total - prev_snap.generation_tokens_total
-                ) / dt
-                snap.avg_prompt_throughput_toks_per_s = (
-                    snap.prompt_tokens_total - prev_snap.prompt_tokens_total
-                ) / dt
+                # Use live per-token counter (smooth) when available
+                if snap.live_gen_tokens_total > 0:
+                    snap.avg_generation_throughput_toks_per_s = (
+                        snap.live_gen_tokens_total - prev_snap.live_gen_tokens_total
+                    ) / dt
+                    snap.avg_prompt_throughput_toks_per_s = (
+                        snap.live_prompt_tokens_total - prev_snap.live_prompt_tokens_total
+                    ) / dt
+                else:
+                    snap.avg_generation_throughput_toks_per_s = (
+                        snap.generation_tokens_total - prev_snap.generation_tokens_total
+                    ) / dt
+                    snap.avg_prompt_throughput_toks_per_s = (
+                        snap.prompt_tokens_total - prev_snap.prompt_tokens_total
+                    ) / dt
         prev_snap = snap
 
         # Merge GPU hardware utilization from sidecar payload
