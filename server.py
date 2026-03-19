@@ -525,11 +525,13 @@ async def _assemble_output(job_id: str):
         job_logger.info(f"[Assembly] Uploaded combined output to {final_s3}")
 
         # Download to local outputs/
-        from orca_server.job_manager import download_output_from_s3
+        from orca_server.job_manager import download_output_from_s3, prefix_job_dirname
         tracker = get_job_tracker()
         rec = tracker.get(job_id)
         if rec:
             job_dirname = getattr(rec, '_job_dirname', job_id)
+            status_prefix = "partial" if failed_ids else "success"
+            job_dirname = prefix_job_dirname(job_dirname, status_prefix)
             download_output_from_s3(final_s3, job_dirname, logger=job_logger)
 
         get_job_tracker().update_status(job_id, "succeeded")
