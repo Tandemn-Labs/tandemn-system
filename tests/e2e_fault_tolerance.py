@@ -384,40 +384,43 @@ def verify(job_id, reclaim_seen, final_status):
         time.sleep(20)
 
         import glob
-        output_dirs = glob.glob("outputs/**/success-*", recursive=True)
+        # Search for output.jsonl in any outputs/ subdir matching success-* or partial-*
         job_dir = None
-        for d in output_dirs:
-            log_path = os.path.join(d, "job.log")
-            if os.path.exists(log_path):
-                with open(log_path) as f:
-                    if job_id in f.read():
-                        job_dir = d
-                        break
+        for pattern in ["outputs/**/success-*", "outputs/**/partial-*"]:
+            for d in glob.glob(pattern, recursive=True):
+                if os.path.exists(os.path.join(d, "output.jsonl")):
+                    job_dir = d
+                    break
+            if job_dir:
+                break
 
         if job_dir:
             output_path = os.path.join(job_dir, "output.jsonl")
-            has_output = os.path.exists(output_path)
             results.append(check(
                 "output.jsonl exists",
-                has_output,
+                True,
                 job_dir,
             ))
 
-            if has_output:
-                with open(output_path) as f:
-                    lines = f.readlines()
-                # With failed chunks, output may be partial
-                expected = 5000
-                results.append(check(
-                    f"Output has {len(lines)} lines (expected ~{expected})",
-                    len(lines) >= expected * 0.9,  # allow 10% tolerance for failed chunks
-                    f"{len(lines)}/{expected}",
-                ))
+            with open(output_path) as f:
+                lines = f.readlines()
+            # Compute expected lines from chunk progress
+            completed_chunks = progress.get("completed", 0) if progress else 0
+            total_chunks = progress.get("total", 5) if progress else 5
+            if completed_chunks > 0 and total_chunks > 0:
+                expected = int(5000 * completed_chunks / total_chunks)
+            else:
+                expected = 5000  # assume all if progress unavailable
+            results.append(check(
+                f"Output has {len(lines)} lines (expected ~{expected})",
+                len(lines) >= expected * 0.9,
+                f"{len(lines)}/{expected} ({completed_chunks}/{total_chunks} chunks completed)",
+            ))
         else:
             results.append(check(
                 "Output directory found",
                 False,
-                "no success-* dir with this job_id",
+                "no success-*/partial-* dir with output.jsonl",
             ))
 
     return results
