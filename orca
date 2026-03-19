@@ -1361,7 +1361,98 @@ def cmd_inspect(args):
         print(box(lines, title=group_name))
         print()
 
-    print(f"  {BOLD}{populated}/{total_fields} fields populated{RESET}\n")
+    print(f"  {BOLD}{populated}/{total_fields} fields populated{RESET}")
+
+    # Per-replica views
+    job_id = run.get("job_id")
+    if job_id and (getattr(args, 'replicas', False) or getattr(args, 'replica', None)):
+        _show_replica_inspect(job_id, args)
+
+    print()
+
+
+def _show_replica_inspect(job_id, args):
+    """Show per-replica summaries for a chunked job."""
+    resp = api("get", f"/job/{job_id}/replicas/summaries", timeout=10)
+    if resp.status_code == 404:
+        print(f"\n  {DIM}No per-replica summaries (single-cluster job?){RESET}")
+        return
+    if resp.status_code != 200:
+        print(f"\n  {RED}Error fetching replica summaries:{RESET} {resp.text}")
+        return
+
+    summaries = resp.json().get("summaries", [])
+    if not summaries:
+        return
+
+    target_replica = getattr(args, 'replica', None)
+
+    if target_replica:
+        # Single replica detail
+        match = [s for s in summaries if s.get("replica_id") == target_replica]
+        if not match:
+            print(f"\n  {RED}Replica '{target_replica}' not found.{RESET}")
+            print(f"  {DIM}Available:{RESET} {', '.join(s.get('replica_id','?') for s in summaries)}")
+            return
+        s = match[0]
+        print()
+        header(f"REPLICA: {target_replica}")
+        key_fields = [
+            ("Requests", "num_requests_completed"),
+            ("Throughput", "throughput_tokens_per_sec", "{:.0f} tok/s"),
+            ("Generation", "generation_time_sec", "{:.1f}s"),
+            ("TTFT p50", "ttft_ms_p50", "{:.1f}ms"),
+            ("TPOT p50", "tpot_ms_p50", "{:.1f}ms"),
+            ("E2E p50", "e2e_ms_p50", "{:.1f}ms"),
+            ("GPU SM avg", "avg_sm_util_pct", "{:.1f}%"),
+            ("GPU MemBW avg", "avg_mem_bw_util_pct", "{:.1f}%"),
+            ("Cost", "cost_for_run_usd", "${:.4f}"),
+            ("Model load", "model_load_time_sec", "{:.1f}s"),
+        ]
+        lines = []
+        for entry in key_fields:
+            label, key = entry[0], entry[1]
+            fmt = entry[2] if len(entry) > 2 else "{}"
+            v = s.get(key)
+            if v is not None:
+                lines.append(f"{DIM}{label}:{RESET}  {fmt.format(v)}")
+            else:
+                lines.append(f"{DIM}{label}:{RESET}  {DIM}—{RESET}")
+        print(box(lines, title=target_replica))
+    else:
+        # Side-by-side comparison table
+        print()
+        header("PER-REPLICA BREAKDOWN")
+        cols = [
+            ("Replica", "replica_id", "{}"),
+            ("Reqs", "num_requests_completed", "{}"),
+            ("tok/s", "throughput_tokens_per_sec", "{:.0f}"),
+            ("TTFT p50", "ttft_ms_p50", "{:.0f}ms"),
+            ("E2E p50", "e2e_ms_p50", "{:.0f}ms"),
+            ("GPU SM%", "avg_sm_util_pct", "{:.0f}"),
+            ("Cost", "cost_for_run_usd", "${:.4f}"),
+            ("Gen(s)", "generation_time_sec", "{:.0f}"),
+        ]
+        # Header row
+        hdr = "  "
+        for label, _, _ in cols:
+            hdr += f"{DIM}{label:<14}{RESET}"
+        print(hdr)
+        print(f"  {DIM}{'─' * (14 * len(cols))}{RESET}")
+        # Data rows
+        for s in sorted(summaries, key=lambda x: x.get("replica_id", "")):
+            row = "  "
+            zero_work = (s.get("num_requests_completed") or 0) == 0
+            for _, key, fmt in cols:
+                v = s.get(key)
+                if v is not None:
+                    cell = fmt.format(v)
+                else:
+                    cell = "—"
+                color = YELLOW if zero_work and key != "replica_id" else ""
+                reset = RESET if color else ""
+                row += f"{color}{cell:<14}{reset}"
+            print(row)
 
 
 def cmd_timeseries(args):
@@ -1610,6 +1701,8 @@ Examples:
     # inspect
     p_inspect = subparsers.add_parser("inspect", help="Show full details for a completed run (all 117 fields)")
     p_inspect.add_argument("run_id", help="Run ID (number) or job ID (mo-...)")
+    p_inspect.add_argument("--replicas", action="store_true", help="Show all per-replica summaries side by side")
+    p_inspect.add_argument("--replica", help="Show full metrics for a specific replica")
 
     # timeseries
     p_ts = subparsers.add_parser("timeseries", help="Show scheduler timeseries for a completed run")

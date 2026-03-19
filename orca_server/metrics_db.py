@@ -328,80 +328,124 @@ class MetricsDB:
                 pass
         return result
 
+    # ------------------------------------------------------------------
+    # Aggregation field categories (module-level for testability)
+    # ------------------------------------------------------------------
+
+    # Sum across ALL replicas (including zero-work)
+    _AGG_SUM = {
+        "num_requests_total", "num_requests_completed", "num_requests_skipped",
+        "total_input_tokens", "total_output_tokens", "total_tokens",
+        "num_preemptions", "gpu_samples", "scheduler_samples",
+        # Throughput sums (each replica adds throughput)
+        "throughput_requests_per_sec", "throughput_tokens_per_sec",
+        "throughput_output_tokens_per_sec", "throughput_input_tokens_per_sec",
+        # Cost sums (every replica burns money)
+        "cost_for_run_usd",
+    }
+
+    # Average across ONLY replicas with num_requests_completed > 0
+    # (per-request stats — zero-work replicas have no meaningful values)
+    _AGG_AVG_WORK_ONLY = {
+        "avg_input_tokens", "avg_output_tokens",
+        "p50_input_tokens", "p90_input_tokens", "p99_input_tokens",
+        "p50_output_tokens", "p90_output_tokens", "p99_output_tokens",
+        "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
+        "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
+        "tpot_client_ms_p50", "tpot_client_ms_p95", "tpot_client_ms_p99",
+        "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
+        "ttft_server_ms_p50", "ttft_server_ms_p95", "ttft_server_ms_p99",
+        "e2e_server_ms_p50", "e2e_server_ms_p95", "e2e_server_ms_p99",
+        "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
+        "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
+        "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+        "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+        "prefix_cache_hit_rate",
+    }
+
+    # Average across ALL replicas (idle GPU is diagnostic signal)
+    _AGG_AVG_ALL = {
+        "avg_sm_util_pct", "max_sm_util_pct",
+        "avg_mem_bw_util_pct", "max_mem_bw_util_pct",
+        "avg_mem_util_pct", "max_mem_util_pct",
+        "running_avg", "running_max", "waiting_avg", "waiting_max",
+        "swapped_avg", "swapped_max",
+        "kv_cache_util_pct_avg", "kv_cache_util_pct_max",
+    }
+
+    # Take MAX across all replicas
+    _AGG_MAX = {
+        "generation_time_sec", "model_load_time_sec", "total_runtime_sec",
+        "max_input_tokens", "max_output_tokens",
+    }
+
+    # Take MIN across working replicas only
+    _AGG_MIN = {"min_input_tokens", "min_output_tokens"}
+
+    # Copy from first replica with non-None value (identical across replicas)
+    _AGG_COPY = {
+        "model_name", "quantization", "cloud_provider", "instance_type",
+        "gpu_name", "engine", "tensor_parallel_size", "pipeline_parallel_size",
+        "max_model_len", "max_num_seqs", "gpu_memory_utilization",
+        "dtype", "kv_cache_dtype", "model_architecture", "params_billion",
+        "is_moe", "num_experts_active", "vocab_size",
+        "gpu_mem_gb", "gpu_tflops_fp16", "gpu_bandwidth_gbps",
+        "gpu_model", "gpu_generation", "interconnect",
+        "num_nodes", "precision", "runtime_stack",
+        "model_size_gb", "model_config_json",
+        "model_fits_single_gpu", "vram_headroom_gb", "params_per_gpu",
+        "attention_heads_per_kv_head", "kv_heads_per_tp",
+        "bandwidth_per_param", "flops_per_param",
+        "crosses_node_boundary", "kv_offload_target",
+        "cost_per_1m_tokens_prefill_usd", "cost_per_1m_tokens_decode_usd",
+        "price_per_hour",
+    }
+
     def aggregate_replica_summaries(self, job_id: str) -> dict | None:
         """Aggregate per-replica summaries into a single job-level summary.
 
-        Sum: tokens, requests, throughput.  Avg: latency, GPU util.
+        Zero-work replicas (num_requests_completed == 0) always contribute to
+        cost and GPU util aggregation, but are excluded from per-request stats
+        like latency and token averages to avoid dilution.
         """
         summaries = self.get_replica_summaries(job_id)
         if not summaries:
             return None
 
+        working = [s for s in summaries if (s.get("num_requests_completed") or 0) > 0]
         agg: dict = {}
-        # Fields to sum across replicas
-        sum_keys = [
-            "num_requests_total", "num_requests_completed", "num_requests_skipped",
-            "total_input_tokens", "total_output_tokens", "total_tokens",
-            "num_preemptions", "gpu_samples", "scheduler_samples",
-        ]
-        # Fields to average across replicas
-        avg_keys = [
-            "throughput_requests_per_sec", "throughput_tokens_per_sec",
-            "throughput_output_tokens_per_sec", "throughput_input_tokens_per_sec",
-            "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
-            "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
-            "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
-            "tpot_client_ms_p50", "tpot_client_ms_p95", "tpot_client_ms_p99",
-            "ttft_server_ms_p50", "ttft_server_ms_p95", "ttft_server_ms_p99",
-            "e2e_server_ms_p50", "e2e_server_ms_p95", "e2e_server_ms_p99",
-            "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
-            "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
-            "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
-            "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
-            "avg_sm_util_pct", "max_sm_util_pct",
-            "avg_mem_bw_util_pct", "max_mem_bw_util_pct",
-            "avg_mem_util_pct", "max_mem_util_pct",
-            "running_avg", "running_max", "waiting_avg", "waiting_max",
-            "kv_cache_util_pct_avg", "kv_cache_util_pct_max",
-            "prefix_cache_hit_rate",
-        ]
-        # Copy-first fields (take from first replica)
-        copy_keys = [
-            "model_name", "quantization", "cloud_provider", "instance_type",
-            "gpu_name", "engine", "tensor_parallel_size", "pipeline_parallel_size",
-            "max_model_len", "max_num_seqs", "gpu_memory_utilization",
-            "dtype", "kv_cache_dtype", "model_architecture", "params_billion",
-            "is_moe", "num_experts_active", "vocab_size",
-            "gpu_mem_gb", "gpu_tflops_fp16", "gpu_bandwidth_gbps",
-            "gpu_model", "gpu_generation", "interconnect",
-            "num_nodes", "precision", "runtime_stack",
-            "model_size_gb", "model_config_json",
-        ]
 
-        for k in sum_keys:
+        # Sum across ALL replicas
+        for k in self._AGG_SUM:
             vals = [s.get(k) for s in summaries if s.get(k) is not None]
             agg[k] = sum(vals) if vals else None
 
-        for k in avg_keys:
+        # Average across WORKING replicas only (per-request stats)
+        for k in self._AGG_AVG_WORK_ONLY:
+            vals = [s.get(k) for s in (working or summaries) if s.get(k) is not None]
+            agg[k] = sum(vals) / len(vals) if vals else None
+
+        # Average across ALL replicas (GPU util, scheduler — idle is diagnostic)
+        for k in self._AGG_AVG_ALL:
             vals = [s.get(k) for s in summaries if s.get(k) is not None]
             agg[k] = sum(vals) / len(vals) if vals else None
 
-        for k in copy_keys:
+        # Max across all replicas
+        for k in self._AGG_MAX:
+            vals = [s.get(k) for s in summaries if s.get(k) is not None]
+            agg[k] = max(vals) if vals else None
+
+        # Min across working replicas only
+        for k in self._AGG_MIN:
+            vals = [s.get(k) for s in (working or summaries) if s.get(k) is not None]
+            agg[k] = min(vals) if vals else None
+
+        # Copy from first replica with non-None value
+        for k in self._AGG_COPY:
             for s in summaries:
                 if s.get(k) is not None:
                     agg[k] = s[k]
                     break
-
-        # Timing: use max generation_time, model_load_time across replicas
-        for k in ("generation_time_sec", "model_load_time_sec", "total_runtime_sec"):
-            vals = [s.get(k) for s in summaries if s.get(k) is not None]
-            agg[k] = max(vals) if vals else None
-
-        # Throughput: sum across replicas (each replica's throughput adds up)
-        for k in ("throughput_requests_per_sec", "throughput_tokens_per_sec",
-                   "throughput_output_tokens_per_sec", "throughput_input_tokens_per_sec"):
-            vals = [s.get(k) for s in summaries if s.get(k) is not None]
-            agg[k] = sum(vals) if vals else None
 
         # Timestamps: earliest start, latest end
         starts = [s.get("job_start_timestamp") for s in summaries if s.get("job_start_timestamp")]
@@ -411,13 +455,35 @@ class MetricsDB:
         if ends:
             agg["job_end_timestamp"] = max(ends)
 
-        # Cost: aggregate from first replica (same instance type)
-        for k in ("price_per_hour", "cost_for_run_usd", "tokens_per_dollar"):
-            vals = [s.get(k) for s in summaries if s.get(k) is not None]
-            if vals:
-                agg[k] = sum(vals) if k == "cost_for_run_usd" else vals[0]
+        # Recompute derived cost fields from aggregated totals
+        total_tokens = agg.get("total_tokens") or 0
+        cost = agg.get("cost_for_run_usd") or 0
+        if cost > 0 and total_tokens > 0:
+            agg["tokens_per_dollar"] = round(total_tokens / cost, 2)
+            agg["cost_per_1m_tokens_total"] = round(cost / (total_tokens / 1_000_000), 4)
+        price = agg.get("price_per_hour")
+        tp = agg.get("tensor_parallel_size") or 1
+        pp = agg.get("pipeline_parallel_size") or 1
+        gpu_count = len(summaries) * tp * pp
+        if price and gpu_count:
+            agg["price_per_gpu_hour_usd"] = round(price / gpu_count, 4)
 
         agg["num_replicas"] = len(summaries)
+
+        # Catch-all: any key in any summary not yet in agg → copy from first non-None
+        all_keys: set = set()
+        for s in summaries:
+            all_keys.update(s.keys())
+        for k in all_keys:
+            if k in agg or k == "replica_id":
+                continue
+            for s in summaries:
+                v = s.get(k)
+                if v is not None:
+                    agg[k] = v
+                    logger.debug("[Aggregation] catch-all copied field '%s'", k)
+                    break
+
         return agg
 
     # ------------------------------------------------------------------

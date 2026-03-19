@@ -636,6 +636,15 @@ async def get_job_throughput(job_id: str, window: float = 60.0):
     return result
 
 
+@app.get("/job/{job_id}/replicas/summaries")
+async def get_replica_summaries_endpoint(job_id: str):
+    """Return per-replica build_metrics dicts for a completed chunked job."""
+    summaries = app.state.metrics_db.get_replica_summaries(job_id)
+    if not summaries:
+        raise HTTPException(404, f"No replica summaries for {job_id}")
+    return {"job_id": job_id, "count": len(summaries), "summaries": summaries}
+
+
 @app.get("/analytics/runs")
 async def list_analytics_runs(
     model: Optional[str] = None,

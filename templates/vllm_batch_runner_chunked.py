@@ -557,6 +557,11 @@ def build_metrics(
     # Client-side latency
     ttfts_ms = [r["ttft_ms"] for r in successes if r.get("ttft_ms") is not None]
     e2es_ms = [r["e2e_ms"] for r in successes if r.get("e2e_ms") is not None]
+    tpots_client_ms = [
+        (r["e2e_ms"] - r["ttft_ms"]) / (r["output_tokens"] - 1)
+        for r in successes
+        if r.get("output_tokens", 0) > 1 and r.get("ttft_ms") is not None and r.get("e2e_ms") is not None
+    ]
 
     # Server-side latency from Prometheus histogram deltas
     delta_ttft = _delta_histogram_buckets(pre_prom_text, post_prom_text, "vllm:time_to_first_token_seconds")
@@ -622,6 +627,9 @@ def build_metrics(
         "e2e_ms_p50": _percentile(e2es_ms, 50),
         "e2e_ms_p95": _percentile(e2es_ms, 95),
         "e2e_ms_p99": _percentile(e2es_ms, 99),
+        "tpot_client_ms_p50": _percentile(tpots_client_ms, 50),
+        "tpot_client_ms_p95": _percentile(tpots_client_ms, 95),
+        "tpot_client_ms_p99": _percentile(tpots_client_ms, 99),
         "tpot_ms_p50": _hq(delta_tpot, 0.50),
         "tpot_ms_p95": _hq(delta_tpot, 0.95),
         "tpot_ms_p99": _hq(delta_tpot, 0.99),
@@ -656,6 +664,8 @@ def build_metrics(
         "running_max": scheduler_summary.get("running_max"),
         "waiting_avg": scheduler_summary.get("waiting_avg"),
         "waiting_max": scheduler_summary.get("waiting_max"),
+        "swapped_avg": scheduler_summary.get("swapped_avg"),
+        "swapped_max": scheduler_summary.get("swapped_max"),
         "kv_cache_util_pct_avg": scheduler_summary.get("kv_cache_util_pct_avg"),
         "kv_cache_util_pct_max": scheduler_summary.get("kv_cache_util_pct_max"),
         "scheduler_samples": scheduler_summary.get("scheduler_samples", 0),
@@ -1458,17 +1468,25 @@ def main():
             local_output = f"/tmp/chunk_output_{JOB_ID}_{cid}.jsonl"
             write_output_jsonl(results, local_output, args.model)
 
-            if upload_chunk_output(local_output, s3_output_path):
+            upload_ok = upload_chunk_output(local_output, s3_output_path)
+            if upload_ok:
                 print(f"[Runner] Uploaded chunk {cid} output to {s3_output_path}")
             else:
-                print(f"[Runner] Failed to upload chunk {cid} output")
-            os.unlink(local_output)
+                print(f"[Runner] FAILED to upload chunk {cid} — will NOT report complete")
+            try:
+                os.unlink(local_output)
+            except OSError:
+                pass
 
             # Stop renewal and check if lease was stolen while we were processing
             renewal_stop.set()
             renewal_thread.join(timeout=5)
             if lease_stolen[0]:
                 print(f"[Runner] Chunk {cid} lease was reclaimed, skipping complete")
+                continue
+
+            if not upload_ok:
+                print(f"[Runner] Skipping complete for {cid} due to upload failure")
                 continue
 
             # Report completion
