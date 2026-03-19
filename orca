@@ -1086,6 +1086,11 @@ def _render_snap(md, label):
         lines.append(f"{DIM}TTFT p50:{RESET}     {ttft:.1f}ms")
     if tpot is not None:
         lines.append(f"{DIM}TPOT p50:{RESET}     {tpot:.1f}ms")
+    gpu_sm = md.get("gpu_sm_util_pct", 0)
+    gpu_bw = md.get("gpu_mem_bw_util_pct", 0)
+    if gpu_sm > 0 or gpu_bw > 0:
+        lines.append(f"{DIM}GPU SM:{RESET}       {bar(gpu_sm / 100, 30)}")
+        lines.append(f"{DIM}GPU MemBW:{RESET}    {bar(gpu_bw / 100, 30)}")
     return box(lines, title=label)
 
 
@@ -1176,6 +1181,11 @@ def cmd_metrics(args):
             f"{DIM}Running:{RESET}      {c(str(running), CYAN)}   {DIM}Waiting:{RESET} {waiting}",
             f"{DIM}Completed:{RESET}    {done}",
         ]
+        gpu_sm = md.get("gpu_sm_util_pct", 0)
+        gpu_bw = md.get("gpu_mem_bw_util_pct", 0)
+        if gpu_sm > 0 or gpu_bw > 0:
+            lines.append(f"{DIM}GPU SM:{RESET}       {bar(gpu_sm / 100, 30)}")
+            lines.append(f"{DIM}GPU MemBW:{RESET}    {bar(gpu_bw / 100, 30)}")
         return box(lines, title="METRICS"), None
 
     if watch:

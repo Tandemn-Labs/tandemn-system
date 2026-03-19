@@ -101,6 +101,7 @@ class TestMetricsSnapshot:
             "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
             "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
             "prefix_cache_hit_rate",
+            "gpu_sm_util_pct", "gpu_mem_bw_util_pct",
         }
         assert set(d.keys()) == expected_keys
         assert d["job_id"] == "job1"

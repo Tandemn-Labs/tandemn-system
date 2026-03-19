@@ -105,6 +105,9 @@ class MetricsSnapshot:
     inference_time_ms_p99: float | None = None
     # Prefix cache (vLLM v0.10.0+ only)
     prefix_cache_hit_rate: float | None = None
+    # GPU hardware utilization (from pynvml via sidecar)
+    gpu_sm_util_pct: float = 0.0
+    gpu_mem_bw_util_pct: float = 0.0
 
     @classmethod
     def from_prometheus_text(cls, job_id: str, text: str, timestamp: float) -> "MetricsSnapshot":
@@ -192,6 +195,8 @@ class MetricsSnapshot:
             "inference_time_ms_p95": self.inference_time_ms_p95,
             "inference_time_ms_p99": self.inference_time_ms_p99,
             "prefix_cache_hit_rate": self.prefix_cache_hit_rate,
+            "gpu_sm_util_pct": self.gpu_sm_util_pct,
+            "gpu_mem_bw_util_pct": self.gpu_mem_bw_util_pct,
         }
 
 
@@ -210,6 +215,8 @@ _SUM_FIELDS = {
 _AVG_FIELDS = {
     "gpu_cache_usage_perc",
     "prefix_cache_hit_rate",
+    "gpu_sm_util_pct",
+    "gpu_mem_bw_util_pct",
     "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
     "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
     "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
@@ -520,6 +527,24 @@ class MetricsCollector:
             if snap is None:
                 continue
             lines.append(f'orca_job_requests_waiting{{job_id="{job_id}"}} {snap.num_requests_waiting}')
+        lines += [
+            "# HELP orca_job_gpu_sm_util GPU SM utilization percent",
+            "# TYPE orca_job_gpu_sm_util gauge",
+        ]
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
+            if snap is None:
+                continue
+            lines.append(f'orca_job_gpu_sm_util{{job_id="{job_id}"}} {snap.gpu_sm_util_pct}')
+        lines += [
+            "# HELP orca_job_gpu_mem_bw_util GPU memory bandwidth utilization percent",
+            "# TYPE orca_job_gpu_mem_bw_util gauge",
+        ]
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
+            if snap is None:
+                continue
+            lines.append(f'orca_job_gpu_mem_bw_util{{job_id="{job_id}"}} {snap.gpu_mem_bw_util_pct}')
         return "\n".join(lines) + "\n"
 
     def sse_generator(self, job_id: str) -> Generator[str, None, None]:

@@ -345,6 +345,14 @@ async def ingest_job_metrics(
                 ) / dt
         prev_snap = snap
 
+        # Merge GPU hardware utilization from sidecar payload
+        gpu_sm = item.get("gpu_sm_util_pct")
+        gpu_bw = item.get("gpu_mem_bw_util_pct")
+        if gpu_sm is not None:
+            snap.gpu_sm_util_pct = float(gpu_sm)
+        if gpu_bw is not None:
+            snap.gpu_mem_bw_util_pct = float(gpu_bw)
+
         # Write into aggregated job-level ring buffer
         with mc._lock:
             jc = mc._jobs.get(job_id)
@@ -372,6 +380,27 @@ async def ingest_job_metrics(
             logger.warning("[Ingest] timeseries write failed for %s: %s", job_id, e)
 
     return {"ok": True, "ingested": ingested}
+
+
+@app.post("/job/{job_id}/metrics/summary")
+async def ingest_replica_summary(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Called by each replica after all chunks are done with its build_metrics dict."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = await request.json()
+    replica_id = body.get("replica_id")
+    metrics = body.get("metrics")
+    if not replica_id or not metrics:
+        raise HTTPException(status_code=400, detail="replica_id and metrics required")
+
+    app.state.metrics_db.push_replica_summary(job_id, replica_id, metrics)
+    logger.info("[Summary] Stored replica summary for %s / %s", job_id, replica_id)
+    return {"ok": True}
 
 
 @app.post("/job/{job_id}/phase")
@@ -533,6 +562,57 @@ async def _assemble_output(job_id: str):
             status_prefix = "partial" if failed_ids else "success"
             job_dirname = prefix_job_dirname(job_dirname, status_prefix)
             download_output_from_s3(final_s3, job_dirname, logger=job_logger)
+
+        # Aggregate per-replica summaries into job-level metrics
+        from orca_server.metrics_db import get_metrics_db
+        db = get_metrics_db()
+        try:
+            agg = db.aggregate_replica_summaries(job_id)
+            if agg:
+                # Write aggregated metrics.csv to temp, push into DB
+                import csv as _csv
+                metrics_csv_path = f"/tmp/assembly_metrics_{job_id}.csv"
+                with open(metrics_csv_path, "w", newline="") as mf:
+                    writer = _csv.writer(mf)
+                    writer.writerow(["metric", "value"])
+                    for k, v in agg.items():
+                        if isinstance(v, float):
+                            v = f"{v:.4f}"
+                        writer.writerow([k, v])
+                # Determine context for push_run
+                actual_region = ""
+                actual_market = "spot"
+                solver = "chunked"
+                if rec:
+                    actual_region = getattr(rec.state, "actual_region", "") or ""
+                    actual_market = getattr(rec.state, "actual_market", "spot") or "spot"
+                db.push_run(
+                    job_id, metrics_csv_path,
+                    actual_region=actual_region,
+                    actual_market=actual_market,
+                    solver=solver,
+                    job_dirname=job_dirname if rec else job_id,
+                )
+                os.unlink(metrics_csv_path)
+                job_logger.info(f"[Assembly] Wrote aggregated metrics to DB for {job_id}")
+
+                # Upload aggregated metrics.csv to S3
+                agg_metrics_path = f"/tmp/assembly_metrics_final_{job_id}.csv"
+                with open(agg_metrics_path, "w", newline="") as mf:
+                    writer = _csv.writer(mf)
+                    writer.writerow(["metric", "value"])
+                    for k, v in agg.items():
+                        if isinstance(v, float):
+                            v = f"{v:.4f}"
+                        writer.writerow([k, v])
+                metrics_s3 = f"{s3_output_base}/metrics.csv"
+                await storage_backend.upload_file(agg_metrics_path, metrics_s3, user="system")
+                os.unlink(agg_metrics_path)
+                job_logger.info(f"[Assembly] Uploaded aggregated metrics.csv to {metrics_s3}")
+            else:
+                job_logger.info(f"[Assembly] No replica summaries found for {job_id}, skipping metrics aggregation")
+        except Exception as me:
+            job_logger.warning(f"[Assembly] Metrics aggregation failed for {job_id}: {me}")
 
         get_job_tracker().update_status(job_id, "succeeded")
         get_job_tracker().update_progress(job_id, 1.0)
