@@ -696,9 +696,14 @@ async def swap_replicas(
 
     jt = get_job_tracker()
     rec = jt.get(job_id)
-    if rec is None or not getattr(rec, "is_chunked", False):
-        raise HTTPException(404, "Job not found or not chunked")
-    if rec.status in ("succeeded", "failed", "cancelled"):
+    # Check if chunked: either flag is set, or Redis has a chunk queue for this job
+    chunk_mgr = get_chunk_manager()
+    progress = chunk_mgr.get_progress(job_id)
+    if rec is None and progress is None:
+        raise HTTPException(404, "Job not found")
+    if progress is None:
+        raise HTTPException(400, "Job is not a chunked job — swap requires a chunked deployment")
+    if rec and rec.status in ("succeeded", "failed", "cancelled"):
         raise HTTPException(409, f"Job status '{rec.status}' is not swappable")
 
     cm = app.state.cluster_manager
@@ -759,20 +764,39 @@ async def swap_replicas(
     # Build new config for launching
     new_config = MagicOutput(
         decision_id=job_id,
+        engine="vllm",
         instance_type=instance_type,
         tp_size=tp_size,
         pp_size=pp_size,
         replicas=num_replicas,
-        num_nodes=pp_size,
         num_instances=pp_size,
     )
 
-    # Reconstruct request from job state
-    job_state = rec.state
-    original_request = job_state.spec if hasattr(job_state, "spec") else None
+    # Reconstruct request from job state (or build minimal if rec is None after restart)
+    if rec and hasattr(rec, "state") and hasattr(rec.state, "spec"):
+        original_request = rec.state.spec
+    else:
+        # Minimal request from chunk metadata — enough for _launch_chunked_replica
+        meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
+        s3_base = meta.get("s3_output_base", "s3://tandemn-orca/swap")
+        original_request = BatchedRequest(
+            user_id="swap",
+            model_name=meta.get("model_name", "unknown"),
+            input_file=f"{s3_base}/swap_input.jsonl",
+            output_file="output.jsonl",
+            description="swap",
+            task_type="batch",
+            task_priority="normal",
+            engine="vllm",
+            slo_mode="cost_first",
+            placement="user_specified",
+            num_lines=int(meta.get("total_chunks", 1)) * 100,
+            avg_input_tokens=body.get("avg_input_tokens", 2000),
+            avg_output_tokens=body.get("avg_output_tokens", 1024),
+        )
 
     # Launch new replicas in background threads
-    job_dirname = getattr(rec, "_job_dirname", f"swap-{job_id}")
+    job_dirname = getattr(rec, "_job_dirname", None) or f"swap-{job_id}"
 
     def _launch_swap_replica(replica_id):
         import asyncio as _aio

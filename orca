@@ -975,22 +975,30 @@ def cmd_swap(args):
     job_id = args.job_id
 
     # Verify job exists
+    # Check job (may not be in tracker after server restart, but chunks in Redis)
     resp = api("get", f"/job/{job_id}", timeout=10)
-    if resp.status_code != 200:
-        print(f"\n  {RED}Job {job_id} not found{RESET}\n")
-        sys.exit(1)
-
-    job = resp.json()
-    print(f"\n  Job: {c(job_id, BOLD)}")
-    print(f"  Status: {job.get('status', '?')}")
+    if resp.status_code == 200:
+        job = resp.json()
+        print(f"\n  Job: {c(job_id, BOLD)}")
+        print(f"  Status: {job.get('status', '?')}")
+    else:
+        # Job not in tracker — check Redis for chunks
+        progress_resp = api("get", f"/job/{job_id}/chunks/progress", timeout=10)
+        if progress_resp.status_code != 200:
+            print(f"\n  {RED}Job {job_id} not found{RESET}\n")
+            sys.exit(1)
+        progress = progress_resp.json()
+        print(f"\n  Job: {c(job_id, BOLD)} {DIM}(recovered from Redis){RESET}")
+        print(f"  Chunks: {progress['completed']}/{progress['total']} completed, {progress['inflight']} inflight")
 
     # Show current replicas
     rep_resp = api("get", f"/job/{job_id}/replicas", timeout=10)
     if rep_resp.status_code == 200:
-        replicas = rep_resp.json().get("replicas", {})
+        replicas = rep_resp.json().get("replicas", [])
         print(f"\n  Current replicas ({len(replicas)}):")
-        for rid, info in replicas.items():
-            phase = info.get("phase", "?")
+        for r in replicas:
+            rid = r.get("replica_id", "?")
+            phase = r.get("phase", "?")
             color = GREEN if phase == "running" else YELLOW if phase == "launching" else RED
             print(f"    {rid}: {c(phase, color)}")
 
