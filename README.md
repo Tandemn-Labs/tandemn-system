@@ -5,7 +5,7 @@
 
 Batch inference on large models means choosing the right GPU, figuring out tensor and pipeline parallelism, picking a region with available quota, and hoping it all fits in memory before your deadline. Most teams just guess.
 
-Orca handles all of that. Give it a model name, a JSONL file, and a deadline. Its roofline-based placement solver sizes the job automatically — picking the instance type, parallelism configuration, and AWS region — then launches on spot via SkyPilot. While the job runs, Orca streams real-time throughput, latency, and scheduler metrics back to your terminal. Output lands in S3 when it's done.
+Orca handles all of that. Give it a model name, a JSONL file, and a deadline. The placement solver sizes the job automatically; picking the instance type, parallelism configuration, and AWS region, then launches on spot via SkyPilot. While the job runs, Orca streams real-time throughput, latency, and scheduler metrics back to your terminal. Output lands in S3 when it's done.
 
 ---
 
