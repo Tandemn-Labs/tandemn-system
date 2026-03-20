@@ -32,7 +32,10 @@ from orca_server.launcher import (
     sp_launch_vllm_batch_with_fallback,
     sp_launch_vllm_online,
     launch_chunked_replicas,
+    _launch_chunked_replica,
 )
+from orca_server.job_manager import sky_down_with_retry
+import threading
 from orca_server.chunk_manager import get_chunk_manager
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
@@ -674,6 +677,200 @@ async def get_replica_summaries_endpoint(job_id: str):
     if not summaries:
         raise HTTPException(404, f"No replica summaries for {job_id}")
     return {"job_id": job_id, "count": len(summaries), "summaries": summaries}
+
+
+@app.post("/job/{job_id}/swap")
+async def swap_replicas(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Hot-swap replicas to a new GPU/TP/PP config mid-job.
+
+    Launches new replicas with the new config (same Redis queue), waits for
+    first metrics ingest from K new replicas, then force-reclaims old replicas'
+    inflight chunks and tears them down.
+    """
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    jt = get_job_tracker()
+    rec = jt.get(job_id)
+    if rec is None or not getattr(rec, "is_chunked", False):
+        raise HTTPException(404, "Job not found or not chunked")
+    if rec.status in ("succeeded", "failed", "cancelled"):
+        raise HTTPException(409, f"Job status '{rec.status}' is not swappable")
+
+    cm = app.state.cluster_manager
+    if cm._swap_in_progress.get(job_id):
+        raise HTTPException(409, "Swap already in progress for this job")
+
+    body = await request.json()
+    gpu_type = body.get("gpu_type")
+    tp_size = body.get("tp_size", 1)
+    pp_size = body.get("pp_size", 1)
+    num_replicas = body.get("num_replicas")
+    ready_threshold = body.get("ready_threshold", 1)
+    on_demand = body.get("on_demand", False)
+    force = body.get("force", False)
+
+    if not gpu_type:
+        raise HTTPException(400, "gpu_type is required")
+
+    # Validate feasibility
+    try:
+        instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp_size)
+    except Exception as e:
+        raise HTTPException(400, f"Cannot resolve GPU config: {e}")
+
+    if not force:
+        feasibility = check_user_specified_feasibility(
+            gpu_type=gpu_type, tp_size=tp_size, pp_size=pp_size,
+            model_name=getattr(rec.state, "spec", None) and rec.state.spec.model_name or "",
+        )
+        if not feasibility.get("feasible", True):
+            return {"status": "confirm", "message": feasibility.get("reason", "Config may not be feasible"),
+                    "detail": feasibility}
+
+    # Snapshot old replicas
+    old_states = cm.get_replica_states(job_id)
+    old_replicas = [rid for rid, info in old_states.items()
+                    if info.get("phase") not in ("dead", "completed", "failed", "swapped_out")]
+
+    # Default replicas count = same as current active
+    if num_replicas is None:
+        num_replicas = len(old_replicas) or 1
+
+    ready_threshold = min(ready_threshold, num_replicas)
+
+    # Generate versioned replica names
+    version = cm.next_swap_version(job_id)
+    new_replicas = [f"{job_id}-v{version}-r{i}" for i in range(num_replicas)]
+
+    # Mark swap in progress
+    with cm.lock:
+        cm._swap_in_progress[job_id] = True
+
+    # Pre-register new replicas
+    for rid in new_replicas:
+        cm.set_replica_state(job_id, rid, phase="launching")
+        cm.register_for_job(job_id, rid)
+
+    # Build new config for launching
+    new_config = MagicOutput(
+        decision_id=job_id,
+        instance_type=instance_type,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        replicas=num_replicas,
+        num_nodes=pp_size,
+        num_instances=pp_size,
+    )
+
+    # Reconstruct request from job state
+    job_state = rec.state
+    original_request = job_state.spec if hasattr(job_state, "spec") else None
+
+    # Launch new replicas in background threads
+    job_dirname = getattr(rec, "_job_dirname", f"swap-{job_id}")
+
+    def _launch_swap_replica(replica_id):
+        import asyncio as _aio
+        replica_config = new_config.model_copy(update={
+            "decision_id": replica_id,
+            "replicas": 1,
+            "num_instances": pp_size,
+        })
+        try:
+            loop = _aio.new_event_loop()
+            loop.run_until_complete(_launch_chunked_replica(
+                original_request, replica_config, replica_id,
+                parent_job_id=job_id,
+                job_dirname=job_dirname,
+                persist=False,
+            ))
+            loop.close()
+        except Exception as e:
+            logger.error(f"[Swap] Failed to launch new replica {replica_id}: {e}")
+            cm.set_replica_state(job_id, replica_id, phase="failed")
+
+    for rid in new_replicas:
+        t = threading.Thread(target=_launch_swap_replica, args=(rid,), daemon=False,
+                             name=f"orca-swap-{rid[:16]}")
+        t.start()
+
+    # Start swap monitor
+    asyncio.create_task(_swap_monitor(job_id, old_replicas, list(new_replicas), ready_threshold))
+
+    return {
+        "status": "swapping",
+        "old_replicas": old_replicas,
+        "new_replicas": new_replicas,
+        "ready_threshold": ready_threshold,
+        "version": version,
+    }
+
+
+async def _swap_monitor(job_id: str, old_replicas: list[str],
+                         new_replicas: list[str], ready_threshold: int):
+    """Wait for K new replicas to send first ingest POST, then kill old ones."""
+    mc = app.state.metrics_collector
+    cm = app.state.cluster_manager
+    deadline = time.time() + 1800  # 30 min timeout
+    ready_set: set[str] = set()
+
+    logger.info(
+        "[Swap] Monitor started for %s: waiting for %d/%d new replicas",
+        job_id, ready_threshold, len(new_replicas),
+    )
+
+    while len(ready_set) < ready_threshold and time.time() < deadline:
+        await asyncio.sleep(5)
+
+        # Check if job is already done
+        jt = get_job_tracker()
+        rec = jt.get(job_id)
+        if rec and rec.status in ("succeeded", "failed", "cancelled"):
+            logger.info("[Swap] Job %s ended during swap, aborting monitor", job_id)
+            break
+
+        # Check which new replicas have sent heartbeats
+        for rid in new_replicas:
+            if rid in ready_set:
+                continue
+            key = f"{job_id}:{rid}"
+            with mc._lock:
+                rc = mc._replicas.get(key)
+            if rc:
+                with rc.lock:
+                    if rc.buffer:
+                        ready_set.add(rid)
+                        logger.info("[Swap] New replica %s is active (%d/%d)",
+                                    rid, len(ready_set), ready_threshold)
+
+    if len(ready_set) >= ready_threshold:
+        logger.info("[Swap] Threshold met for %s, killing old replicas: %s", job_id, old_replicas)
+
+        # Force-reclaim old replicas' inflight chunks
+        chunk_mgr = get_chunk_manager()
+        result = chunk_mgr.force_reclaim(job_id, old_replicas)
+        logger.info("[Swap] Reclaimed from old replicas: %s", result)
+
+        # Tear down old clusters in background
+        for rid in old_replicas:
+            cm.set_replica_state(job_id, rid, phase="swapped_out")
+            threading.Thread(
+                target=sky_down_with_retry, args=(rid,),
+                daemon=True, name=f"swap-down-{rid[:12]}",
+            ).start()
+    else:
+        logger.warning(
+            "[Swap] Timeout for %s: only %d/%d new replicas ready. Old replicas kept alive.",
+            job_id, len(ready_set), ready_threshold,
+        )
+
+    with cm.lock:
+        cm._swap_in_progress.pop(job_id, None)
 
 
 @app.get("/analytics/runs")

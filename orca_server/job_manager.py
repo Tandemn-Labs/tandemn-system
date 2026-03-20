@@ -130,6 +130,8 @@ class ClusterManager:
         self._persist_set: set = set()
         self._job_clusters: Dict[str, list] = {}  # job_id → [cluster_names]
         self._replica_states: Dict[str, Dict[str, dict]] = {}  # job_id → {replica_id → state}
+        self._swap_in_progress: Dict[str, bool] = {}
+        self._swap_version: Dict[str, int] = {}  # job_id → next version counter
         self.lock = Lock()
 
     def register(self, cluster_name: str, job_id: str, region: str = None,
@@ -182,6 +184,12 @@ class ClusterManager:
     def get_replica_states(self, job_id: str) -> Dict[str, dict]:
         with self.lock:
             return dict(self._replica_states.get(job_id, {}))
+
+    def next_swap_version(self, job_id: str) -> int:
+        with self.lock:
+            v = self._swap_version.get(job_id, 2)
+            self._swap_version[job_id] = v + 1
+            return v
 
     def get_active_threads(self) -> Dict[str, threading.Thread]:
         with self.lock:
