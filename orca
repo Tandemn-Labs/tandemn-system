@@ -964,6 +964,66 @@ def cmd_clusters(args):
     _sp.run(["sky", "status"], check=False)
 
 
+def cmd_swap(args):
+    """Hot-swap replicas to a new GPU/TP/PP config mid-job."""
+    print(LOGO)
+    header("SWAP REPLICAS")
+    job_id = args.job_id
+
+    # Verify job exists
+    resp = api("get", f"/job/{job_id}", timeout=10)
+    if resp.status_code != 200:
+        print(f"\n  {RED}Job {job_id} not found{RESET}\n")
+        sys.exit(1)
+
+    job = resp.json()
+    print(f"\n  Job: {c(job_id, BOLD)}")
+    print(f"  Status: {job.get('status', '?')}")
+
+    # Show current replicas
+    rep_resp = api("get", f"/job/{job_id}/replicas", timeout=10)
+    if rep_resp.status_code == 200:
+        replicas = rep_resp.json().get("replicas", {})
+        print(f"\n  Current replicas ({len(replicas)}):")
+        for rid, info in replicas.items():
+            phase = info.get("phase", "?")
+            color = GREEN if phase == "running" else YELLOW if phase == "launching" else RED
+            print(f"    {rid}: {c(phase, color)}")
+
+    # Build swap payload
+    payload = {
+        "gpu_type": args.gpu,
+        "tp_size": args.tp or 1,
+        "pp_size": args.pp or 1,
+        "on_demand": args.on_demand,
+        "force": args.force,
+        "ready_threshold": args.ready_threshold,
+    }
+    if args.replicas is not None:
+        payload["num_replicas"] = args.replicas
+
+    print(f"\n  Swapping to: {c(args.gpu, BOLD)} TP={payload['tp_size']} PP={payload['pp_size']}")
+
+    resp = api("post", f"/job/{job_id}/swap", json=payload, timeout=30)
+    if resp.status_code != 200:
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        if data.get("status") == "confirm":
+            print(f"\n  {YELLOW}Warning:{RESET} {data.get('message', 'Config may not be feasible')}")
+            print(f"  Use {BOLD}--force{RESET} to proceed anyway.\n")
+            sys.exit(1)
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        sys.exit(1)
+
+    data = resp.json()
+    print(f"\n  {GREEN}Swap initiated!{RESET}")
+    print(f"  Old replicas: {', '.join(data.get('old_replicas', []))}")
+    print(f"  New replicas: {', '.join(data.get('new_replicas', []))}")
+    print(f"  Ready threshold: {data.get('ready_threshold', '?')}")
+    print(f"  Version: v{data.get('version', '?')}")
+    print(f"\n  {DIM}New replicas will start pulling chunks from the same queue.")
+    print(f"  Old replicas will be killed after {data.get('ready_threshold', 1)} new replica(s) start inferring.{RESET}\n")
+
+
 def cmd_destroy(args):
     """Tear down Orca clusters, Redis state, and S3 uploads."""
     import subprocess as _sp
@@ -1712,6 +1772,17 @@ Examples:
     p_stream = subparsers.add_parser("stream", help="Stream live SSE metrics for a running job")
     p_stream.add_argument("job_id", help="Job ID to stream")
 
+    # swap
+    p_swap = subparsers.add_parser("swap", help="Hot-swap replicas to new GPU config mid-job")
+    p_swap.add_argument("job_id", help="Job ID to swap replicas for")
+    p_swap.add_argument("--gpu", required=True, help="New GPU type (e.g., A100, H100, L40S)")
+    p_swap.add_argument("--tp", type=int, default=1, help="Tensor parallelism (default: 1)")
+    p_swap.add_argument("--pp", type=int, default=1, help="Pipeline parallelism (default: 1)")
+    p_swap.add_argument("--replicas", type=int, default=None, help="New replica count (default: same as current)")
+    p_swap.add_argument("--ready-threshold", type=int, default=1, help="Wait for K new replicas before killing old")
+    p_swap.add_argument("--on-demand", action="store_true", help="Use on-demand instances")
+    p_swap.add_argument("--force", action="store_true", help="Skip feasibility check")
+
     # destroy
     p_destroy = subparsers.add_parser("destroy", help="Tear down Orca clusters")
     p_destroy.add_argument("job_id", nargs="?", help="Job ID to destroy clusters for")
@@ -1737,6 +1808,7 @@ Examples:
         "timeseries": cmd_timeseries,
         "stream": cmd_stream,
         "destroy": cmd_destroy,
+        "swap": cmd_swap,
     }
 
     commands[args.command](args)
