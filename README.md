@@ -11,9 +11,9 @@ Orca handles all of that. Give it a model name, a JSONL file, and a deadline. It
 
 ## Prerequisites
 
-- Python 3.11+
-- AWS credentials (`~/.aws/credentials`)
-- SkyPilot configured for AWS
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+- AWS credentials configured (`aws configure` or `~/.aws/credentials`)
 - Redis (for multi-replica chunked jobs): `docker run -d -p 6379:6379 redis`
 
 ---
@@ -23,37 +23,56 @@ Orca handles all of that. Give it a model name, a JSONL file, and a deadline. It
 ```bash
 git clone --recurse-submodules https://github.com/Tandemn-Labs/Tandemn-orca.git
 cd Tandemn-orca
-pip install -r requirements.txt
+
+# Create venv and install dependencies
+uv venv .venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
+uv pip install -r requirements-dev.txt  # for tests
+
+# Configure SkyPilot for AWS
+sky check
 ```
+
+Create a `.env` file in the project root:
 
 ```bash
 # .env
-S3_UPLOAD_BUCKET=your-s3-bucket
-HF_TOKEN=your_hf_token        # for gated models (Llama, etc.)
+S3_UPLOAD_BUCKET=tandemn-orca         # S3 bucket for uploads and outputs
+HF_TOKEN=hf_your_token_here          # for gated models (Llama, Gemma, etc.)
 ```
 
 ---
 
 ## Quick Start
 
-Start the control plane:
+Start the control plane with a Cloudflare tunnel (so EC2 replicas can reach your laptop):
 
 ```bash
-python server.py
+python server.py --tunnel
 ```
+
+This starts the server on `http://localhost:26336` and prints a public tunnel URL. The tunnel URL is automatically set as `ORCA_SERVER_URL`.
 
 Run a batch job:
 
 ```bash
-./orca deploy Qwen/Qwen2.5-72B-Instruct input.jsonl --slo 4
+./orca deploy Qwen/Qwen2.5-7B-Instruct examples/workloads/demo_batch.jsonl --slo 4
 ```
 
 Orca parses the input file, runs the placement solver, and launches on the cheapest viable spot configuration. No GPU selection required.
+
+For multi-replica with chunking:
+
+```bash
+./orca deploy Qwen/Qwen2.5-7B-Instruct input.jsonl --gpu A10G --tp 1 --replicas 2 --chunk-size 100
+```
 
 Track progress:
 
 ```bash
 ./orca progress
+./orca metrics <job_id> --watch
 ```
 
 ---
@@ -194,32 +213,47 @@ Standard OpenAI batch JSONL:
 
 Local files are uploaded to S3 automatically. S3 URIs (`s3://...`) are passed through directly.
 
+Sample workloads are in `examples/workloads/`:
+
+```bash
+examples/workloads/demo_batch.jsonl                    # 30 requests, quick test
+examples/workloads/sharegpt-numreq_200-*.jsonl         # 200 ShareGPT conversations
+examples/workloads/stress_5000.jsonl                   # 5000 requests, stress test
+```
+
+Generate larger workloads:
+```bash
+python examples/workloads/make_long_workload.py examples/workloads/sharegpt-numreq_200-avginputlen_956-avgoutputlen_50.jsonl 25 /tmp/stress_5k.jsonl
+```
+
 ---
 
-## Trying Locally?
+## Running Locally
 
-The control plane runs on your laptop, but EC2 replicas need to reach it (for metrics, chunk pulling, etc.). The easiest way is a Cloudflare Tunnel — one command, no account required, no firewall changes:
+EC2 replicas need to reach your control plane for metrics, chunk pulling, etc. `python server.py --tunnel` handles this automatically using a free Cloudflare tunnel (no account required).
+
+If you prefer manual tunnel setup or a persistent URL:
 
 ```bash
-# Install once
+# Option A: Manual Cloudflare tunnel
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
 chmod +x cloudflared
-
-# Expose your local server (run alongside python server.py)
 ./cloudflared tunnel --url http://localhost:26336
-# → https://random-words.trycloudflare.com
-```
 
-Then add the URL to your `.env`:
+# Then set in .env:
+ORCA_SERVER_URL=https://random-words.trycloudflare.com
+```
 
 ```bash
-ORCA_SERVER_URL=https://random-words.trycloudflare.com
-ORCA_API_KEY=some-secret-key   # optional but recommended since the tunnel is public
+# Option B: Persistent setup
+# Use Tailscale (mesh VPN, stable IPs) or deploy on a small EC2 in the same VPC
 ```
 
-Restart the server and the EC2 replicas will be able to call back to your laptop. The URL changes each time you restart `cloudflared` — copy the new one into `.env` and restart `server.py`.
-
-For a persistent setup, use [Tailscale](https://tailscale.com) (mesh VPN, stable IPs, encrypted) or deploy the control plane on a small EC2 instance in the same VPC.
+Optional security for public tunnels:
+```bash
+# .env
+ORCA_API_KEY=some-secret-key   # all replica↔server communication will require this token
+```
 
 ---
 
