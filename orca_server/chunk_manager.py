@@ -136,6 +136,27 @@ return {reclaimed, failed}
 """
 
 
+# Atomically renew a chunk lease if the replica still owns it.
+# KEYS: [chunk_key]
+# ARGV: [replica_id, new_lease_until]
+# Returns: [renewed (0/1), lease_until]
+_RENEW_LUA = """
+local chunk_key  = KEYS[1]
+local replica_id = ARGV[1]
+local new_lease  = ARGV[2]
+
+local status = redis.call('HGET', chunk_key, 'status')
+local owner  = redis.call('HGET', chunk_key, 'replica_id')
+
+if status ~= 'inflight' or owner ~= replica_id then
+    return {0, 0}
+end
+
+redis.call('HSET', chunk_key, 'lease_until', new_lease)
+return {1, new_lease}
+"""
+
+
 class ChunkManager:
     """Redis-backed chunk queue for distributing work across replicas."""
 
@@ -143,6 +164,7 @@ class ChunkManager:
         self._r = redis.from_url(redis_url, decode_responses=True)
         self._reclaim_script = self._r.register_script(_RECLAIM_LUA)
         self._force_reclaim_script = self._r.register_script(_FORCE_RECLAIM_LUA)
+        self._renew_script = self._r.register_script(_RENEW_LUA)
 
     def create_job_queue(
         self,
@@ -234,19 +256,20 @@ class ChunkManager:
         return info
 
     def renew_lease(self, job_id: str, chunk_id: str, replica_id: str) -> dict:
-        """Extend lease for a chunk currently owned by replica_id.
+        """Extend lease for a chunk currently owned by replica_id (atomic via Lua).
 
         Returns {"renewed": True, "lease_until": float} on success.
         Returns {"renewed": False} if another replica owns the chunk or it was reclaimed.
         """
-        chunk_key = _chunk_key(job_id, chunk_id)
-        status, current_replica = self._r.hmget(chunk_key, "status", "replica_id")
-        if status != "inflight" or current_replica != replica_id:
-            return {"renewed": False}
-        now = time.time()
-        new_lease = now + CHUNK_LEASE_TTL_SEC
-        self._r.hset(chunk_key, "lease_until", new_lease)
-        return {"renewed": True, "lease_until": new_lease}
+        new_lease = time.time() + CHUNK_LEASE_TTL_SEC
+        result = self._renew_script(
+            keys=[_chunk_key(job_id, chunk_id)],
+            args=[replica_id, new_lease],
+        )
+        renewed = int(result[0])
+        if renewed:
+            return {"renewed": True, "lease_until": float(result[1])}
+        return {"renewed": False}
 
     def reclaim_expired_chunks(self, job_id: str) -> dict:
         """Atomically reclaim inflight chunks whose leases have expired.

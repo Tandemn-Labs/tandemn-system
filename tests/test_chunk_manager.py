@@ -386,6 +386,44 @@ def test_force_reclaim_empty_inflight(cm, job_id):
     assert result["failed"] == 0
 
 
+def test_renew_after_reclaim_returns_false(cm, job_id):
+    """Simulate TOCTOU: chunk is reclaimed between ownership check and lease write.
+    With the Lua-based renew, this is atomic — renew must return False."""
+    from orca_server.chunk_manager import _chunk_key
+
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")  # c0000 inflight, owned by replica-0
+
+    # Expire the lease so reclaim can steal it
+    cm._r.hset(_chunk_key(job_id, "c0000"), "lease_until", time.time() - 1)
+
+    # Reclaim steals the chunk (moves from inflight → pending)
+    result = cm.reclaim_expired_chunks(job_id)
+    assert result["reclaimed"] == 1
+
+    # Now replica-0 tries to renew — chunk is no longer inflight or owned by it
+    renew_result = cm.renew_lease(job_id, "c0000", "replica-0")
+    assert renew_result["renewed"] is False
+
+    # Chunk should still be in pending (not corrupted by a stale renew)
+    progress = cm.get_progress(job_id)
+    assert progress["pending"] == 3  # c0000 reclaimed + c0001 + c0002
+
+
+def test_renew_by_wrong_replica_returns_false(cm, job_id):
+    """A different replica trying to renew someone else's chunk gets rejected."""
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")  # c0000 owned by replica-0
+
+    result = cm.renew_lease(job_id, "c0000", "replica-IMPOSTER")
+    assert result["renewed"] is False
+
+    # Original owner can still renew
+    result = cm.renew_lease(job_id, "c0000", "replica-0")
+    assert result["renewed"] is True
+    assert result["lease_until"] > time.time()
+
+
 def test_force_reclaim_multiple_replicas(cm, job_id):
     """Force-reclaim chunks from multiple replica IDs simultaneously."""
     cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")

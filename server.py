@@ -120,7 +120,7 @@ async def lifespan(app: FastAPI):
                 continue
             try:
                 cm = get_chunk_manager()
-                keys = cm._r.keys("chunk:job:*:inflight")
+                keys = list(cm._r.scan_iter("chunk:job:*:inflight"))
                 for key in keys:
                     # key format: "chunk:job:{job_id}:inflight"
                     prefix = "chunk:job:"
@@ -724,6 +724,7 @@ async def _assemble_output(job_id: str):
     except Exception as e:
         job_logger.error(f"[Assembly] Failed for {job_id}: {e}")
         get_job_tracker().update_status(job_id, "failed")
+        cm._r.delete(lock_key)  # release assembly lock so retry can happen immediately
         if os.path.exists(combined_path):
             os.unlink(combined_path)
 

@@ -45,6 +45,7 @@ except ImportError:
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 ORCA_SERVER = os.environ.get("ORCA_SERVER", "http://localhost:26336")
+ORCA_API_KEY = os.environ.get("ORCA_API_KEY", "")
 
 # ─── ANSI helpers ────────────────────────────────────────────────────────────
 BOLD    = "\033[1m"
@@ -183,6 +184,10 @@ def parse_input_file(input_file: str) -> dict:
 def api(method, path, **kwargs):
     """Make an HTTP request to the Orca server."""
     url = f"{ORCA_SERVER}{path}"
+    if ORCA_API_KEY:
+        headers = kwargs.pop("headers", {})
+        headers.setdefault("Authorization", f"Bearer {ORCA_API_KEY}")
+        kwargs["headers"] = headers
     try:
         resp = getattr(requests, method)(url, timeout=kwargs.pop("timeout", 600), **kwargs)
         return resp
@@ -311,6 +316,17 @@ def _poll_replica_launch(job_id, num_replicas):
             print(f"\n  {DIM}Timed out waiting. Replicas continue launching in background.{RESET}")
     except KeyboardInterrupt:
         print(f"\n  {DIM}Replicas continue launching in background.{RESET}")
+
+
+def _upload_full_file(input_file: str, is_s3: bool) -> str:
+    """Upload a single input file (or pass through S3 path). Returns S3 URI."""
+    if is_s3:
+        step(f"Using S3 path: {c(input_file, DIM)}")
+        return input_file
+    step("Uploading input file to storage...")
+    s3_input = upload_to_server(input_file)
+    step(f"Uploaded to {c(s3_input, DIM)}")
+    return s3_input
 
 
 # ─── Commands ────────────────────────────────────────────────────────────────
@@ -444,25 +460,9 @@ def cmd_deploy(args):
             payload["chunks"] = chunk_infos
             payload["replicas"] = solver_replicas
         else:
-            # Single replica — upload full file
-            if is_s3:
-                s3_input = input_file
-                step(f"Using S3 path: {c(s3_input, DIM)}")
-            else:
-                step("Uploading input file to storage...")
-                s3_input = upload_to_server(input_file)
-                step(f"Uploaded to {c(s3_input, DIM)}")
-            payload["input_file"] = s3_input
+            payload["input_file"] = _upload_full_file(input_file, is_s3)
     else:
-        # Single replica (explicit --replicas 1 or --gpu) — upload full file
-        if is_s3:
-            s3_input = input_file
-            step(f"Using S3 path: {c(s3_input, DIM)}")
-        else:
-            step("Uploading input file to storage...")
-            s3_input = upload_to_server(input_file)
-            step(f"Uploaded to {c(s3_input, DIM)}")
-        payload["input_file"] = s3_input
+        payload["input_file"] = _upload_full_file(input_file, is_s3)
 
     # ── Phase 3: Submit ──────────────────────────────────────────────────
     print()
@@ -1057,9 +1057,9 @@ def cmd_destroy(args):
         _all_clusters = []
 
     if args.all:
-        orca_clusters = [c.name for c in _all_clusters if c.name.startswith("mo-")]
+        orca_clusters = [c["name"] for c in _all_clusters if c.get("name", "").startswith("mo-")]
     else:
-        orca_clusters = [c.name for c in _all_clusters if c.name.startswith(args.job_id)]
+        orca_clusters = [c["name"] for c in _all_clusters if c.get("name", "").startswith(args.job_id)]
 
     # ── 2. Discover Redis chunk keys ─────────────────────────────────────
     redis_keys = []
