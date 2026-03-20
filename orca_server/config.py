@@ -48,6 +48,11 @@ CHUNK_MAX_RETRIES      = int(os.getenv("CHUNK_MAX_RETRIES", "3"))
 CHUNK_RECLAIM_INTERVAL = int(os.getenv("CHUNK_RECLAIM_INTERVAL_SEC", "60"))
 CHUNK_RENEW_INTERVAL   = int(os.getenv("CHUNK_RENEW_INTERVAL_SEC", "30"))
 
+# Replica watchdog — heartbeat-based dead replica detection
+REPLICA_DEAD_THRESHOLD_SEC = int(os.getenv("REPLICA_DEAD_THRESHOLD_SEC", "45"))
+WATCHDOG_POLL_INTERVAL_SEC = int(os.getenv("WATCHDOG_POLL_INTERVAL_SEC", "10"))
+RECOVERY_COOLDOWN_SEC      = int(os.getenv("RECOVERY_COOLDOWN_SEC", "300"))
+
 # --------------------------------------------------------------------------- #
 # Canonical AWS instance table
 #

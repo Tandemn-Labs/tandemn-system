@@ -90,12 +90,59 @@ return {reclaimed, failed}
 """
 
 
+# Atomically reclaim inflight chunks owned by specific replica IDs (ignoring lease expiry).
+# KEYS: [inflight_key, pending_key, failed_key]
+# ARGV: [job_prefix, max_retries, replica_id_1, replica_id_2, ...]
+# Returns: [reclaimed_count, failed_count]
+_FORCE_RECLAIM_LUA = """
+local inflight_key = KEYS[1]
+local pending_key  = KEYS[2]
+local failed_key   = KEYS[3]
+local job_prefix   = ARGV[1]
+local max_retries  = tonumber(ARGV[2])
+
+local targets = {}
+for i = 3, #ARGV do targets[ARGV[i]] = true end
+
+local members   = redis.call('SMEMBERS', inflight_key)
+local reclaimed = 0
+local failed    = 0
+
+for _, cid in ipairs(members) do
+    local chunk_key  = job_prefix .. ':chunk:' .. cid
+    local rid        = redis.call('HGET', chunk_key, 'replica_id') or ''
+    if targets[rid] then
+        local retry_count = (tonumber(redis.call('HGET', chunk_key, 'retry_count')) or 0) + 1
+        if retry_count >= max_retries then
+            redis.call('SREM', inflight_key, cid)
+            redis.call('SADD', failed_key, cid)
+            redis.call('HSET', chunk_key,
+                'status', 'failed',
+                'retry_count', tostring(retry_count))
+            failed = failed + 1
+        else
+            redis.call('SREM', inflight_key, cid)
+            redis.call('RPUSH', pending_key, cid)
+            redis.call('HSET', chunk_key,
+                'status', 'pending',
+                'retry_count', tostring(retry_count),
+                'lease_until', '0')
+            reclaimed = reclaimed + 1
+        end
+    end
+end
+
+return {reclaimed, failed}
+"""
+
+
 class ChunkManager:
     """Redis-backed chunk queue for distributing work across replicas."""
 
     def __init__(self, redis_url: str = REDIS_URL):
         self._r = redis.from_url(redis_url, decode_responses=True)
         self._reclaim_script = self._r.register_script(_RECLAIM_LUA)
+        self._force_reclaim_script = self._r.register_script(_FORCE_RECLAIM_LUA)
 
     def create_job_queue(
         self,
@@ -212,6 +259,20 @@ class ChunkManager:
         result = self._reclaim_script(
             keys=[_inflight_key(job_id), _pending_key(job_id), _failed_key(job_id)],
             args=[f"{_PREFIX}:{job_id}", time.time(), CHUNK_MAX_RETRIES],
+        )
+        return {"reclaimed": int(result[0]), "failed": int(result[1])}
+
+    def force_reclaim(self, job_id: str, replica_ids: list[str]) -> dict:
+        """Immediately reclaim all inflight chunks owned by replica_ids (ignores lease time).
+
+        Used by ReplicaWatchdog (dead replica) and Orca Swap (old replica teardown).
+        Returns {"reclaimed": N, "failed": M}.
+        """
+        if not replica_ids:
+            return {"reclaimed": 0, "failed": 0}
+        result = self._force_reclaim_script(
+            keys=[_inflight_key(job_id), _pending_key(job_id), _failed_key(job_id)],
+            args=[f"{_PREFIX}:{job_id}", CHUNK_MAX_RETRIES] + list(replica_ids),
         )
         return {"reclaimed": int(result[0]), "failed": int(result[1])}
 

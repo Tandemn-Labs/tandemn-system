@@ -311,3 +311,93 @@ def test_complete_promotes_from_failed(cm, job_id):
     assert "c0000" not in cm.get_failed_chunk_ids(job_id)
     assert progress["completed"] == 1
     assert progress["failed"] == 0  # promoted out of failed
+
+
+# ---------------------------------------------------------------------------
+# force_reclaim tests — immediate reclaim by replica ID (ignores lease expiry)
+# ---------------------------------------------------------------------------
+
+def test_force_reclaim_specific_replica(cm, job_id):
+    """Force-reclaim only chunks owned by a specific replica; others untouched."""
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+
+    # r0 pulls c0000 and c0002, r1 pulls c0001
+    cm.pull_chunk(job_id, "replica-0")   # c0000
+    cm.pull_chunk(job_id, "replica-1")   # c0001
+    cm.pull_chunk(job_id, "replica-0")   # c0002
+
+    progress = cm.get_progress(job_id)
+    assert progress["inflight"] == 3
+
+    result = cm.force_reclaim(job_id, ["replica-0"])
+    assert result["reclaimed"] == 2
+    assert result["failed"] == 0
+
+    progress = cm.get_progress(job_id)
+    assert progress["inflight"] == 1   # only r1's c0001 still inflight
+    assert progress["pending"] == 2    # c0000 and c0002 back in pending
+
+    # r1's chunk is untouched
+    info = cm.get_chunk_info(job_id, "c0001")
+    assert info["status"] == "inflight"
+    assert info["replica_id"] == "replica-1"
+
+
+def test_force_reclaim_no_match(cm, job_id):
+    """Force-reclaim with a replica that owns nothing → 0 reclaimed."""
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")
+
+    result = cm.force_reclaim(job_id, ["replica-NONEXISTENT"])
+    assert result["reclaimed"] == 0
+    assert result["failed"] == 0
+
+    progress = cm.get_progress(job_id)
+    assert progress["inflight"] == 1  # unchanged
+
+
+def test_force_reclaim_respects_max_retries(cm, job_id):
+    """Chunk at max retries should move to failed set, not pending."""
+    from orca_server.chunk_manager import _chunk_key
+    from orca_server.config import CHUNK_MAX_RETRIES
+
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+    cm.pull_chunk(job_id, "replica-0")  # c0000
+
+    # Set retry_count to max - 1 so the next reclaim (which increments) hits the limit
+    cm._r.hset(_chunk_key(job_id, "c0000"), "retry_count", CHUNK_MAX_RETRIES - 1)
+
+    result = cm.force_reclaim(job_id, ["replica-0"])
+    assert result["reclaimed"] == 0
+    assert result["failed"] == 1
+
+    assert "c0000" in cm.get_failed_chunk_ids(job_id)
+    progress = cm.get_progress(job_id)
+    assert progress["inflight"] == 0
+    assert progress["failed"] == 1
+
+
+def test_force_reclaim_empty_inflight(cm, job_id):
+    """Force-reclaim when nothing is inflight → 0/0."""
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+
+    result = cm.force_reclaim(job_id, ["replica-0"])
+    assert result["reclaimed"] == 0
+    assert result["failed"] == 0
+
+
+def test_force_reclaim_multiple_replicas(cm, job_id):
+    """Force-reclaim chunks from multiple replica IDs simultaneously."""
+    cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
+
+    cm.pull_chunk(job_id, "replica-0")   # c0000
+    cm.pull_chunk(job_id, "replica-1")   # c0001
+    cm.pull_chunk(job_id, "replica-2")   # c0002
+
+    result = cm.force_reclaim(job_id, ["replica-0", "replica-1"])
+    assert result["reclaimed"] == 2
+    assert result["failed"] == 0
+
+    progress = cm.get_progress(job_id)
+    assert progress["inflight"] == 1   # only r2's c0002 still inflight
+    assert progress["pending"] == 2    # c0000 and c0001 back in pending
