@@ -1,6 +1,6 @@
 # Orca
 <div align="center">
-<img src="https://raw.githubusercontent.com/Tandemn-Labs/Tandemn-orca/demo/thapar-cli/data/orca.png" width="400" alt="Orca">
+<img src="data/orca.png" width="400" alt="Orca">
 </div>
 
 Batch inference on large models means choosing the right GPU, figuring out tensor and pipeline parallelism, picking a region with available quota, and hoping it all fits in memory before your deadline. Most teams just guess.
