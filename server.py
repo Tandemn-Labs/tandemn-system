@@ -146,12 +146,80 @@ async def lifespan(app: FastAPI):
     watchdog_task = None
     if getattr(app.state, "redis_available", False):
         from orca_server.watchdog import ReplicaWatchdog
+
+        def _watchdog_recover(job_id: str, replica_id: str):
+            """Relaunch a dead replica in a background thread."""
+            cm = app.state.cluster_manager
+            cluster_info = cm.active_clusters.get(job_id, {})
+            instance_type = cluster_info.get("instance_type", "g5.xlarge")
+            # Recover replica state to get original config
+            states = cm.get_replica_states(job_id)
+            old_state = states.get(replica_id, {})
+            orig_instance = old_state.get("instance_type") or instance_type
+
+            chunk_mgr = get_chunk_manager()
+            meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
+            model_name = meta.get("model_name", "unknown")
+
+            # Determine TP from instance GPU count
+            from orca_server.config import AWS_INSTANCES
+            gpu_name, gpu_count, _ = AWS_INSTANCES.get(orig_instance, ("A10G", 1, 4))
+
+            config = MagicOutput(
+                decision_id=job_id,
+                engine="vllm",
+                instance_type=orig_instance,
+                tp_size=gpu_count,
+                pp_size=1,
+                replicas=1,
+                num_instances=1,
+            )
+            req = BatchedRequest(
+                user_id="watchdog-recovery",
+                model_name=model_name,
+                input_file=meta.get("s3_output_base", f"s3://tandemn-orca/{job_id}") + "/recovery.jsonl",
+                output_file="output.jsonl",
+                description="watchdog-recovery",
+                task_type="batch",
+                task_priority="normal",
+                engine="vllm",
+                slo_mode="cost_first",
+                placement="user_specified",
+                num_lines=int(meta.get("total_chunks", 1)) * 100,
+                avg_input_tokens=2000,
+                avg_output_tokens=1024,
+            )
+            replica_config = config.model_copy(update={
+                "decision_id": replica_id,
+                "replicas": 1,
+            })
+
+            def _do_recover():
+                import asyncio as _aio
+                cm.set_replica_state(job_id, replica_id, phase="launching")
+                try:
+                    loop = _aio.new_event_loop()
+                    loop.run_until_complete(_launch_chunked_replica(
+                        req, replica_config, replica_id,
+                        parent_job_id=job_id,
+                        job_dirname=f"recovery-{job_id}",
+                    ))
+                    loop.close()
+                    logger.info("[Watchdog] Recovery launched for %s", replica_id)
+                except Exception as e:
+                    logger.error("[Watchdog] Recovery failed for %s: %s", replica_id, e)
+                    cm.set_replica_state(job_id, replica_id, phase="failed")
+
+            t = threading.Thread(target=_do_recover, daemon=False, name=f"orca-recover-{replica_id[:16]}")
+            t.start()
+
         watchdog = ReplicaWatchdog(
             metrics_collector=app.state.metrics_collector,
             cluster_manager=app.state.cluster_manager,
             job_tracker=get_job_tracker(),
             chunk_manager_fn=get_chunk_manager,
             assembly_callback=lambda jid: asyncio.create_task(_assemble_output(jid)),
+            recover_callback=_watchdog_recover,
         )
         app.state.watchdog = watchdog
         watchdog_task = asyncio.create_task(watchdog.run())
