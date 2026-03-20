@@ -2,8 +2,11 @@
 SkyPilot cluster launch orchestration for vLLM batch and online jobs.
 """
 
+import logging
 import subprocess
 import threading
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 from typing import List, Tuple
 

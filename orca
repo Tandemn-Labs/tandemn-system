@@ -361,6 +361,9 @@ def cmd_deploy(args):
     print()
     chunk_size = getattr(args, 'chunk_size', None) or 1000
     effective_replicas = getattr(args, 'replicas', None) or 0
+    # --chunked forces the chunked pipeline even with 1 replica (useful for swap testing)
+    if getattr(args, 'chunked', False) and effective_replicas < 2:
+        effective_replicas = max(effective_replicas, 1)
 
     # Output tokens: use JSONL-derived values if available, else CLI default
     if not is_s3:
@@ -408,8 +411,9 @@ def cmd_deploy(args):
         payload["avg_input_tokens"] = stats["avg_input_tokens"]
         payload["max_input_tokens"] = stats["max_input_tokens"]
 
-    if effective_replicas > 1:
-        # Path A: --replicas N → chunk immediately
+    force_chunked = getattr(args, 'chunked', False)
+    if effective_replicas > 1 or (force_chunked and effective_replicas >= 1):
+        # Path A: --replicas N (or --chunked) → chunk immediately
         step(f"Chunking {stats['num_lines'] if not is_s3 else '?'} requests into {chunk_size}-line chunks for {effective_replicas} replicas...")
         chunk_infos = split_and_upload_chunks(input_file, chunk_size)
         step(f"Uploaded {c(str(len(chunk_infos)), GREEN+BOLD)} chunks to S3")
@@ -1717,6 +1721,7 @@ Examples:
     p_deploy.add_argument("--on-demand", action="store_true", help="Use on-demand instances instead of spot")
     p_deploy.add_argument("--replicas", type=int, default=None, help="Number of replica clusters (auto if omitted)")
     p_deploy.add_argument("--chunk-size", type=int, default=None, help="Lines per chunk for multi-replica (default: 1000)")
+    p_deploy.add_argument("--chunked", action="store_true", help="Force chunked pipeline (for swap testing with 1 replica)")
     p_deploy.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
 
     # plan
