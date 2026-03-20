@@ -840,28 +840,26 @@ async def swap_replicas(
         num_instances=pp_size,
     )
 
-    # Reconstruct request from job state (or build minimal if rec is None after restart)
-    if rec and hasattr(rec, "state") and hasattr(rec.state, "spec"):
-        original_request = rec.state.spec
-    else:
-        # Minimal request from chunk metadata — enough for _launch_chunked_replica
-        meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
-        s3_base = meta.get("s3_output_base", "s3://tandemn-orca/swap")
-        original_request = BatchedRequest(
-            user_id="swap",
-            model_name=meta.get("model_name", "unknown"),
-            input_file=f"{s3_base}/swap_input.jsonl",
-            output_file="output.jsonl",
-            description="swap",
-            task_type="batch",
-            task_priority="normal",
-            engine="vllm",
-            slo_mode="cost_first",
-            placement="user_specified",
-            num_lines=int(meta.get("total_chunks", 1)) * 100,
-            avg_input_tokens=body.get("avg_input_tokens", 2000),
-            avg_output_tokens=body.get("avg_output_tokens", 1024),
-        )
+    # Build a BatchedRequest for the new replicas. Always construct from available info
+    # (rec.state.spec is a JobSpec not BatchedRequest, so we build one either way)
+    meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
+    s3_base = meta.get("s3_output_base", "s3://tandemn-orca/swap")
+    spec = rec.state.spec if rec and hasattr(rec, "state") and hasattr(rec.state, "spec") else None
+    original_request = BatchedRequest(
+        user_id="swap",
+        model_name=(spec.model_name if spec else meta.get("model_name", "unknown")),
+        input_file=f"{s3_base}/swap_input.jsonl",
+        output_file="output.jsonl",
+        description="swap",
+        task_type="batch",
+        task_priority="normal",
+        engine="vllm",
+        slo_mode="cost_first",
+        placement="user_specified",
+        num_lines=int(meta.get("total_chunks", 1)) * 100,
+        avg_input_tokens=(spec.avg_input_tokens if spec else body.get("avg_input_tokens", 2000)),
+        avg_output_tokens=(spec.avg_output_tokens if spec else body.get("avg_output_tokens", 1024)),
+    )
 
     # Launch new replicas in background threads
     job_dirname = getattr(rec, "_job_dirname", None) or f"swap-{job_id}"
