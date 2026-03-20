@@ -1,11 +1,13 @@
 """Tests for orca_server.watchdog — ReplicaWatchdog dead replica detection."""
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
 from threading import Lock
 from unittest.mock import MagicMock, patch
 
 import pytest
+import redis as _redis
 
 from orca_server.watchdog import ReplicaWatchdog
 
@@ -248,3 +250,139 @@ class TestAssemblyTrigger:
         watchdog._check_all_jobs()
 
         assert assembly_called == [job_id]
+
+
+# ---------------------------------------------------------------------------
+# Integration test — watchdog + real Redis chunks
+# ---------------------------------------------------------------------------
+
+SAMPLE_CHUNKS = [
+    {"chunk_id": "c0000", "s3_input_path": "s3://b/c0000.jsonl", "num_lines": 100},
+    {"chunk_id": "c0001", "s3_input_path": "s3://b/c0001.jsonl", "num_lines": 100},
+    {"chunk_id": "c0002", "s3_input_path": "s3://b/c0002.jsonl", "num_lines": 100},
+]
+
+
+@pytest.fixture
+def real_cm():
+    """Real ChunkManager connected to Redis DB 1."""
+    from orca_server.chunk_manager import ChunkManager
+    url = "redis://localhost:6379/1"
+    try:
+        r = _redis.from_url(url)
+        r.ping()
+    except _redis.ConnectionError:
+        pytest.skip("Redis not available at localhost:6379")
+    manager = ChunkManager(redis_url=url)
+    yield manager
+    r = _redis.from_url(url, decode_responses=True)
+    for key in r.keys("chunk:job:*"):
+        r.delete(key)
+
+
+class TestWatchdogRedisIntegration:
+    def test_dead_replica_chunks_reclaimed_and_repullable(self, real_cm):
+        """End-to-end: dead replica's inflight chunks are force-reclaimed and a new replica pulls them."""
+        job_id = f"test-wd-{uuid.uuid4().hex[:8]}"
+        real_cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/out")
+
+        # r0 pulls c0000 and c0001, r1 pulls c0002
+        real_cm.pull_chunk(job_id, "r0")  # c0000
+        real_cm.pull_chunk(job_id, "r0")  # c0001
+        real_cm.pull_chunk(job_id, "r1")  # c0002
+
+        progress = real_cm.get_progress(job_id)
+        assert progress["inflight"] == 3
+        assert progress["pending"] == 0
+
+        # Build a watchdog with real ChunkManager, mocked everything else
+        mc = FakeMetricsCollector()
+        cm_cluster = MagicMock()
+        cm_cluster.get_replica_states.return_value = {
+            "r0": {"phase": "running"},
+            "r1": {"phase": "running"},
+        }
+        jt = FakeJobTracker()
+        jt.jobs[job_id] = FakeJobRecord(status="running")
+
+        # r0 is dead (stale heartbeat), r1 is alive
+        mc.add_replica(f"{job_id}:r0", [time.time() - 120])
+        mc.add_replica(f"{job_id}:r1", [time.time() - 2])
+
+        wd = ReplicaWatchdog(
+            metrics_collector=mc,
+            cluster_manager=cm_cluster,
+            job_tracker=jt,
+            chunk_manager_fn=lambda: real_cm,
+            dead_threshold_sec=45,
+            poll_interval_sec=1,
+        )
+
+        wd._check_all_jobs()
+
+        # r0 declared dead, its chunks reclaimed
+        cm_cluster.set_replica_state.assert_called_once_with(job_id, "r0", phase="dead")
+
+        progress = real_cm.get_progress(job_id)
+        assert progress["inflight"] == 1   # only r1's c0002
+        assert progress["pending"] == 2    # c0000 + c0001 back in pending
+
+        # A new replica (r2) can now pull the reclaimed chunks
+        c = real_cm.pull_chunk(job_id, "r2")
+        assert c is not None
+        assert c["chunk_id"] in ("c0000", "c0001")
+        assert c["replica_id"] == "r2"
+
+        c2 = real_cm.pull_chunk(job_id, "r2")
+        assert c2 is not None
+        assert c2["chunk_id"] in ("c0000", "c0001")
+
+        # No more pending
+        c3 = real_cm.pull_chunk(job_id, "r2")
+        assert c3 is None
+
+    def test_all_replicas_dead_chunks_fully_recoverable(self, real_cm):
+        """All replicas die → all inflight chunks reclaimed → new replicas can pull all of them."""
+        job_id = f"test-wd-all-{uuid.uuid4().hex[:8]}"
+        real_cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/out")
+
+        real_cm.pull_chunk(job_id, "r0")  # c0000
+        real_cm.pull_chunk(job_id, "r1")  # c0001
+        real_cm.pull_chunk(job_id, "r0")  # c0002
+
+        mc = FakeMetricsCollector()
+        cm_cluster = MagicMock()
+        cm_cluster.get_replica_states.return_value = {
+            "r0": {"phase": "running"},
+            "r1": {"phase": "running"},
+        }
+        jt = FakeJobTracker()
+        jt.jobs[job_id] = FakeJobRecord(status="running")
+
+        # Both replicas stale
+        stale = time.time() - 120
+        mc.add_replica(f"{job_id}:r0", [stale])
+        mc.add_replica(f"{job_id}:r1", [stale])
+
+        wd = ReplicaWatchdog(
+            metrics_collector=mc,
+            cluster_manager=cm_cluster,
+            job_tracker=jt,
+            chunk_manager_fn=lambda: real_cm,
+            dead_threshold_sec=45,
+            poll_interval_sec=1,
+        )
+
+        wd._check_all_jobs()
+
+        progress = real_cm.get_progress(job_id)
+        assert progress["inflight"] == 0
+        assert progress["pending"] == 3  # all chunks back
+
+        # New replica can pull all 3
+        pulled = []
+        for _ in range(3):
+            c = real_cm.pull_chunk(job_id, "r-new")
+            assert c is not None
+            pulled.append(c["chunk_id"])
+        assert sorted(pulled) == ["c0000", "c0001", "c0002"]
