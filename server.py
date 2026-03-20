@@ -139,8 +139,29 @@ async def lifespan(app: FastAPI):
 
     reclaim_task = asyncio.create_task(_reclaim_loop())
 
+    # Replica watchdog: detect dead replicas via heartbeat, force-reclaim, recover
+    watchdog_task = None
+    if getattr(app.state, "redis_available", False):
+        from orca_server.watchdog import ReplicaWatchdog
+        watchdog = ReplicaWatchdog(
+            metrics_collector=app.state.metrics_collector,
+            cluster_manager=app.state.cluster_manager,
+            job_tracker=get_job_tracker(),
+            chunk_manager_fn=get_chunk_manager,
+            assembly_callback=lambda jid: asyncio.create_task(_assemble_output(jid)),
+        )
+        app.state.watchdog = watchdog
+        watchdog_task = asyncio.create_task(watchdog.run())
+        logger.info("[Watchdog] Started replica watchdog")
+
     yield
 
+    if watchdog_task:
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
     reclaim_task.cancel()
     try:
         await reclaim_task
@@ -319,6 +340,15 @@ async def ingest_job_metrics(
     mc.start_collecting(job_id)
     if replica_id:
         mc.start_replica_collecting(job_id, replica_id)
+        # Update phase to "running" on first ingest (handles recovered replicas)
+        cm = app.state.cluster_manager
+        states = cm.get_replica_states(job_id)
+        if replica_id in states and states[replica_id].get("phase") in ("launching", "provisioned", "dead"):
+            cm.set_replica_state(job_id, replica_id, phase="running", running_since=time.time())
+        # Clear watchdog dead tracking if this replica recovered
+        wd = getattr(app.state, "watchdog", None)
+        if wd:
+            wd.clear_dead(replica_id)
 
     ingested = 0
     batch_for_db = []
