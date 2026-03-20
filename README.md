@@ -14,6 +14,7 @@ Orca handles all of that. Give it a model name, a JSONL file, and a deadline. It
 - Python 3.11+
 - AWS credentials (`~/.aws/credentials`)
 - SkyPilot configured for AWS
+- Redis (for multi-replica chunked jobs): `docker run -d -p 6379:6379 redis`
 
 ---
 
@@ -73,10 +74,24 @@ Options for `deploy` and `plan`:
 --max-output-tokens N   Max tokens per response (default: 1024)
 --gpu <type>            Override GPU type (e.g. A100, L40S, H100)
 --tp / --pp             Override tensor / pipeline parallelism
+--replicas N            Number of replica clusters (enables chunked multi-replica mode)
+--chunk-size N          Lines per chunk (default: 1000)
+--chunked               Force chunked pipeline (even with 1 replica)
 --force                 Skip feasibility check and launch anyway
 --persist               Keep cluster alive after job completes
 --on-demand             Use on-demand instances instead of spot
 ```
+
+### Hot-Swap Replicas
+
+Change GPU type, TP/PP, or replica count mid-job without losing progress:
+
+```
+./orca swap <job_id> --gpu A100 --tp 4 --replicas 2
+./orca swap <job_id> --gpu L40S --tp 1 --ready-threshold 2 --on-demand
+```
+
+New replicas join the same Redis chunk queue. Old replicas are killed after the new ones start processing.
 
 ### Monitoring
 
@@ -84,9 +99,18 @@ Options for `deploy` and `plan`:
 ./orca progress [job_id]          Live progress bar with throughput and queue depth
 ./orca status                     List all jobs
 ./orca metrics <job_id> [-w]      Latest vLLM metrics snapshot (--watch for 2s refresh)
+./orca metrics <job_id> --replica <rid>   Per-replica metrics
+./orca metrics <job_id> --compare         Aggregated + per-replica side by side
 ./orca stream <job_id>            Stream live metrics table (1 event/sec via SSE)
 ./orca logs [cluster]             Stream logs from a SkyPilot cluster
 ./orca clusters                   Show active clusters
+```
+
+### Operations
+
+```
+./orca destroy <job_id>           Tear down clusters + Redis state for a job
+./orca destroy --all              Tear down ALL Orca clusters
 ```
 
 ### Analytics
@@ -94,6 +118,7 @@ Options for `deploy` and `plan`:
 ```
 ./orca history [--model X] [--gpu Y]   Browse completed runs
 ./orca inspect <run_id>                Full run report (latency, throughput, cost, GPU util)
+./orca inspect <run_id> --replicas     Per-replica summaries side by side
 ./orca timeseries <run_id>             Scheduler timeseries for a completed run
 ```
 
@@ -102,9 +127,8 @@ Options for `deploy` and `plan`:
 ## How It Works
 
 ```
-                   ./orca deploy Qwen/Qwen2.5-72B-Instruct batch.jsonl --slo 4
-                                         |
-                                         v
+         ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
+
                               +---------------------+
                               |   Control Plane      |
                               |   (server.py)        |
@@ -112,29 +136,38 @@ Options for `deploy` and `plan`:
                               |  1. Parse input      |
                               |  2. Roofline solver  |
                               |  3. Quota check      |
-                              |  4. SkyPilot launch  |
+                              |  4. Chunk + Redis    |
+                              |  5. SkyPilot launch  |
                               +----------+----------+
                                          |
-                          +--------------+--------------+
-                          |                             |
-                          v                             v
-                   +-------------+              +--------------+
-                   |  EC2 Spot   |  metrics/s   |  Metrics     |
-                   |  vLLM V1    | -----------> |  Collector   |
-                   |  + runner   |              |  (SQLite)    |
-                   +------+------+              +--------------+
-                          |
-                          v
-                    S3 (output.jsonl + metrics.csv)
+                    +--------------------+--------------------+
+                    |                    |                    |
+                    v                    v                    v
+             +----------+        +----------+        +----------+
+             | Replica 0|        | Replica 1|  ...   | Replica N|
+             | vLLM V1  |        | vLLM V1  |        | vLLM V1  |
+             +----+-----+        +----+-----+        +----+-----+
+                  |                    |                    |
+                  +------+  Redis  +--+--------------------+
+                         |  Queue  |
+                         +---------+
+                  pull → process → upload → complete
+                              |
+                              v
+                   S3 (per-chunk outputs → assembled output.jsonl + metrics.csv)
 ```
 
 **Placement solver.** Uses a roofline model to estimate throughput and memory requirements across GPU types and TP/PP configurations. Picks the cheapest option that completes within your SLO. Automatically falls back to alternative regions and instance types if the primary launch fails.
 
+**Chunked multi-replica.** Input is split into chunks (default 1000 lines each) and queued in Redis. N independent replicas pull chunks, process them via vLLM, and upload outputs to S3. Lease-based fault tolerance: if a replica dies, its inflight chunks are reclaimed and re-queued. A ReplicaWatchdog detects dead replicas via heartbeat within 45 seconds.
+
+**Hot-swap.** `orca swap` launches new replicas with a different GPU/TP/PP config on the same Redis queue. Once the new replicas start processing, old replicas are torn down. Zero chunks lost in the transition.
+
 **Quota tracking.** Real-time quota usage across AWS regions. Orca won't try to launch where you have no capacity.
 
-**Observability.** The runner on the EC2 node pushes Prometheus snapshots to the control plane every second. Orca computes throughput from counter deltas, extracts histogram quantiles (TTFT, TPOT, E2E, queue/prefill/decode/inference), and tracks KV cache utilization and scheduler state. All metrics are persisted to SQLite for post-run analysis.
+**Observability.** Each replica's sidecar pushes Prometheus snapshots + GPU utilization + per-token live counters to the control plane every 5 seconds. Orca computes throughput from a fixed 10-second ring buffer window, extracts histogram quantiles (TTFT, TPOT, E2E, queue/prefill/decode/inference), and tracks KV cache utilization and scheduler state. All metrics are persisted to SQLite for post-run analysis.
 
-**Teardown.** Clusters are destroyed by default after job completion. Use `--persist` to keep them alive.
+**Teardown.** Clusters are destroyed by default after job completion. Use `--persist` to keep them alive. `orca destroy --all` cleans up clusters, Redis state, and S3 uploads.
 
 ---
 
@@ -196,12 +229,29 @@ The control plane exposes a REST API at `http://localhost:26336`:
 
 | Endpoint | Description |
 |----------|-------------|
+| **Jobs** | |
 | `POST /submit/batch` | Submit batch inference job |
 | `POST /test/placement` | Run solver only (no launch) |
+| `GET /jobs` | List all jobs |
 | `GET /job/{id}` | Job status and progress |
+| `POST /job/{id}/phase` | Update job lifecycle phase |
+| **Metrics** | |
 | `GET /job/{id}/metrics` | Latest metrics snapshot |
 | `GET /job/{id}/metrics/stream` | SSE metrics stream |
+| `POST /job/{id}/metrics/ingest` | Sidecar metrics ingest (replica → server) |
+| `POST /job/{id}/metrics/summary` | Per-replica build_metrics summary |
 | `GET /job/{id}/throughput` | Sustained throughput (rolling window) |
+| **Replicas** | |
+| `GET /job/{id}/replicas` | Per-replica state (phase, region, metrics) |
+| `GET /job/{id}/replicas/{rid}/metrics` | Metrics for a specific replica |
+| `GET /job/{id}/replicas/summaries` | Per-replica completion summaries |
+| `POST /job/{id}/swap` | Hot-swap replicas to new GPU config |
+| **Chunks** | |
+| `GET /job/{id}/chunks/progress` | Chunk-level progress (pending/inflight/completed/failed) |
+| `POST /job/{id}/chunks/pull` | Pull next chunk (replica-facing) |
+| `POST /job/{id}/chunks/complete` | Mark chunk completed |
+| `POST /job/{id}/chunks/renew` | Renew chunk lease |
+| **Analytics** | |
 | `GET /analytics/runs` | List completed runs |
 | `GET /analytics/runs/{id}` | Full run report |
 | `GET /analytics/runs/{id}/timeseries` | Scheduler timeseries |
