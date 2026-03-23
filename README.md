@@ -93,9 +93,8 @@ Options for `deploy` and `plan`:
 --max-output-tokens N   Max tokens per response (default: 1024)
 --gpu <type>            Override GPU type (e.g. A100, L40S, H100)
 --tp / --pp             Override tensor / pipeline parallelism
---replicas N            Number of replica clusters (enables chunked multi-replica mode)
+--replicas N            Number of replica clusters (default: 1)
 --chunk-size N          Lines per chunk (default: 1000)
---chunked               Force chunked pipeline (even with 1 replica)
 --force                 Skip feasibility check and launch anyway
 --persist               Keep cluster alive after job completes
 --on-demand             Use on-demand instances instead of spot

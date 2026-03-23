@@ -318,17 +318,6 @@ def _poll_replica_launch(job_id, num_replicas):
         print(f"\n  {DIM}Replicas continue launching in background.{RESET}")
 
 
-def _upload_full_file(input_file: str, is_s3: bool) -> str:
-    """Upload a single input file (or pass through S3 path). Returns S3 URI."""
-    if is_s3:
-        step(f"Using S3 path: {c(input_file, DIM)}")
-        return input_file
-    step("Uploading input file to storage...")
-    s3_input = upload_to_server(input_file)
-    step(f"Uploaded to {c(s3_input, DIM)}")
-    return s3_input
-
-
 # ─── Commands ────────────────────────────────────────────────────────────────
 def cmd_deploy(args):
     """Deploy a model for batch inference."""
@@ -373,13 +362,12 @@ def cmd_deploy(args):
         ]
         print(box(lines, title="WORKLOAD"))
 
-    # ── Phase 2: Determine replica count + chunk if needed ──────────────
+    # ── Phase 2: Determine replica count + chunk ────────────────────────
+    # All jobs go through the chunked Redis pipeline (even with 1 replica).
+    # This ensures a single tested code path and enables swap/scale later.
     print()
     chunk_size = getattr(args, 'chunk_size', None) or 1000
-    effective_replicas = getattr(args, 'replicas', None) or 0
-    # --chunked forces the chunked pipeline even with 1 replica (useful for swap testing)
-    if getattr(args, 'chunked', False) and effective_replicas < 2:
-        effective_replicas = max(effective_replicas, 1)
+    effective_replicas = getattr(args, 'replicas', None) or 1  # default 1 replica
 
     # Output tokens: use JSONL-derived values if available, else CLI default
     if not is_s3:
@@ -389,11 +377,19 @@ def cmd_deploy(args):
         avg_out = args.max_output_tokens
         max_out = args.max_output_tokens
 
+    # Upload input file to S3 upfront (needed for both chunked and single-cluster paths)
+    if is_s3:
+        s3_input_file = input_file
+    else:
+        step("Uploading input file to storage...")
+        s3_input_file = upload_to_server(input_file)
+        step(f"Uploaded to {c(s3_input_file, DIM)}")
+
     # Build common payload fields
     payload = {
         "placement_solver": "user_specified" if args.gpu else "roofline",
         "user_id": "orca-cli",
-        "input_file": "s3://placeholder/chunked",  # overwritten below
+        "input_file": s3_input_file,
         "output_file": args.output or "output.jsonl",
         "avg_output_tokens": avg_out,
         "max_output_tokens": max_out,
@@ -427,48 +423,19 @@ def cmd_deploy(args):
         payload["avg_input_tokens"] = stats["avg_input_tokens"]
         payload["max_input_tokens"] = stats["max_input_tokens"]
 
-    force_chunked = getattr(args, 'chunked', False)
-    if effective_replicas > 1 or (force_chunked and effective_replicas >= 1):
-        # Path A: --replicas N (or --chunked) → chunk immediately
-        step(f"Chunking {stats['num_lines'] if not is_s3 else '?'} requests into {chunk_size}-line chunks for {effective_replicas} replicas...")
-        chunk_infos = split_and_upload_chunks(input_file, chunk_size)
-        step(f"Uploaded {c(str(len(chunk_infos)), GREEN+BOLD)} chunks to S3")
+    # Always chunk — single code path for all jobs
+    step(f"Chunking {stats['num_lines'] if not is_s3 else '?'} requests into {chunk_size}-line chunks for {effective_replicas} replica(s)...")
+    chunk_infos = split_and_upload_chunks(input_file, chunk_size)
+    step(f"Uploaded {c(str(len(chunk_infos)), GREEN+BOLD)} chunks to S3")
 
-        payload["chunks"] = chunk_infos
-        payload["replicas"] = effective_replicas
-    elif effective_replicas == 0 and not args.gpu:
-        # Path B: No --replicas → ask solver for replica count first
-        step("Running placement solver...")
-        plan_resp = api_with_spinner("post", "/test/placement",
-                                      message="Running solver...", json=payload)
-        if plan_resp.status_code not in (200, 201):
-            print(f"\n  {RED}Server error ({plan_resp.status_code}):{RESET} {plan_resp.text}\n")
-            sys.exit(1)
-        plan_data = plan_resp.json()
-        if plan_data.get("status") == "error":
-            print(f"\n  {RED}Solver error:{RESET} {plan_data.get('message', 'Unknown')}")
-            sys.exit(1)
-
-        placements = plan_data.get("placements", [])
-        solver_replicas = placements[0].get("replicas", 1) if placements else 1
-
-        if solver_replicas > 1 and not is_s3:
-            step(f"Solver recommends {c(str(solver_replicas), CYAN+BOLD)} replicas. Chunking...")
-            chunk_infos = split_and_upload_chunks(input_file, chunk_size)
-            step(f"Uploaded {c(str(len(chunk_infos)), GREEN+BOLD)} chunks to S3")
-
-            payload["chunks"] = chunk_infos
-            payload["replicas"] = solver_replicas
-        else:
-            payload["input_file"] = _upload_full_file(input_file, is_s3)
-    else:
-        payload["input_file"] = _upload_full_file(input_file, is_s3)
+    payload["chunks"] = chunk_infos
+    payload["replicas"] = effective_replicas
 
     # ── Phase 3: Submit ──────────────────────────────────────────────────
     print()
     if args.gpu:
         step(f"Running feasibility check: {c(args.gpu, CYAN)} TP={args.tp or 1} PP={args.pp or 1}...")
-    elif not payload.get("chunks"):
+    else:
         step("Submitting job...")
 
     resp = api_with_spinner("post", "/submit/batch",
@@ -1729,7 +1696,6 @@ Examples:
     p_deploy.add_argument("--on-demand", action="store_true", help="Use on-demand instances instead of spot")
     p_deploy.add_argument("--replicas", type=int, default=None, help="Number of replica clusters (auto if omitted)")
     p_deploy.add_argument("--chunk-size", type=int, default=None, help="Lines per chunk for multi-replica (default: 1000)")
-    p_deploy.add_argument("--chunked", action="store_true", help="Force chunked pipeline (for swap testing with 1 replica)")
     p_deploy.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
 
     # plan

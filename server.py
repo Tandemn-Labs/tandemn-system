@@ -1189,11 +1189,11 @@ async def submit_batch(request: BatchedRequest):
             }
 
     # ── Chunked path: CLI already split + uploaded chunks to S3 ──
-    if request.chunks and len(request.chunks) > 1 and not getattr(app.state, "redis_available", False):
-        raise HTTPException(503, "Redis unavailable — chunked multi-replica jobs require Redis. "
-                            "Start Redis and restart the server.")
+    if request.chunks and not getattr(app.state, "redis_available", False):
+        raise HTTPException(503, "Redis unavailable — chunked jobs require Redis. "
+                            "Start Redis (docker run -d -p 6379:6379 redis) and restart the server.")
 
-    if request.chunks and len(request.chunks) > 1:
+    if request.chunks:
         effective_replicas = request.replicas or len(request.chunks)
         primary = configs[0]
         job_id = primary.decision_id
