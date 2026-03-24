@@ -191,15 +191,35 @@ CREATE TABLE IF NOT EXISTS runs (
 
 _CREATE_TIMESERIES = """
 CREATE TABLE IF NOT EXISTS timeseries (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id    TEXT NOT NULL,
-    timestamp REAL NOT NULL,
-    metrics   TEXT NOT NULL
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT NOT NULL,
+    timestamp  REAL NOT NULL,
+    metrics    TEXT NOT NULL,
+    replica_id TEXT
 )
 """
 
 _CREATE_INDEX = (
     "CREATE INDEX IF NOT EXISTS idx_ts_job_time ON timeseries (job_id, timestamp)"
+)
+
+_CREATE_INDEX_REPLICA = (
+    "CREATE INDEX IF NOT EXISTS idx_ts_job_replica_time ON timeseries (job_id, replica_id, timestamp)"
+)
+
+_CREATE_REPLICA_SUMMARIES = """
+CREATE TABLE IF NOT EXISTS replica_summaries (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id     TEXT NOT NULL,
+    replica_id TEXT NOT NULL,
+    metrics    TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE(job_id, replica_id)
+)
+"""
+
+_CREATE_INDEX_REPLICA_SUMMARY = (
+    "CREATE INDEX IF NOT EXISTS idx_rs_job ON replica_summaries (job_id)"
 )
 
 
@@ -241,6 +261,13 @@ class MetricsDB:
             for col, dtype in self._MIGRATE_COLUMNS:
                 if col not in existing:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {col} {dtype}")
+            # Migrate timeseries: add replica_id if missing (must run before replica index)
+            ts_cols = {r[1] for r in conn.execute("PRAGMA table_info(timeseries)").fetchall()}
+            if "replica_id" not in ts_cols:
+                conn.execute("ALTER TABLE timeseries ADD COLUMN replica_id TEXT")
+            conn.execute(_CREATE_INDEX_REPLICA)
+            conn.execute(_CREATE_REPLICA_SUMMARIES)
+            conn.execute(_CREATE_INDEX_REPLICA_SUMMARY)
             conn.commit()
 
     # ------------------------------------------------------------------
@@ -249,29 +276,215 @@ class MetricsDB:
 
     def append_timeseries(self, job_id: str, snapshots: list[dict]) -> None:
         rows = [
-            (job_id, s.get("timestamp", time.time()), json.dumps(s))
+            (job_id, s.get("timestamp", time.time()), json.dumps(s), s.get("replica_id"))
             for s in snapshots
         ]
         try:
             with self._get_conn() as conn:
                 conn.executemany(
-                    "INSERT INTO timeseries (job_id, timestamp, metrics) VALUES (?, ?, ?)",
+                    "INSERT INTO timeseries (job_id, timestamp, metrics, replica_id) VALUES (?, ?, ?, ?)",
                     rows,
                 )
                 conn.commit()
         except sqlite3.OperationalError as e:
             if "no such table" not in str(e):
                 raise
-            # DB exists but is missing the timeseries table (created before this
-            # schema version). Re-run _init_schema() — CREATE TABLE IF NOT EXISTS
-            # is idempotent — then retry.
             self._init_schema()
             with self._get_conn() as conn:
                 conn.executemany(
-                    "INSERT INTO timeseries (job_id, timestamp, metrics) VALUES (?, ?, ?)",
+                    "INSERT INTO timeseries (job_id, timestamp, metrics, replica_id) VALUES (?, ?, ?, ?)",
                     rows,
                 )
                 conn.commit()
+
+    # ------------------------------------------------------------------
+    # Per-replica summaries (POSTed by each replica after all chunks done)
+    # ------------------------------------------------------------------
+
+    def push_replica_summary(self, job_id: str, replica_id: str, metrics: dict) -> None:
+        """Store a per-replica build_metrics summary dict."""
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO replica_summaries (job_id, replica_id, metrics, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (job_id, replica_id, json.dumps(metrics), time.time()),
+            )
+            conn.commit()
+
+    def get_replica_summaries(self, job_id: str) -> list[dict]:
+        """Retrieve all per-replica summaries for a job."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT replica_id, metrics FROM replica_summaries WHERE job_id = ? ORDER BY created_at",
+                (job_id,),
+            ).fetchall()
+        result = []
+        for r in rows:
+            try:
+                d = json.loads(r["metrics"])
+                d["replica_id"] = r["replica_id"]
+                result.append(d)
+            except Exception:
+                pass
+        return result
+
+    # ------------------------------------------------------------------
+    # Aggregation field categories (module-level for testability)
+    # ------------------------------------------------------------------
+
+    # Sum across ALL replicas (including zero-work)
+    _AGG_SUM = {
+        "num_requests_total", "num_requests_completed", "num_requests_skipped",
+        "total_input_tokens", "total_output_tokens", "total_tokens",
+        "num_preemptions", "gpu_samples", "scheduler_samples",
+        # Throughput sums (each replica adds throughput)
+        "throughput_requests_per_sec", "throughput_tokens_per_sec",
+        "throughput_output_tokens_per_sec", "throughput_input_tokens_per_sec",
+        # Cost sums (every replica burns money)
+        "cost_for_run_usd",
+    }
+
+    # Average across ONLY replicas with num_requests_completed > 0
+    # (per-request stats — zero-work replicas have no meaningful values)
+    _AGG_AVG_WORK_ONLY = {
+        "avg_input_tokens", "avg_output_tokens",
+        "p50_input_tokens", "p90_input_tokens", "p99_input_tokens",
+        "p50_output_tokens", "p90_output_tokens", "p99_output_tokens",
+        "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
+        "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
+        "tpot_client_ms_p50", "tpot_client_ms_p95", "tpot_client_ms_p99",
+        "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
+        "ttft_server_ms_p50", "ttft_server_ms_p95", "ttft_server_ms_p99",
+        "e2e_server_ms_p50", "e2e_server_ms_p95", "e2e_server_ms_p99",
+        "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
+        "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
+        "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+        "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+        "prefix_cache_hit_rate",
+    }
+
+    # Average across ALL replicas (idle GPU is diagnostic signal)
+    _AGG_AVG_ALL = {
+        "avg_sm_util_pct", "max_sm_util_pct",
+        "avg_mem_bw_util_pct", "max_mem_bw_util_pct",
+        "avg_mem_util_pct", "max_mem_util_pct",
+        "running_avg", "running_max", "waiting_avg", "waiting_max",
+        "swapped_avg", "swapped_max",
+        "kv_cache_util_pct_avg", "kv_cache_util_pct_max",
+    }
+
+    # Take MAX across all replicas
+    _AGG_MAX = {
+        "generation_time_sec", "model_load_time_sec", "total_runtime_sec",
+        "max_input_tokens", "max_output_tokens",
+    }
+
+    # Take MIN across working replicas only
+    _AGG_MIN = {"min_input_tokens", "min_output_tokens"}
+
+    # Copy from first replica with non-None value (identical across replicas)
+    _AGG_COPY = {
+        "model_name", "quantization", "cloud_provider", "instance_type",
+        "gpu_name", "engine", "tensor_parallel_size", "pipeline_parallel_size",
+        "max_model_len", "max_num_seqs", "gpu_memory_utilization",
+        "dtype", "kv_cache_dtype", "model_architecture", "params_billion",
+        "is_moe", "num_experts_active", "vocab_size",
+        "gpu_mem_gb", "gpu_tflops_fp16", "gpu_bandwidth_gbps",
+        "gpu_model", "gpu_generation", "interconnect",
+        "num_nodes", "precision", "runtime_stack",
+        "model_size_gb", "model_config_json",
+        "model_fits_single_gpu", "vram_headroom_gb", "params_per_gpu",
+        "attention_heads_per_kv_head", "kv_heads_per_tp",
+        "bandwidth_per_param", "flops_per_param",
+        "crosses_node_boundary", "kv_offload_target",
+        "cost_per_1m_tokens_prefill_usd", "cost_per_1m_tokens_decode_usd",
+        "price_per_hour",
+    }
+
+    def aggregate_replica_summaries(self, job_id: str) -> dict | None:
+        """Aggregate per-replica summaries into a single job-level summary.
+
+        Zero-work replicas (num_requests_completed == 0) always contribute to
+        cost and GPU util aggregation, but are excluded from per-request stats
+        like latency and token averages to avoid dilution.
+        """
+        summaries = self.get_replica_summaries(job_id)
+        if not summaries:
+            return None
+
+        working = [s for s in summaries if (s.get("num_requests_completed") or 0) > 0]
+        agg: dict = {}
+
+        # Sum across ALL replicas
+        for k in self._AGG_SUM:
+            vals = [s.get(k) for s in summaries if s.get(k) is not None]
+            agg[k] = sum(vals) if vals else None
+
+        # Average across WORKING replicas only (per-request stats)
+        for k in self._AGG_AVG_WORK_ONLY:
+            vals = [s.get(k) for s in (working or summaries) if s.get(k) is not None]
+            agg[k] = sum(vals) / len(vals) if vals else None
+
+        # Average across ALL replicas (GPU util, scheduler — idle is diagnostic)
+        for k in self._AGG_AVG_ALL:
+            vals = [s.get(k) for s in summaries if s.get(k) is not None]
+            agg[k] = sum(vals) / len(vals) if vals else None
+
+        # Max across all replicas
+        for k in self._AGG_MAX:
+            vals = [s.get(k) for s in summaries if s.get(k) is not None]
+            agg[k] = max(vals) if vals else None
+
+        # Min across working replicas only
+        for k in self._AGG_MIN:
+            vals = [s.get(k) for s in (working or summaries) if s.get(k) is not None]
+            agg[k] = min(vals) if vals else None
+
+        # Copy from first replica with non-None value
+        for k in self._AGG_COPY:
+            for s in summaries:
+                if s.get(k) is not None:
+                    agg[k] = s[k]
+                    break
+
+        # Timestamps: earliest start, latest end
+        starts = [s.get("job_start_timestamp") for s in summaries if s.get("job_start_timestamp")]
+        ends = [s.get("job_end_timestamp") for s in summaries if s.get("job_end_timestamp")]
+        if starts:
+            agg["job_start_timestamp"] = min(starts)
+        if ends:
+            agg["job_end_timestamp"] = max(ends)
+
+        # Recompute derived cost fields from aggregated totals
+        total_tokens = agg.get("total_tokens") or 0
+        cost = agg.get("cost_for_run_usd") or 0
+        if cost > 0 and total_tokens > 0:
+            agg["tokens_per_dollar"] = round(total_tokens / cost, 2)
+            agg["cost_per_1m_tokens_total"] = round(cost / (total_tokens / 1_000_000), 4)
+        price = agg.get("price_per_hour")
+        tp = agg.get("tensor_parallel_size") or 1
+        pp = agg.get("pipeline_parallel_size") or 1
+        gpu_count = len(summaries) * tp * pp
+        if price and gpu_count:
+            agg["price_per_gpu_hour_usd"] = round(price / gpu_count, 4)
+
+        agg["num_replicas"] = len(summaries)
+
+        # Catch-all: any key in any summary not yet in agg → copy from first non-None
+        all_keys: set = set()
+        for s in summaries:
+            all_keys.update(s.keys())
+        for k in all_keys:
+            if k in agg or k == "replica_id":
+                continue
+            for s in summaries:
+                v = s.get(k)
+                if v is not None:
+                    agg[k] = v
+                    logger.debug("[Aggregation] catch-all copied field '%s'", k)
+                    break
+
+        return agg
 
     # ------------------------------------------------------------------
     # Runs (written once at job completion)

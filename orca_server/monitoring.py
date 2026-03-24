@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SEC: float = 1.0
 RING_BUFFER_SIZE: int = 120
 FLUSH_INTERVAL_SEC: int = 60
+INSTANT_THROUGHPUT_WINDOW_SEC: float = float(os.environ.get("ORCA_THROUGHPUT_WINDOW_SEC", "10.0"))
 
 
 def _parse_histogram_buckets(text: str, metric_name: str) -> list[tuple[float, float]]:
@@ -66,6 +68,7 @@ def histogram_quantile(text: str, metric_name: str, quantile: float) -> float | 
 class MetricsSnapshot:
     job_id: str
     timestamp: float
+    replica_id: str | None = None
     # vLLM gauges
     avg_generation_throughput_toks_per_s: float = 0.0
     avg_prompt_throughput_toks_per_s: float = 0.0
@@ -104,6 +107,12 @@ class MetricsSnapshot:
     inference_time_ms_p99: float | None = None
     # Prefix cache (vLLM v0.10.0+ only)
     prefix_cache_hit_rate: float | None = None
+    # GPU hardware utilization (from pynvml via sidecar)
+    gpu_sm_util_pct: float = 0.0
+    gpu_mem_bw_util_pct: float = 0.0
+    # Live per-token counters (from SSE stream via sidecar, smoother than Prometheus)
+    live_gen_tokens_total: float = 0.0
+    live_prompt_tokens_total: float = 0.0
 
     @classmethod
     def from_prometheus_text(cls, job_id: str, text: str, timestamp: float) -> "MetricsSnapshot":
@@ -158,6 +167,7 @@ class MetricsSnapshot:
         return {
             "job_id": self.job_id,
             "timestamp": self.timestamp,
+            "replica_id": self.replica_id,
             "avg_generation_throughput_toks_per_s": self.avg_generation_throughput_toks_per_s,
             "avg_prompt_throughput_toks_per_s": self.avg_prompt_throughput_toks_per_s,
             "gpu_cache_usage_perc": self.gpu_cache_usage_perc,
@@ -190,7 +200,51 @@ class MetricsSnapshot:
             "inference_time_ms_p95": self.inference_time_ms_p95,
             "inference_time_ms_p99": self.inference_time_ms_p99,
             "prefix_cache_hit_rate": self.prefix_cache_hit_rate,
+            "gpu_sm_util_pct": self.gpu_sm_util_pct,
+            "gpu_mem_bw_util_pct": self.gpu_mem_bw_util_pct,
+            "live_gen_tokens_total": self.live_gen_tokens_total,
+            "live_prompt_tokens_total": self.live_prompt_tokens_total,
         }
+
+
+_SUM_FIELDS = {
+    "avg_generation_throughput_toks_per_s",
+    "avg_prompt_throughput_toks_per_s",
+    "generation_tokens_total",
+    "prompt_tokens_total",
+    "live_gen_tokens_total",
+    "live_prompt_tokens_total",
+    "request_success_total",
+    "num_preemptions_total",
+    "num_requests_running",
+    "num_requests_waiting",
+    "num_requests_swapped",
+}
+
+_AVG_FIELDS = {
+    "gpu_cache_usage_perc",
+    "prefix_cache_hit_rate",
+    "gpu_sm_util_pct",
+    "gpu_mem_bw_util_pct",
+    "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
+    "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
+    "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
+    "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
+    "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
+    "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+    "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+}
+
+
+def _merge_snapshots(job_id: str, snaps: list[MetricsSnapshot]) -> MetricsSnapshot:
+    """Merge per-replica snapshots into a single aggregated view."""
+    merged = MetricsSnapshot(job_id=job_id, timestamp=max(s.timestamp for s in snaps))
+    for f in _SUM_FIELDS:
+        setattr(merged, f, sum(getattr(s, f, 0) or 0 for s in snaps))
+    for f in _AVG_FIELDS:
+        vals = [v for s in snaps if (v := getattr(s, f, None)) is not None]
+        setattr(merged, f, sum(vals) / len(vals) if vals else None)
+    return merged
 
 
 class _JobCollector:
@@ -225,8 +279,36 @@ class _JobCollector:
         self._flush()  # always flush on stop regardless of mode
 
     def latest(self) -> MetricsSnapshot | None:
+        """Return latest snapshot with throughput computed over a fixed window."""
         with self.lock:
-            return self.buffer[-1] if self.buffer else None
+            if not self.buffer:
+                return None
+            current = self.buffer[-1]
+            # Compute throughput over fixed window (matches vLLM's 10s internal avg)
+            target_time = current.timestamp - INSTANT_THROUGHPUT_WINDOW_SEC
+            older = None
+            for snap in self.buffer:
+                if snap.timestamp >= target_time:
+                    older = snap
+                    break
+            if older is not None and older is not current:
+                dt = current.timestamp - older.timestamp
+                if dt > 1.0:
+                    if current.live_gen_tokens_total > 0:
+                        current.avg_generation_throughput_toks_per_s = (
+                            current.live_gen_tokens_total - older.live_gen_tokens_total
+                        ) / dt
+                        current.avg_prompt_throughput_toks_per_s = (
+                            current.live_prompt_tokens_total - older.live_prompt_tokens_total
+                        ) / dt
+                    else:
+                        current.avg_generation_throughput_toks_per_s = (
+                            current.generation_tokens_total - older.generation_tokens_total
+                        ) / dt
+                        current.avg_prompt_throughput_toks_per_s = (
+                            current.prompt_tokens_total - older.prompt_tokens_total
+                        ) / dt
+            return current
 
     def set_baseline(self) -> None:
         with self.lock:
@@ -254,8 +336,13 @@ class _JobCollector:
             if dt < 1.0:
                 return None
 
-        gen_tps = (current.generation_tokens_total - oldest.generation_tokens_total) / dt
-        prompt_tps = (current.prompt_tokens_total - oldest.prompt_tokens_total) / dt
+        # Prefer live per-token counters (smooth) over Prometheus counters (bursty)
+        if current.live_gen_tokens_total > 0:
+            gen_tps = (current.live_gen_tokens_total - oldest.live_gen_tokens_total) / dt
+            prompt_tps = (current.live_prompt_tokens_total - oldest.live_prompt_tokens_total) / dt
+        else:
+            gen_tps = (current.generation_tokens_total - oldest.generation_tokens_total) / dt
+            prompt_tps = (current.prompt_tokens_total - oldest.prompt_tokens_total) / dt
 
         result = {
             "generation_toks_per_s": round(gen_tps, 2),
@@ -269,12 +356,14 @@ class _JobCollector:
         if self._baseline_snap is not None:
             epoch_dt = current.timestamp - self._baseline_snap.timestamp
             if epoch_dt > 1.0:
-                result["epoch_generation_toks_per_s"] = round(
-                    (current.generation_tokens_total - self._baseline_snap.generation_tokens_total) / epoch_dt, 2
-                )
-                result["epoch_prompt_toks_per_s"] = round(
-                    (current.prompt_tokens_total - self._baseline_snap.prompt_tokens_total) / epoch_dt, 2
-                )
+                if current.live_gen_tokens_total > 0:
+                    epoch_gen = (current.live_gen_tokens_total - self._baseline_snap.live_gen_tokens_total) / epoch_dt
+                    epoch_prompt = (current.live_prompt_tokens_total - self._baseline_snap.live_prompt_tokens_total) / epoch_dt
+                else:
+                    epoch_gen = (current.generation_tokens_total - self._baseline_snap.generation_tokens_total) / epoch_dt
+                    epoch_prompt = (current.prompt_tokens_total - self._baseline_snap.prompt_tokens_total) / epoch_dt
+                result["epoch_generation_toks_per_s"] = round(epoch_gen, 2)
+                result["epoch_prompt_toks_per_s"] = round(epoch_prompt, 2)
                 result["since_baseline_sec"] = round(epoch_dt, 2)
 
         return result
@@ -355,6 +444,7 @@ class _JobCollector:
 class MetricsCollector:
     def __init__(self):
         self._jobs: dict[str, _JobCollector] = {}
+        self._replicas: dict[str, _JobCollector] = {}  # "job_id:replica_id" → collector
         self._lock = threading.Lock()
 
     def start_collecting(self, job_id: str, endpoint_url: str | None = None) -> None:
@@ -365,16 +455,52 @@ class MetricsCollector:
             self._jobs[job_id] = jc
         jc.start()
 
+    def start_replica_collecting(self, job_id: str, replica_id: str) -> None:
+        key = f"{job_id}:{replica_id}"
+        with self._lock:
+            if key in self._replicas:
+                return
+            jc = _JobCollector(job_id, None)  # ingest-only, no polling
+            self._replicas[key] = jc
+        jc.start()
+
     def stop_collecting(self, job_id: str) -> None:
+        prefix = f"{job_id}:"
         with self._lock:
             jc = self._jobs.pop(job_id, None)
+            replica_keys = [k for k in self._replicas if k.startswith(prefix)]
+            replica_collectors = [self._replicas.pop(k) for k in replica_keys]
         if jc:
             jc.stop()
+        for rc in replica_collectors:
+            rc.stop()
 
     def get_latest(self, job_id: str) -> MetricsSnapshot | None:
         with self._lock:
             jc = self._jobs.get(job_id)
         return jc.latest() if jc else None
+
+    def get_replica_latest(self, job_id: str, replica_id: str) -> MetricsSnapshot | None:
+        key = f"{job_id}:{replica_id}"
+        with self._lock:
+            jc = self._replicas.get(key)
+        return jc.latest() if jc else None
+
+    def list_replica_ids(self, job_id: str) -> list[str]:
+        prefix = f"{job_id}:"
+        with self._lock:
+            return [k[len(prefix):] for k in self._replicas if k.startswith(prefix)]
+
+    def get_aggregated(self, job_id: str) -> MetricsSnapshot | None:
+        """Return a merged view across all replicas, or fall back to get_latest."""
+        replica_ids = self.list_replica_ids(job_id)
+        if not replica_ids:
+            return self.get_latest(job_id)
+        snaps = [s for rid in replica_ids
+                 if (s := self.get_replica_latest(job_id, rid)) is not None]
+        if not snaps:
+            return self.get_latest(job_id)
+        return _merge_snapshots(job_id, snaps)
 
     def get_recent(self, job_id: str, n: int = 60) -> list[dict]:
         with self._lock:
@@ -407,8 +533,11 @@ class MetricsCollector:
         ]
         with self._lock:
             items = list(self._jobs.items())
-        for job_id, jc in items:
-            snap = jc.latest()
+        agg_snaps = {}
+        for job_id, _jc in items:
+            agg_snaps[job_id] = self.get_aggregated(job_id)
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
             if snap is None:
                 continue
             lines.append(
@@ -419,8 +548,8 @@ class MetricsCollector:
             "# HELP orca_job_kv_cache_util KV cache utilization (0-1)",
             "# TYPE orca_job_kv_cache_util gauge",
         ]
-        for job_id, jc in items:
-            snap = jc.latest()
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
             if snap is None:
                 continue
             lines.append(f'orca_job_kv_cache_util{{job_id="{job_id}"}} {snap.gpu_cache_usage_perc}')
@@ -428,8 +557,8 @@ class MetricsCollector:
             "# HELP orca_job_requests_running Running requests",
             "# TYPE orca_job_requests_running gauge",
         ]
-        for job_id, jc in items:
-            snap = jc.latest()
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
             if snap is None:
                 continue
             lines.append(f'orca_job_requests_running{{job_id="{job_id}"}} {snap.num_requests_running}')
@@ -437,11 +566,29 @@ class MetricsCollector:
             "# HELP orca_job_requests_waiting Waiting requests",
             "# TYPE orca_job_requests_waiting gauge",
         ]
-        for job_id, jc in items:
-            snap = jc.latest()
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
             if snap is None:
                 continue
             lines.append(f'orca_job_requests_waiting{{job_id="{job_id}"}} {snap.num_requests_waiting}')
+        lines += [
+            "# HELP orca_job_gpu_sm_util GPU SM utilization percent",
+            "# TYPE orca_job_gpu_sm_util gauge",
+        ]
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
+            if snap is None:
+                continue
+            lines.append(f'orca_job_gpu_sm_util{{job_id="{job_id}"}} {snap.gpu_sm_util_pct}')
+        lines += [
+            "# HELP orca_job_gpu_mem_bw_util GPU memory bandwidth utilization percent",
+            "# TYPE orca_job_gpu_mem_bw_util gauge",
+        ]
+        for job_id, _jc in items:
+            snap = agg_snaps[job_id]
+            if snap is None:
+                continue
+            lines.append(f'orca_job_gpu_mem_bw_util{{job_id="{job_id}"}} {snap.gpu_mem_bw_util_pct}')
         return "\n".join(lines) + "\n"
 
     def sse_generator(self, job_id: str) -> Generator[str, None, None]:
@@ -449,7 +596,7 @@ class MetricsCollector:
         while True:
             with self._lock:
                 still_active = job_id in self._jobs
-            snap = self.get_latest(job_id)
+            snap = self.get_aggregated(job_id)
             if snap:
                 data = snap.to_dict()
                 sustained = self.get_sustained_throughput(job_id)

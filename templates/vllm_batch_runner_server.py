@@ -123,6 +123,30 @@ def sum_metric_compat(text: str, name: str) -> float:
     return val
 
 
+class LiveTokenCounter:
+    """Cumulative token counter — incremented per-SSE-token by async send_one(),
+    read by sidecar thread. GIL-safe: single writer (event loop), single reader (sidecar)."""
+    __slots__ = ("_gen", "_prompt")
+
+    def __init__(self):
+        self._gen = 0
+        self._prompt = 0
+
+    def incr_gen(self, n: int = 1):
+        self._gen += n
+
+    def incr_prompt(self, n: int):
+        self._prompt += n
+
+    @property
+    def generation_tokens(self) -> int:
+        return self._gen
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self._prompt
+
+
 def _parse_histogram_buckets(text: str, metric_name: str) -> list:
     bucket_name = f"{metric_name}_bucket"
     buckets: dict = {}
@@ -378,7 +402,7 @@ class MetricsPoller:
 # Sidecar — push to control plane (bonus, works when reachable)
 # ---------------------------------------------------------------------------
 
-def _sidecar_loop(stop_event: threading.Event, orca_url: str, orca_key: str, job_id: str):
+def _sidecar_loop(stop_event: threading.Event, orca_url: str, orca_key: str, job_id: str, live_counter: Optional[LiveTokenCounter] = None):
     if not orca_url:
         return
 
@@ -393,7 +417,11 @@ def _sidecar_loop(stop_event: threading.Event, orca_url: str, orca_key: str, job
     while not stop_event.is_set():
         try:
             prom_text = requests.get(f"{BASE_URL}/metrics", timeout=4).text
-            buffer.append({"timestamp": time.time(), "prometheus_text": prom_text})
+            snap = {"timestamp": time.time(), "prometheus_text": prom_text}
+            if live_counter:
+                snap["live_gen_tokens_total"] = live_counter.generation_tokens
+                snap["live_prompt_tokens_total"] = live_counter.prompt_tokens
+            buffer.append(snap)
         except Exception:
             pass
 
@@ -531,6 +559,7 @@ async def send_one(
     semaphore: asyncio.Semaphore,
     req_dict: dict,
     model_name: str,
+    live_counter: Optional[LiveTokenCounter] = None,
 ) -> dict:
     body = req_dict.get("body", {})
     payload = {
@@ -582,12 +611,16 @@ async def send_one(
                             ttft = time.time() - t0
                         if delta_content:
                             content_parts.append(delta_content)
+                            if live_counter:
+                                live_counter.incr_gen(1)
                         if choices[0].get("finish_reason"):
                             finish_reason = choices[0]["finish_reason"]
                     usage = chunk.get("usage")
                     if usage:
                         output_tokens = usage.get("completion_tokens", 0)
                         prompt_tokens = usage.get("prompt_tokens", 0)
+                        if live_counter and prompt_tokens:
+                            live_counter.incr_prompt(prompt_tokens)
         except Exception as e:
             return {
                 "status": "error",
@@ -614,7 +647,7 @@ async def send_one(
     }
 
 
-async def run_benchmark(requests_list: List[Dict], model_name: str) -> List[Dict]:
+async def run_benchmark(requests_list: List[Dict], model_name: str, live_counter: Optional[LiveTokenCounter] = None) -> List[Dict]:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT)
     total = len(requests_list)
@@ -623,7 +656,7 @@ async def run_benchmark(requests_list: List[Dict], model_name: str) -> List[Dict
 
     async def _tracked(idx, req):
         nonlocal done_count
-        r = await send_one(session, semaphore, req, model_name)
+        r = await send_one(session, semaphore, req, model_name, live_counter)
         done_count += 1
         write_progress(done_count, total)
         results[idx] = r
@@ -1141,10 +1174,11 @@ def main():
         orca_url = os.getenv("ORCA_SERVER_URL", "")
         orca_key = os.getenv("ORCA_API_KEY", "")
         job_id = os.getenv("JOB_ID", "unknown")
+        live_counter = LiveTokenCounter()
         stop_sidecar = threading.Event()
         sidecar_thread = threading.Thread(
             target=_sidecar_loop,
-            args=(stop_sidecar, orca_url, orca_key, job_id),
+            args=(stop_sidecar, orca_url, orca_key, job_id, live_counter),
             daemon=True, name="orca-sidecar",
         )
         sidecar_thread.start()
@@ -1174,7 +1208,7 @@ def main():
         # 8. Run benchmark
         _report_phase("generating")
         generation_start_time = time.time()
-        results = asyncio.run(run_benchmark(all_requests, args.model))
+        results = asyncio.run(run_benchmark(all_requests, args.model, live_counter))
         generation_time = time.time() - generation_start_time
 
         num_ok = sum(1 for r in results if r["status"] == "success")

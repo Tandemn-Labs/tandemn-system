@@ -204,6 +204,7 @@ def check_user_specified_feasibility(
             pp_stages=pp,
             bytes_per_element=solver.config.bytes_per_element,
         )
+        max_model_len = min(max_model_len, solver.config.max_position_embeddings)
 
         return {
             "feasible": True,

@@ -21,5 +21,8 @@ boto3
 # Config / data
 PyYAML
 
+# Distributed chunk queue
+redis>=5.0
+
 # Solver dependencies (swap this line to use a different solver)
 -r LLM_placement_solver/requirements.txt

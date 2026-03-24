@@ -45,6 +45,7 @@ except ImportError:
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 ORCA_SERVER = os.environ.get("ORCA_SERVER", "http://localhost:26336")
+ORCA_API_KEY = os.environ.get("ORCA_API_KEY", "")
 
 # ─── ANSI helpers ────────────────────────────────────────────────────────────
 BOLD    = "\033[1m"
@@ -150,6 +151,7 @@ def parse_input_file(input_file: str) -> dict:
     """Parse a JSONL batch file and return stats."""
     prompts = []
     max_tokens_list = []
+    has_explicit_max_tokens = False
     with open(input_file) as f:
         for line in f:
             line = line.strip()
@@ -160,7 +162,12 @@ def parse_input_file(input_file: str) -> dict:
             messages = body.get("messages", [])
             text = " ".join(m.get("content", "") for m in messages)
             prompts.append(text)
-            max_tokens_list.append(body.get("max_tokens", 256))
+            mt = body.get("max_tokens")
+            if mt is not None:
+                has_explicit_max_tokens = True
+                max_tokens_list.append(mt)
+            else:
+                max_tokens_list.append(256)
 
     char_estimates = [max(1, len(p) // 4) for p in prompts]
     return {
@@ -169,6 +176,7 @@ def parse_input_file(input_file: str) -> dict:
         "max_input_tokens": max(char_estimates) if char_estimates else 0,
         "avg_max_output_tokens": sum(max_tokens_list) // max(1, len(max_tokens_list)),
         "max_output_tokens": max(max_tokens_list) if max_tokens_list else 256,
+        "has_explicit_max_tokens": has_explicit_max_tokens,
     }
 
 
@@ -176,6 +184,10 @@ def parse_input_file(input_file: str) -> dict:
 def api(method, path, **kwargs):
     """Make an HTTP request to the Orca server."""
     url = f"{ORCA_SERVER}{path}"
+    if ORCA_API_KEY:
+        headers = kwargs.pop("headers", {})
+        headers.setdefault("Authorization", f"Bearer {ORCA_API_KEY}")
+        kwargs["headers"] = headers
     try:
         resp = getattr(requests, method)(url, timeout=kwargs.pop("timeout", 600), **kwargs)
         return resp
@@ -202,6 +214,36 @@ def upload_to_server(local_path: str, user: str = "orca-cli") -> str:
     return resp.json()["storage_uri"]
 
 
+def split_and_upload_chunks(input_file: str, chunk_size: int) -> list:
+    """Split a local JSONL file into chunks, upload each to S3, return chunk metadata."""
+    import tempfile as _tf
+    chunks = []
+    current_lines = []
+    chunk_idx = 0
+
+    def _flush(lines, idx):
+        cid = f"c{idx:04d}"
+        tmp = _tf.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False)
+        tmp.writelines(lines)
+        tmp.close()
+        s3_uri = upload_to_server(tmp.name)
+        os.unlink(tmp.name)
+        return {"chunk_id": cid, "s3_input_path": s3_uri, "num_lines": len(lines)}
+
+    with open(input_file) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            current_lines.append(line)
+            if len(current_lines) >= chunk_size:
+                chunks.append(_flush(current_lines, chunk_idx))
+                current_lines = []
+                chunk_idx += 1
+    if current_lines:
+        chunks.append(_flush(current_lines, chunk_idx))
+    return chunks
+
+
 # ─── Animated print helpers ─────────────────────────────────────────────────
 def step(msg, icon="▸"):
     print(f"  {CYAN}{icon}{RESET} {msg}")
@@ -210,6 +252,70 @@ def header(msg):
     print(f"\n  {BOLD}{MAGENTA}{'━' * 60}{RESET}")
     print(f"  {BOLD}{WHITE}{msg}{RESET}")
     print(f"  {BOLD}{MAGENTA}{'━' * 60}{RESET}")
+
+
+def _poll_replica_launch(job_id, num_replicas):
+    """Poll /job/{id}/replicas until all settled or job completes, whichever comes first."""
+    ORCA_FISH = "><(((o>~~~"
+    PHASE_ICON = {
+        "launching": f"{YELLOW}..{RESET}",
+        "provisioned": f"{GREEN}ok{RESET}",
+        "running": f"{GREEN}ok{RESET}",
+        "completed": f"{GREEN}ok{RESET}",
+        "failed": f"{RED}!!{RESET}",
+    }
+    print(f"\n  {CYAN}{ORCA_FISH}{RESET} launching {num_replicas} replicas...\n")
+    seen = {}  # replica_id → last printed phase
+    deadline = time.time() + 900  # 15 min max wait
+    try:
+        while time.time() < deadline:
+            try:
+                resp = api("get", f"/job/{job_id}/replicas", timeout=5)
+                if resp.status_code != 200:
+                    time.sleep(5)
+                    continue
+                replicas = resp.json().get("replicas", [])
+            except Exception:
+                time.sleep(5)
+                continue
+
+            for r in replicas:
+                rid = r["replica_id"]
+                phase = r.get("phase", "launching")
+                if rid in seen and seen[rid] == phase:
+                    continue
+                seen[rid] = phase
+                icon = PHASE_ICON.get(phase, f"{DIM}?{RESET}")
+                # Short replica label: r0, r1 from "mo-xxx-r0"
+                short = rid.rsplit("-", 1)[-1] if "-r" in rid else rid[-6:]
+                region = r.get("region") or ""
+                market = r.get("market") or ""
+                loc = f"({region}, {market})" if region else ""
+                print(f"  [{icon}] {short}  {DIM}{rid}{RESET}  {loc}")
+
+            # Exit when all replicas are past "launching"
+            if len(seen) >= num_replicas and all(
+                p in ("provisioned", "running", "completed", "failed")
+                for p in seen.values()
+            ):
+                break
+
+            # Exit early if job already finished (fewer replicas did all the work)
+            try:
+                jr = api("get", f"/job/{job_id}", timeout=3)
+                if jr.status_code == 200:
+                    status = jr.json().get("status")
+                    if status in ("succeeded", "failed"):
+                        print(f"\n  {DIM}Job already {status} — stop waiting for remaining replicas.{RESET}")
+                        break
+            except Exception:
+                pass
+
+            time.sleep(5)
+        else:
+            print(f"\n  {DIM}Timed out waiting. Replicas continue launching in background.{RESET}")
+    except KeyboardInterrupt:
+        print(f"\n  {DIM}Replicas continue launching in background.{RESET}")
 
 
 # ─── Commands ────────────────────────────────────────────────────────────────
@@ -232,6 +338,17 @@ def cmd_deploy(args):
     else:
         step("Parsing input file...")
         stats = parse_input_file(input_file)
+
+        # Output tokens: prefer JSONL per-request max_tokens over CLI default
+        if stats.get("has_explicit_max_tokens"):
+            effective_avg_output = stats["avg_max_output_tokens"]
+            effective_max_output = stats["max_output_tokens"]
+            step(f"Output tokens from JSONL: avg={effective_avg_output}, max={effective_max_output}")
+        else:
+            effective_avg_output = args.max_output_tokens
+            effective_max_output = args.max_output_tokens
+            step(f"Output tokens from CLI default: {effective_avg_output} (JSONL has no max_tokens)")
+
         print()
         lines = [
             f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
@@ -239,34 +356,43 @@ def cmd_deploy(args):
             f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
             f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
             f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
-            f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
+            f"{DIM}Avg output:{RESET} {effective_avg_output} tokens",
+            f"{DIM}Max output:{RESET} {effective_max_output} tokens",
             f"{DIM}SLO:{RESET}        {args.slo} hours",
         ]
         print(box(lines, title="WORKLOAD"))
 
-    # ── Phase 2: Upload input file to server ──────────────────────────────
+    # ── Phase 2: Determine replica count + chunk ────────────────────────
+    # All jobs go through the chunked Redis pipeline (even with 1 replica).
+    # This ensures a single tested code path and enables swap/scale later.
     print()
-    if input_file.startswith("s3://"):
-        s3_input = input_file
-        step(f"Using S3 path: {c(s3_input, DIM)}")
+    chunk_size = getattr(args, 'chunk_size', None) or 1000
+    effective_replicas = getattr(args, 'replicas', None) or 1  # default 1 replica
+
+    # Output tokens: use JSONL-derived values if available, else CLI default
+    if not is_s3:
+        avg_out = effective_avg_output
+        max_out = effective_max_output
+    else:
+        avg_out = args.max_output_tokens
+        max_out = args.max_output_tokens
+
+    # Upload input file to S3 upfront (needed for both chunked and single-cluster paths)
+    if is_s3:
+        s3_input_file = input_file
     else:
         step("Uploading input file to storage...")
-        s3_input = upload_to_server(input_file)
-        step(f"Uploaded to {c(s3_input, DIM)}")
+        s3_input_file = upload_to_server(input_file)
+        step(f"Uploaded to {c(s3_input_file, DIM)}")
 
-    # ── Phase 3: Solve + Submit ───────────────────────────────────────────
-    print()
-    if args.gpu:
-        step(f"Running feasibility check: {c(args.gpu, CYAN)} TP={args.tp or 1} PP={args.pp or 1}...")
-    else:
-        step("Running placement solver...")
+    # Build common payload fields
     payload = {
         "placement_solver": "user_specified" if args.gpu else "roofline",
         "user_id": "orca-cli",
-        "input_file": s3_input,
+        "input_file": s3_input_file,
         "output_file": args.output or "output.jsonl",
-        "avg_output_tokens": args.max_output_tokens,
-        "max_output_tokens": args.max_output_tokens,
+        "avg_output_tokens": avg_out,
+        "max_output_tokens": max_out,
         "description": f"Orca CLI deploy: {model_name}",
         "task_type": "batch",
         "task_priority": "normal",
@@ -290,6 +416,27 @@ def cmd_deploy(args):
             payload["pp_size"] = args.pp
         if args.force:
             payload["force"] = True
+
+    # Inject parsed stats so server can skip S3 download
+    if not is_s3:
+        payload["num_lines"] = stats["num_lines"]
+        payload["avg_input_tokens"] = stats["avg_input_tokens"]
+        payload["max_input_tokens"] = stats["max_input_tokens"]
+
+    # Always chunk — single code path for all jobs
+    step(f"Chunking {stats['num_lines'] if not is_s3 else '?'} requests into {chunk_size}-line chunks for {effective_replicas} replica(s)...")
+    chunk_infos = split_and_upload_chunks(input_file, chunk_size)
+    step(f"Uploaded {c(str(len(chunk_infos)), GREEN+BOLD)} chunks to S3")
+
+    payload["chunks"] = chunk_infos
+    payload["replicas"] = effective_replicas
+
+    # ── Phase 3: Submit ──────────────────────────────────────────────────
+    print()
+    if args.gpu:
+        step(f"Running feasibility check: {c(args.gpu, CYAN)} TP={args.tp or 1} PP={args.pp or 1}...")
+    else:
+        step("Submitting job...")
 
     resp = api_with_spinner("post", "/submit/batch",
                             message="Solving placement + launching cluster...", json=payload)
@@ -327,6 +474,8 @@ def cmd_deploy(args):
         cfg = data.get("config", {})
         solver_info = data.get("feasibility") or data.get("solver_info") or {}
         sol = solver_info.get("solution") or {}
+        num_chunks = data.get("chunks", 0)
+        num_replicas = data.get("replicas", 0)
         success_lines = [
             f"{GREEN}{BOLD}Job launched successfully!{RESET}",
             f"",
@@ -334,6 +483,10 @@ def cmd_deploy(args):
             f"{DIM}Instance:{RESET}  {cfg.get('instance_type', '?')}",
             f"{DIM}Config:{RESET}    TP={cfg.get('tp_size', '?')} PP={cfg.get('pp_size', '?')}",
         ]
+        if num_chunks:
+            success_lines.append(f"{DIM}Chunks:{RESET}    {num_chunks}")
+        if num_replicas:
+            success_lines.append(f"{DIM}Replicas:{RESET}  {num_replicas}")
         if sol.get("throughput_tokens_per_sec"):
             success_lines.append(f"{DIM}Est. tps:{RESET}  {sol['throughput_tokens_per_sec']:.0f} tok/s")
         if solver_info.get("max_model_len"):
@@ -345,6 +498,10 @@ def cmd_deploy(args):
         success_lines.append(f"Track progress: {c('orca progress ' + job_id, WHITE+BOLD)}")
         print()
         print(box(success_lines, title="SUCCESS"))
+
+        # Poll replica launch progress for chunked jobs
+        if num_replicas and num_replicas > 1:
+            _poll_replica_launch(job_id, num_replicas)
     else:
         print(f"\n  {RED}Launch failed:{RESET} {data.get('message', 'Unknown error')}")
         if data.get("detail"):
@@ -372,6 +529,16 @@ def cmd_plan(args):
     else:
         step("Parsing input file...")
         stats = parse_input_file(input_file)
+
+        if stats.get("has_explicit_max_tokens"):
+            effective_avg_output = stats["avg_max_output_tokens"]
+            effective_max_output = stats["max_output_tokens"]
+            step(f"Output tokens from JSONL: avg={effective_avg_output}, max={effective_max_output}")
+        else:
+            effective_avg_output = args.max_output_tokens
+            effective_max_output = args.max_output_tokens
+            step(f"Output tokens from CLI default: {effective_avg_output} (JSONL has no max_tokens)")
+
         print()
         lines = [
             f"{DIM}File:{RESET}       {c(input_file, WHITE+BOLD)}",
@@ -379,7 +546,8 @@ def cmd_plan(args):
             f"{DIM}Prompts:{RESET}    {c(str(stats['num_lines']), GREEN+BOLD)}",
             f"{DIM}Avg input:{RESET}  {stats['avg_input_tokens']} tokens",
             f"{DIM}Max input:{RESET}  {stats['max_input_tokens']} tokens",
-            f"{DIM}Max output:{RESET} {args.max_output_tokens} tokens",
+            f"{DIM}Avg output:{RESET} {effective_avg_output} tokens",
+            f"{DIM}Max output:{RESET} {effective_max_output} tokens",
             f"{DIM}SLO:{RESET}        {args.slo} hours",
         ]
         print(box(lines, title="WORKLOAD"))
@@ -388,6 +556,13 @@ def cmd_plan(args):
     step("Running Orca placement solver...")
     t0 = time.time()
 
+    if not is_s3:
+        avg_out = effective_avg_output
+        max_out = effective_max_output
+    else:
+        avg_out = args.max_output_tokens
+        max_out = args.max_output_tokens
+
     # For plan, send locally-parsed stats directly — no S3 upload needed
     # (the file only needs to be in S3 for deploy, where the EC2 node fetches it)
     payload = {
@@ -395,8 +570,8 @@ def cmd_plan(args):
         "user_id": "orca-cli",
         "input_file": input_file if input_file.startswith("s3://") else "s3://plan-dry-run/placeholder",
         "output_file": "output.jsonl",
-        "avg_output_tokens": args.max_output_tokens,
-        "max_output_tokens": args.max_output_tokens,
+        "avg_output_tokens": avg_out,
+        "max_output_tokens": max_out,
         "description": f"Orca CLI plan: {model_name}",
         "task_type": "batch",
         "task_priority": "normal",
@@ -611,18 +786,32 @@ def cmd_progress(args):
                 except Exception:
                     pass
 
+                # Try to get chunk-level progress for chunked jobs
+                chunk_line = ""
+                try:
+                    cr = api("get", f"/job/{job_id}/chunks/progress", timeout=2)
+                    if cr.status_code == 200:
+                        cp = cr.json()
+                        cp_total = cp.get("total", 0)
+                        cp_done = cp.get("completed", 0)
+                        cp_inflight = cp.get("inflight", 0)
+                        if cp_total > 0:
+                            chunk_line = f"{GREEN}{cp_done}{RESET}/{cp_total} chunks  {CYAN}{cp_inflight}{RESET} in-flight"
+                except Exception:
+                    pass
+
                 if status in ("succeeded", "failed"):
-                    # Final line: show completion bar
                     done_count = int(progress * total) if isinstance(total, int) else total
                     sys.stdout.write(f"\r  {bar(progress, 50)}  {done_count}/{total}  [{status}]")
-                    sys.stdout.write(f"\n  {DIM}{metrics_line}{RESET}  " if metrics_line else "")
+                    extra = f"  {chunk_line}" if chunk_line else ""
+                    sys.stdout.write(f"\n  {DIM}{metrics_line}{extra}{RESET}  " if metrics_line or chunk_line else "")
                     sys.stdout.flush()
                     break
 
                 if running > 0 or status == "generating":
-                    # During generation: show progress bar based on done/total
                     done_frac = done_reqs / total if isinstance(total, int) and total > 0 else 0
-                    sys.stdout.write(f"\r  {bar(done_frac, 50)}  {done_reqs}/{total} done  {running} in-flight  [{c(status, GREEN)}]  ")
+                    chunk_info = f"  {chunk_line}" if chunk_line else ""
+                    sys.stdout.write(f"\r  {bar(done_frac, 50)}  {done_reqs}/{total} done  {running} in-flight{chunk_info}  [{c(status, GREEN)}]  ")
                     sys.stdout.write(f"\n  {DIM}{metrics_line}{RESET}  \033[1A")
                 else:
                     # Show current phase
@@ -673,6 +862,7 @@ def cmd_status(args):
 
 def cmd_logs(args):
     """Stream logs from a running or completed job."""
+    import sky
     print(LOGO)
     header("LOGS")
 
@@ -680,17 +870,59 @@ def cmd_logs(args):
     if not cluster:
         step("Fetching active clusters...")
         print()
-        import subprocess as _sp
-        _sp.run(["sky", "status"], check=False)
+        request_id = sky.status()
+        clusters = sky.get(request_id)
+        if clusters:
+            for cl in clusters:
+                name = cl.get("name", "?")
+                status = cl.get("status", "?")
+                print(f"  {name}  ({status})")
+        else:
+            print(f"  {DIM}No active clusters.{RESET}")
         print(f"\n  {DIM}Run with cluster name to stream logs:{RESET}")
         print(f"  {WHITE}orca logs <cluster_name>{RESET}\n")
         return
 
+    # For chunked jobs, the SkyPilot cluster is <job_id>-r0, not <job_id>.
+    # Auto-discover replicas when the bare job_id doesn't match a cluster.
+    try:
+        request_id = sky.status(cluster_names=[cluster])
+        matches = sky.get(request_id)
+    except Exception:
+        matches = []
+
+    if not matches:
+        # Check if this is a chunked job with replica suffixes
+        try:
+            request_id = sky.status()
+            all_clusters = sky.get(request_id) or []
+            replicas = [cl["name"] for cl in all_clusters if cl["name"].startswith(f"{cluster}-r")]
+        except Exception:
+            replicas = []
+
+        if not replicas:
+            print(f"  {RED}Cluster '{cluster}' not found.{RESET}")
+            print(f"  {DIM}Tip: use 'orca clusters' to list active clusters.{RESET}\n")
+            return
+
+        if len(replicas) == 1:
+            cluster = replicas[0]
+        else:
+            print(f"  {DIM}Chunked job with {len(replicas)} replicas:{RESET}")
+            for i, r in enumerate(sorted(replicas)):
+                print(f"    {c(str(i + 1), CYAN)}. {r}")
+            try:
+                choice = input(f"\n  {YELLOW}Which replica? [1-{len(replicas)}]:{RESET} ").strip()
+                idx = int(choice) - 1
+                cluster = sorted(replicas)[idx]
+            except (ValueError, IndexError, EOFError):
+                cluster = sorted(replicas)[0]
+                print(f"  {DIM}Defaulting to {cluster}{RESET}")
+
     step(f"Streaming logs for: {c(cluster, CYAN+BOLD)}")
     print()
-    import subprocess as _sp
     try:
-        _sp.run(["sky", "logs", cluster], check=False)
+        sky.tail_logs(cluster_name=cluster, job_id=None, follow=True)
     except KeyboardInterrupt:
         print(f"\n\n  {DIM}Stopped streaming.{RESET}")
 
@@ -703,13 +935,295 @@ def cmd_clusters(args):
     _sp.run(["sky", "status"], check=False)
 
 
+def cmd_swap(args):
+    """Hot-swap replicas to a new GPU/TP/PP config mid-job."""
+    print(LOGO)
+    header("SWAP REPLICAS")
+    job_id = args.job_id
+
+    # Verify job exists
+    # Check job (may not be in tracker after server restart, but chunks in Redis)
+    resp = api("get", f"/job/{job_id}", timeout=10)
+    if resp.status_code == 200:
+        job = resp.json()
+        print(f"\n  Job: {c(job_id, BOLD)}")
+        print(f"  Status: {job.get('status', '?')}")
+    else:
+        # Job not in tracker — check Redis for chunks
+        progress_resp = api("get", f"/job/{job_id}/chunks/progress", timeout=10)
+        if progress_resp.status_code != 200:
+            print(f"\n  {RED}Job {job_id} not found{RESET}\n")
+            sys.exit(1)
+        progress = progress_resp.json()
+        print(f"\n  Job: {c(job_id, BOLD)} {DIM}(recovered from Redis){RESET}")
+        print(f"  Chunks: {progress['completed']}/{progress['total']} completed, {progress['inflight']} inflight")
+
+    # Show current replicas
+    rep_resp = api("get", f"/job/{job_id}/replicas", timeout=10)
+    if rep_resp.status_code == 200:
+        replicas = rep_resp.json().get("replicas", [])
+        print(f"\n  Current replicas ({len(replicas)}):")
+        for r in replicas:
+            rid = r.get("replica_id", "?")
+            phase = r.get("phase", "?")
+            color = GREEN if phase == "running" else YELLOW if phase == "launching" else RED
+            print(f"    {rid}: {c(phase, color)}")
+
+    # Build swap payload
+    payload = {
+        "gpu_type": args.gpu,
+        "tp_size": args.tp or 1,
+        "pp_size": args.pp or 1,
+        "on_demand": args.on_demand,
+        "force": args.force,
+        "ready_threshold": args.ready_threshold,
+    }
+    if args.replicas is not None:
+        payload["num_replicas"] = args.replicas
+
+    print(f"\n  Swapping to: {c(args.gpu, BOLD)} TP={payload['tp_size']} PP={payload['pp_size']}")
+
+    resp = api("post", f"/job/{job_id}/swap", json=payload, timeout=30)
+    if resp.status_code != 200:
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        if data.get("status") == "confirm":
+            print(f"\n  {YELLOW}Warning:{RESET} {data.get('message', 'Config may not be feasible')}")
+            print(f"  Use {BOLD}--force{RESET} to proceed anyway.\n")
+            sys.exit(1)
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        sys.exit(1)
+
+    data = resp.json()
+    print(f"\n  {GREEN}Swap initiated!{RESET}")
+    print(f"  Old replicas: {', '.join(data.get('old_replicas', []))}")
+    print(f"  New replicas: {', '.join(data.get('new_replicas', []))}")
+    print(f"  Ready threshold: {data.get('ready_threshold', '?')}")
+    print(f"  Version: v{data.get('version', '?')}")
+    print(f"\n  {DIM}New replicas will start pulling chunks from the same queue.")
+    print(f"  Old replicas will be killed after {data.get('ready_threshold', 1)} new replica(s) start inferring.{RESET}\n")
+
+
+def cmd_destroy(args):
+    """Tear down Orca clusters, Redis state, and S3 uploads."""
+    import subprocess as _sp
+    print(LOGO)
+    header("DESTROY")
+
+    if not args.all and not args.job_id:
+        print(f"\n  {DIM}Specify --all or a job_id.{RESET}\n")
+        return
+
+    # ── 1. Discover SkyPilot clusters ────────────────────────────────────
+    step("Finding Orca clusters...")
+    try:
+        import sky as _sky
+        _rid = _sky.status()
+        _all_clusters = _sky.stream_and_get(_rid)
+    except Exception as e:
+        print(f"  {YELLOW}Warning:{RESET} Could not query SkyPilot: {e}")
+        _all_clusters = []
+
+    if args.all:
+        orca_clusters = [c["name"] for c in _all_clusters if c.get("name", "").startswith("mo-")]
+    else:
+        orca_clusters = [c["name"] for c in _all_clusters if c.get("name", "").startswith(args.job_id)]
+
+    # ── 2. Discover Redis chunk keys ─────────────────────────────────────
+    redis_keys = []
+    redis_jobs = set()
+    try:
+        import redis as _redis
+        r = _redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+        r.ping()
+        all_chunk_keys = r.keys("chunk:job:*")
+        if args.all:
+            redis_keys = all_chunk_keys
+        else:
+            redis_keys = [k for k in all_chunk_keys if args.job_id in k]
+        # Extract unique job IDs
+        for k in redis_keys:
+            parts = k.split(":")
+            if len(parts) >= 3:
+                redis_jobs.add(parts[2])
+    except Exception as e:
+        print(f"  {YELLOW}Warning:{RESET} Redis unreachable ({e}). Chunk/S3 cleanup skipped.")
+
+    # ── 3. Discover S3 paths from Redis chunk metadata ─────────────────
+    s3_files = []  # individual S3 URIs to delete
+    try:
+        if redis_jobs and r:
+            for jid in sorted(redis_jobs):
+                order_key = f"chunk:job:{jid}:output_order"
+                chunk_ids = r.lrange(order_key, 0, -1)
+                for cid in chunk_ids:
+                    info = r.hgetall(f"chunk:job:{jid}:chunk:{cid}")
+                    inp = info.get("s3_input_path", "")
+                    out = info.get("s3_output_path", "")
+                    if inp:
+                        s3_files.append(inp)
+                    if out:
+                        s3_files.append(out)
+                # Also the assembled output.jsonl
+                meta = r.hgetall(f"chunk:job:{jid}:meta")
+                out_base = meta.get("s3_output_base", "")
+                if out_base:
+                    s3_files.append(f"{out_base}/output.jsonl")
+    except Exception:
+        pass
+
+    # ── 4. Show summary and confirm ──────────────────────────────────────
+    total_items = len(orca_clusters) + (1 if redis_keys else 0) + len(s3_files)
+    if total_items == 0:
+        target = "Orca" if args.all else args.job_id
+        print(f"\n  {DIM}Nothing to clean up for {target}.{RESET}\n")
+        return
+
+    print()
+    if orca_clusters:
+        print(f"  {BOLD}Clusters ({len(orca_clusters)}):{RESET}")
+        for name in orca_clusters:
+            print(f"    {DIM}-{RESET} {name}")
+    if redis_keys:
+        print(f"  {BOLD}Redis keys ({len(redis_keys)}):{RESET}  jobs: {', '.join(sorted(redis_jobs))}")
+    if s3_files:
+        print(f"  {BOLD}S3 files ({len(s3_files)}):{RESET}  inputs + outputs for {', '.join(sorted(redis_jobs))}")
+    print()
+
+    answer = input(f"  {YELLOW}Destroy all of the above? [y/N]:{RESET} ").strip().lower()
+    if answer != "y":
+        print(f"\n  {DIM}Aborted.{RESET}\n")
+        return
+
+    # ── 5. Execute ───────────────────────────────────────────────────────
+    print()
+
+    # Clusters
+    for name in orca_clusters:
+        step(f"Destroying cluster {c(name, CYAN)}...")
+        try:
+            _rid = _sky.down(name)
+            _sky.stream_and_get(_rid)
+        except Exception as e:
+            print(f"  {YELLOW}Warning:{RESET} Failed to destroy {name}: {e}")
+    if orca_clusters:
+        step(f"Destroyed {len(orca_clusters)} cluster(s)", icon=f"{GREEN}✔{RESET}")
+
+    # S3 — delete files via server's storage API
+    if s3_files:
+        step(f"Cleaning {len(s3_files)} S3 file(s) via server...")
+        deleted = 0
+        failed = 0
+        for path in s3_files:
+            try:
+                resp = api("delete", "/storage/delete_s3", params={"path": path, "user": "system"}, timeout=10)
+                if resp.status_code == 200:
+                    deleted += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+        msg = f"Deleted {deleted} S3 file(s)"
+        if failed:
+            msg += f"  {DIM}({failed} missing/already deleted){RESET}"
+        step(msg, icon=f"{GREEN}✔{RESET}")
+
+    # Redis — delete last (contains the S3 paths we just used)
+    if redis_keys:
+        step(f"Cleaning {len(redis_keys)} Redis keys...")
+        try:
+            pipe = r.pipeline()
+            for k in redis_keys:
+                pipe.delete(k)
+            pipe.execute()
+            step(f"Cleaned {len(redis_keys)} Redis keys ({len(redis_jobs)} job(s))", icon=f"{GREEN}✔{RESET}")
+        except Exception as e:
+            print(f"  {RED}Redis cleanup failed:{RESET} {e}")
+
+    print()
+
+
+def _render_snap(md, label):
+    """Render a single metrics snapshot into display lines."""
+    tps = md.get("avg_generation_throughput_toks_per_s", 0)
+    kv = md.get("gpu_cache_usage_perc", 0) * 100
+    running = md.get("num_requests_running", 0)
+    waiting = md.get("num_requests_waiting", 0)
+    done = int(md.get("request_success_total", 0))
+    ttft = md.get("ttft_ms_p50")
+    tpot = md.get("tpot_ms_p50")
+    lines = [
+        f"{DIM}Throughput:{RESET}   {c(f'{tps:.0f}', GREEN+BOLD)} tok/s",
+        f"{DIM}KV Cache:{RESET}     {bar(kv / 100, 30)}",
+        f"{DIM}Running:{RESET}      {c(str(running), CYAN)}   {DIM}Waiting:{RESET} {waiting}",
+        f"{DIM}Completed:{RESET}    {done}",
+    ]
+    if ttft is not None:
+        lines.append(f"{DIM}TTFT p50:{RESET}     {ttft:.1f}ms")
+    if tpot is not None:
+        lines.append(f"{DIM}TPOT p50:{RESET}     {tpot:.1f}ms")
+    gpu_sm = md.get("gpu_sm_util_pct", 0)
+    gpu_bw = md.get("gpu_mem_bw_util_pct", 0)
+    if gpu_sm > 0 or gpu_bw > 0:
+        lines.append(f"{DIM}GPU SM:{RESET}       {bar(gpu_sm / 100, 30)}")
+        lines.append(f"{DIM}GPU MemBW:{RESET}    {bar(gpu_bw / 100, 30)}")
+    return box(lines, title=label)
+
+
 def cmd_metrics(args):
     """Show live vLLM metrics for a job."""
     job_id = args.job_id
     watch = args.watch
+    replica = getattr(args, 'replica', None)
+    compare = getattr(args, 'compare', False)
+
+    if compare:
+        print(LOGO)
+        header("METRICS COMPARISON")
+
+        def _fetch_compare():
+            # Aggregated
+            agg_resp = api("get", f"/job/{job_id}/metrics", timeout=5)
+            if agg_resp.status_code != 200:
+                return f"  {RED}No aggregated metrics for {job_id}.{RESET}"
+            # Replica list
+            rep_resp = api("get", f"/job/{job_id}/replicas", timeout=5)
+            replicas = rep_resp.json().get("replicas", []) if rep_resp.status_code == 200 else []
+
+            output = _render_snap(agg_resp.json(), "AGGREGATED (fleet total)")
+            for r in replicas:
+                rid = r["replica_id"]
+                rr = api("get", f"/job/{job_id}/replicas/{rid}/metrics", timeout=5)
+                if rr.status_code == 200:
+                    output += "\n" + _render_snap(rr.json(), f"REPLICA: {rid}")
+                else:
+                    output += f"\n  {DIM}{rid}: no metrics yet{RESET}"
+            return output
+
+        if watch:
+            step(f"Comparing replicas for: {c(job_id, CYAN+BOLD)} (Ctrl+C to stop)")
+            print()
+            prev_lines = 0
+            try:
+                while True:
+                    rendered = _fetch_compare()
+                    if prev_lines:
+                        sys.stdout.write(f"\033[{prev_lines}A\033[J")
+                    print(rendered)
+                    sys.stdout.flush()
+                    prev_lines = rendered.count("\n") + 1
+                    time.sleep(2)
+            except KeyboardInterrupt:
+                print(f"\n\n  {DIM}Stopped.{RESET}")
+        else:
+            print(_fetch_compare())
+        print()
+        return
 
     def _fetch_and_render():
-        resp = api("get", f"/job/{job_id}/metrics", timeout=5)
+        if replica:
+            resp = api("get", f"/job/{job_id}/replicas/{replica}/metrics", timeout=5)
+        else:
+            resp = api("get", f"/job/{job_id}/metrics", timeout=5)
         if resp.status_code == 404:
             return None, f"  {RED}No metrics available for {job_id}.{RESET}"
         if resp.status_code != 200:
@@ -742,6 +1256,11 @@ def cmd_metrics(args):
             f"{DIM}Running:{RESET}      {c(str(running), CYAN)}   {DIM}Waiting:{RESET} {waiting}",
             f"{DIM}Completed:{RESET}    {done}",
         ]
+        gpu_sm = md.get("gpu_sm_util_pct", 0)
+        gpu_bw = md.get("gpu_mem_bw_util_pct", 0)
+        if gpu_sm > 0 or gpu_bw > 0:
+            lines.append(f"{DIM}GPU SM:{RESET}       {bar(gpu_sm / 100, 30)}")
+            lines.append(f"{DIM}GPU MemBW:{RESET}    {bar(gpu_bw / 100, 30)}")
         return box(lines, title="METRICS"), None
 
     if watch:
@@ -881,7 +1400,98 @@ def cmd_inspect(args):
         print(box(lines, title=group_name))
         print()
 
-    print(f"  {BOLD}{populated}/{total_fields} fields populated{RESET}\n")
+    print(f"  {BOLD}{populated}/{total_fields} fields populated{RESET}")
+
+    # Per-replica views
+    job_id = run.get("job_id")
+    if job_id and (getattr(args, 'replicas', False) or getattr(args, 'replica', None)):
+        _show_replica_inspect(job_id, args)
+
+    print()
+
+
+def _show_replica_inspect(job_id, args):
+    """Show per-replica summaries for a chunked job."""
+    resp = api("get", f"/job/{job_id}/replicas/summaries", timeout=10)
+    if resp.status_code == 404:
+        print(f"\n  {DIM}No per-replica summaries (single-cluster job?){RESET}")
+        return
+    if resp.status_code != 200:
+        print(f"\n  {RED}Error fetching replica summaries:{RESET} {resp.text}")
+        return
+
+    summaries = resp.json().get("summaries", [])
+    if not summaries:
+        return
+
+    target_replica = getattr(args, 'replica', None)
+
+    if target_replica:
+        # Single replica detail
+        match = [s for s in summaries if s.get("replica_id") == target_replica]
+        if not match:
+            print(f"\n  {RED}Replica '{target_replica}' not found.{RESET}")
+            print(f"  {DIM}Available:{RESET} {', '.join(s.get('replica_id','?') for s in summaries)}")
+            return
+        s = match[0]
+        print()
+        header(f"REPLICA: {target_replica}")
+        key_fields = [
+            ("Requests", "num_requests_completed"),
+            ("Throughput", "throughput_tokens_per_sec", "{:.0f} tok/s"),
+            ("Generation", "generation_time_sec", "{:.1f}s"),
+            ("TTFT p50", "ttft_ms_p50", "{:.1f}ms"),
+            ("TPOT p50", "tpot_ms_p50", "{:.1f}ms"),
+            ("E2E p50", "e2e_ms_p50", "{:.1f}ms"),
+            ("GPU SM avg", "avg_sm_util_pct", "{:.1f}%"),
+            ("GPU MemBW avg", "avg_mem_bw_util_pct", "{:.1f}%"),
+            ("Cost", "cost_for_run_usd", "${:.4f}"),
+            ("Model load", "model_load_time_sec", "{:.1f}s"),
+        ]
+        lines = []
+        for entry in key_fields:
+            label, key = entry[0], entry[1]
+            fmt = entry[2] if len(entry) > 2 else "{}"
+            v = s.get(key)
+            if v is not None:
+                lines.append(f"{DIM}{label}:{RESET}  {fmt.format(v)}")
+            else:
+                lines.append(f"{DIM}{label}:{RESET}  {DIM}—{RESET}")
+        print(box(lines, title=target_replica))
+    else:
+        # Side-by-side comparison table
+        print()
+        header("PER-REPLICA BREAKDOWN")
+        cols = [
+            ("Replica", "replica_id", "{}"),
+            ("Reqs", "num_requests_completed", "{}"),
+            ("tok/s", "throughput_tokens_per_sec", "{:.0f}"),
+            ("TTFT p50", "ttft_ms_p50", "{:.0f}ms"),
+            ("E2E p50", "e2e_ms_p50", "{:.0f}ms"),
+            ("GPU SM%", "avg_sm_util_pct", "{:.0f}"),
+            ("Cost", "cost_for_run_usd", "${:.4f}"),
+            ("Gen(s)", "generation_time_sec", "{:.0f}"),
+        ]
+        # Header row
+        hdr = "  "
+        for label, _, _ in cols:
+            hdr += f"{DIM}{label:<14}{RESET}"
+        print(hdr)
+        print(f"  {DIM}{'─' * (14 * len(cols))}{RESET}")
+        # Data rows
+        for s in sorted(summaries, key=lambda x: x.get("replica_id", "")):
+            row = "  "
+            zero_work = (s.get("num_requests_completed") or 0) == 0
+            for _, key, fmt in cols:
+                v = s.get(key)
+                if v is not None:
+                    cell = fmt.format(v)
+                else:
+                    cell = "—"
+                color = YELLOW if zero_work and key != "replica_id" else ""
+                reset = RESET if color else ""
+                row += f"{color}{cell:<14}{reset}"
+            print(row)
 
 
 def cmd_timeseries(args):
@@ -1084,6 +1694,8 @@ Examples:
     p_deploy.add_argument("--force", action="store_true", help="Skip feasibility check, launch anyway")
     p_deploy.add_argument("--persist", action="store_true", help="Keep cluster alive after job completes (default: destroy)")
     p_deploy.add_argument("--on-demand", action="store_true", help="Use on-demand instances instead of spot")
+    p_deploy.add_argument("--replicas", type=int, default=None, help="Number of replica clusters (auto if omitted)")
+    p_deploy.add_argument("--chunk-size", type=int, default=None, help="Lines per chunk for multi-replica (default: 1000)")
     p_deploy.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
 
     # plan
@@ -1116,6 +1728,8 @@ Examples:
     p_metrics = subparsers.add_parser("metrics", help="Show live vLLM metrics for a job")
     p_metrics.add_argument("job_id", help="Job ID to inspect")
     p_metrics.add_argument("--watch", "-w", action="store_true", help="Refresh every 2s")
+    p_metrics.add_argument("--replica", "-r", help="Show metrics for a specific replica (e.g. mo-xxx-r0)")
+    p_metrics.add_argument("--compare", "-c", action="store_true", help="Show aggregated + per-replica side by side")
 
     # history
     p_history = subparsers.add_parser("history", help="Show completed run history")
@@ -1126,6 +1740,8 @@ Examples:
     # inspect
     p_inspect = subparsers.add_parser("inspect", help="Show full details for a completed run (all 117 fields)")
     p_inspect.add_argument("run_id", help="Run ID (number) or job ID (mo-...)")
+    p_inspect.add_argument("--replicas", action="store_true", help="Show all per-replica summaries side by side")
+    p_inspect.add_argument("--replica", help="Show full metrics for a specific replica")
 
     # timeseries
     p_ts = subparsers.add_parser("timeseries", help="Show scheduler timeseries for a completed run")
@@ -1134,6 +1750,22 @@ Examples:
     # stream
     p_stream = subparsers.add_parser("stream", help="Stream live SSE metrics for a running job")
     p_stream.add_argument("job_id", help="Job ID to stream")
+
+    # swap
+    p_swap = subparsers.add_parser("swap", help="Hot-swap replicas to new GPU config mid-job")
+    p_swap.add_argument("job_id", help="Job ID to swap replicas for")
+    p_swap.add_argument("--gpu", required=True, help="New GPU type (e.g., A100, H100, L40S)")
+    p_swap.add_argument("--tp", type=int, default=1, help="Tensor parallelism (default: 1)")
+    p_swap.add_argument("--pp", type=int, default=1, help="Pipeline parallelism (default: 1)")
+    p_swap.add_argument("--replicas", type=int, default=None, help="New replica count (default: same as current)")
+    p_swap.add_argument("--ready-threshold", type=int, default=1, help="Wait for K new replicas before killing old")
+    p_swap.add_argument("--on-demand", action="store_true", help="Use on-demand instances")
+    p_swap.add_argument("--force", action="store_true", help="Skip feasibility check")
+
+    # destroy
+    p_destroy = subparsers.add_parser("destroy", help="Tear down Orca clusters")
+    p_destroy.add_argument("job_id", nargs="?", help="Job ID to destroy clusters for")
+    p_destroy.add_argument("--all", action="store_true", help="Destroy ALL Orca clusters")
 
     args = parser.parse_args()
 
@@ -1154,6 +1786,8 @@ Examples:
         "inspect": cmd_inspect,
         "timeseries": cmd_timeseries,
         "stream": cmd_stream,
+        "destroy": cmd_destroy,
+        "swap": cmd_swap,
     }
 
     commands[args.command](args)

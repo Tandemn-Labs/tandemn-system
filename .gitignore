@@ -21,3 +21,4 @@ docs/throughput-measurement.md
 *.code-workspace
 .vscode/
 .cursor/
+cloudflared

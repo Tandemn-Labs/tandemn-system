@@ -40,6 +40,19 @@ CHUNK_SIZE_BYTES = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024
 ORCA_SERVER_URL = os.getenv("ORCA_SERVER_URL", "")
 ORCA_API_KEY    = os.getenv("ORCA_API_KEY", "")
 
+# Redis (for chunked distributed batch)
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+DEFAULT_CHUNK_SIZE_LINES = int(os.getenv("CHUNK_SIZE_LINES", "1000"))
+CHUNK_LEASE_TTL_SEC    = int(os.getenv("CHUNK_LEASE_TTL_SEC", "600"))
+CHUNK_MAX_RETRIES      = int(os.getenv("CHUNK_MAX_RETRIES", "3"))
+CHUNK_RECLAIM_INTERVAL = int(os.getenv("CHUNK_RECLAIM_INTERVAL_SEC", "60"))
+CHUNK_RENEW_INTERVAL   = int(os.getenv("CHUNK_RENEW_INTERVAL_SEC", "30"))
+
+# Replica watchdog — heartbeat-based dead replica detection
+REPLICA_DEAD_THRESHOLD_SEC = int(os.getenv("REPLICA_DEAD_THRESHOLD_SEC", "45"))
+WATCHDOG_POLL_INTERVAL_SEC = int(os.getenv("WATCHDOG_POLL_INTERVAL_SEC", "10"))
+RECOVERY_COOLDOWN_SEC      = int(os.getenv("RECOVERY_COOLDOWN_SEC", "300"))
+
 # --------------------------------------------------------------------------- #
 # Canonical AWS instance table
 #
@@ -102,3 +115,11 @@ INSTANCE_VCPUS = {inst: vcpus for inst, (_, _, vcpus) in AWS_INSTANCES.items()}
 AWS_INSTANCE_TO_GPU = {
     inst: (gpu, count) for inst, (gpu, count, _) in AWS_INSTANCES.items()
 }
+
+# GPUs with compute capability < 8.0 — vLLM V1 engine is not supported
+_V1_UNSUPPORTED_GPUS = {"V100", "T4"}
+
+def supports_vllm_v1(instance_type: str) -> bool:
+    """Check if an instance type's GPU supports vLLM V1 engine (CC >= 8.0)."""
+    gpu = INSTANCE_TO_GPU.get(instance_type, "")
+    return gpu not in _V1_UNSUPPORTED_GPUS

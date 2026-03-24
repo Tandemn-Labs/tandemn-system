@@ -4,26 +4,52 @@ What's coming next for Orca.
 
 ---
 
-## Chunked Distributed Batch Inference
+## Shipped
 
-The big one. Today, a single vLLM replica processes the entire input file sequentially. The next version splits workloads into chunks and distributes them across multiple spot replicas with fault tolerance.
+### Chunked Distributed Batch Inference
+- CLI-side chunking into Redis queue, N replicas pull chunks independently
+- Rate-limited injection via KV cache `max_concurrency`
+- Lease-based fault tolerance: chunk leasing with TTL, auto-reclaim, max retries
+- Output assembly: per-chunk S3 outputs combined into ordered `output.jsonl`
+- ReplicaWatchdog: heartbeat-based dead replica detection (45s) + force-reclaim
 
-### Chunking and Distribution
+### Hot-Swap Replicas (`orca swap`)
+- Change GPU/TP/PP mid-job without losing progress
+- New replicas join the same Redis queue, old replicas torn down after threshold met
+- E2E tested: A10G → L40S swap, 5000/5000 requests, zero data loss
 
-- **CLI-side chunking.** The CLI detects large input files, splits them into chunks (1000 lines each), uploads each chunk to S3, and populates a Redis queue on the control plane with chunk IDs.
-- **Replica pull model.** Each vLLM replica pulls its next chunk from the Redis queue. Two chunks are present on a replica at any time: one actively running, one in a prefetch buffer. The gap between chunk transitions should be near-zero.
-- **Rate-limited injection.** When a chunk arrives at a replica, it does not blast all requests into vLLM at once. Instead, it reads `max_concurrency` from vLLM's KV cache config (`get_max_concurrency_for_kv_cache_config` in vLLM V1) and sustains exactly that many concurrent requests. `max_concurrency = num_kv_cache_blocks / blocks_per_request` — it reflects how many requests can be served simultaneously given available KV cache memory and `max_model_len`. At any time `t`, the vLLM server should have `max_concurrency` in-flight requests as long as work remains. This is more accurate than `max_num_seqs` (a scheduler cap), since `max_concurrency` is derived from actual memory availability.
+### Live Observability
+- Per-token LiveTokenCounter (SSE-based, smooth throughput vs bursty Prometheus counters)
+- 10-second ring buffer window for instantaneous throughput
+- GPU SM/MemBW utilization from pynvml
+- Per-replica metrics with `--replica` and `--compare` flags
+- Full metrics port from server runner to chunked runner (build_metrics, histograms, cost)
 
-### Fault Tolerance
+---
 
-- **Chunk leasing.** Each chunk is leased to a replica with a TTL. If the replica finishes, it marks the chunk complete. If the replica is preempted or crashes, the lease expires and another replica picks it up. No work is lost.
-- **Replica snapshotting.** The control plane maintains a live map of which replica is running which chunk, with health checks. This is the foundation for production-grade spot preemption recovery.
+## Next Up
 
-### Output Assembly
+### Orca Scale
+- `orca scale <job_id> --add 3 --gpu L40S --tp 4` — add replicas without killing old ones
+- `orca scale <job_id> --remove r0 r1` — force-reclaim + tear down specific replicas
+- Heterogeneous pools: A10G + H100 replicas on the same queue simultaneously
+- Foundation already built (force_reclaim, same-queue architecture)
 
-- vLLM writes responses directly to S3 (per-chunk output files).
-- Once all chunks are complete, a lightweight CPU instance is launched via SkyPilot to combine per-chunk outputs into a single ordered output file, then self-terminates.
-- Alternative: the control plane itself assembles outputs if the dataset is small enough to avoid launching a combiner.
+### Runner Dedup
+- Extract ~800 shared lines from `vllm_batch_runner_chunked.py` and `vllm_batch_runner_server.py` into `runner_common.py`
+- GPUMonitor, MetricsPoller, LiveTokenCounter, build_metrics, send_one, GPU_SPECS
+
+### Test Coverage
+- Unit tests for `_assemble_output` (S3 download + combine + aggregate)
+- Unit tests for `aggregate_replica_summaries` field-specific aggregation
+- Unit tests for `build_metrics` counter delta computation
+- Integration tests for swap endpoint + `_swap_monitor`
+
+### Reliability
+- Graceful SIGTERM handling in runner (finish current chunk, upload, then exit)
+- `_post_summary` retry logic (currently single attempt, metrics lost on failure)
+- Dynamic `max_concurrency` from real output lengths after first chunk (Approach C)
+- `orca swap --cancel` command
 
 ---
 
@@ -58,9 +84,9 @@ The big one. Today, a single vLLM replica processes the entire input file sequen
 
 ## Observability and UX
 
-- **`orca download <job_id>`** — Download results directly from the CLI (fetches from S3 via presigned URL or streaming download). No need to open the AWS console or write `aws s3 cp` commands.
-- **Failure detection.** If the vLLM server crashes or OOMs, detect it within seconds and update job status to `failed` with a reason (currently relies on the runner reporting back; should also detect via health check timeout).
-- **Cost tracking dashboard.** The analytics DB already stores cost-per-run. Surface cumulative spend per model, per GPU type, and per time period in the CLI and API.
+- **`orca download <job_id>`** — Download results directly from the CLI.
+- **Cost tracking across swap.** Track GPU hours and cost from all replicas (including swapped-out ones) for accurate total job cost.
+- **Cost tracking dashboard.** Surface cumulative spend per model, per GPU type, and per time period in the CLI and API.
 - **Alerting.** Webhook or Slack notification when a job completes, fails, or exceeds its SLO deadline.
 
 ---

@@ -1,0 +1,49 @@
+set -euxo pipefail
+source .venv/bin/activate
+
+# V1 engine is default in vLLM 0.10.0
+
+# Manual Ray cluster setup (bypasses broken SkyPilot start_cluster script)
+RAY_PORT=6379
+
+if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo "Starting Ray head node..."
+    ray start --head --port=$RAY_PORT --dashboard-host=0.0.0.0 --disable-usage-stats
+else
+    echo "Starting Ray worker node, connecting to head..."
+    HEAD_IP=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
+    for i in {{1..60}}; do
+        if ray start --address="$HEAD_IP:$RAY_PORT" --disable-usage-stats 2>/dev/null; then
+            echo "Connected to Ray head at $HEAD_IP:$RAY_PORT"
+            break
+        fi
+        echo "Waiting for Ray head... attempt $i/60"
+        sleep 2
+    done
+fi
+
+ray status
+
+if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    MAX_MODEL_LEN_ARG=""
+    if [ "{max_model_len}" != "auto" ] && [ "{max_model_len}" != "None" ] && [ -n "{max_model_len}" ]; then
+        MAX_MODEL_LEN_ARG="--max-model-len {max_model_len}"
+    fi
+
+    python ~/batch_runner.py \
+        --model {model} \
+        -tp {tp} \
+        -pp {pp} \
+        $MAX_MODEL_LEN_ARG \
+        --gpu-memory-utilization 0.90 \
+        --max-num-seqs {max_num_seqs} \
+        --cloud {cloud} \
+        --instance-type {instance_type} \
+        --gpu-name {gpu_name} \
+        --engine {engine} \
+        --quantization {quantization} \
+        --dtype {dtype} \
+        --kv-cache-dtype {kv_cache_dtype} \
+        --hf-token "$HF_TOKEN" \
+        --chunked
+fi

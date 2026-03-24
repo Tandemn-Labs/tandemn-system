@@ -2,8 +2,11 @@
 SkyPilot cluster launch orchestration for vLLM batch and online jobs.
 """
 
+import logging
 import subprocess
 import threading
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 from typing import List, Tuple
 
@@ -11,10 +14,9 @@ import requests
 import sky
 import yaml
 
+from orca_server import config as _cfg
 from orca_server.config import (
     HF_TOKEN,
-    ORCA_API_KEY,
-    ORCA_SERVER_URL,
     S3_MODEL_BUCKET,
     S3_MODEL_PREFIX,
     VLLM_PORT,
@@ -58,16 +60,16 @@ async def sp_launch_vllm_batch_with_fallback(
                 request, config, solver, early_messages=early_messages,
                 quota_tracker=quota_tracker, persist=persist,
             )
-            print(f"[Launch] Success with config {i + 1}: {config.instance_type}")
+            logger.info(f"[Launch] Success with config {i + 1}: {config.instance_type}")
             return (True, config)
 
         except Exception as e:
-            print(f"[Launch] Config {i + 1} failed: {e}")
+            logger.warning(f"[Launch] Config {i + 1} failed: {e}")
             if i < len(configs) - 1:
-                print("[Launch] Trying next instance type...")
+                logger.info("[Launch] Trying next instance type...")
                 continue
             else:
-                print(f"[Launch] All {len(configs)} configs failed")
+                logger.error(f"[Launch] All {len(configs)} configs failed")
                 return (False, configs[0])
 
 
@@ -201,9 +203,9 @@ async def sp_launch_vllm_batch(
         yaml_data["resources"] = resources_config
         yaml_data["file_mounts"]["/data"]["source"] = s3_base
         yaml_data["envs"]["HF_TOKEN"] = hf_token
-        yaml_data["envs"]["ORCA_SERVER_URL"] = ORCA_SERVER_URL
+        yaml_data["envs"]["ORCA_SERVER_URL"] = _cfg.ORCA_SERVER_URL
         yaml_data["envs"]["JOB_ID"] = config.decision_id
-        yaml_data["envs"]["ORCA_API_KEY"] = ORCA_API_KEY
+        yaml_data["envs"]["ORCA_API_KEY"] = _cfg.ORCA_API_KEY
 
         # Add S3 model weight mount if requested
         if request.s3_models:
@@ -231,9 +233,10 @@ async def sp_launch_vllm_batch(
             "run": run_string,
             "file_mounts./data.source": s3_base,
             "envs.HF_TOKEN": hf_token,
-            "envs.ORCA_SERVER_URL": ORCA_SERVER_URL,
+            "envs.ORCA_SERVER_URL": _cfg.ORCA_SERVER_URL,
             "envs.JOB_ID": config.decision_id,
-            "envs.ORCA_API_KEY": ORCA_API_KEY,
+            "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,
+            "envs.VLLM_USE_V1": "1" if _cfg.supports_vllm_v1(config.instance_type) else "0",
         }
 
         # Add S3 model weight mount if requested
@@ -389,6 +392,218 @@ async def sp_launch_vllm_batch(
         raise Exception(f"Failed to launch cluster {config.decision_id}: {e}")
 
 
+async def launch_chunked_replicas(
+    request: BatchedRequest,
+    config: MagicOutput,
+    num_replicas: int,
+    solver: str = "roofline",
+    early_messages: list = None,
+    quota_tracker=None,
+    persist: bool = False,
+) -> bool:
+    """Launch N independent SkyPilot clusters for a chunked job.
+
+    Each replica is an independent cluster that pulls chunks from the Redis queue
+    via HTTP endpoints on the control plane.
+    """
+    if early_messages is None:
+        early_messages = []
+
+    from orca_server.job_manager import (
+        setup_job_logger,
+        generate_job_dirname,
+    )
+    from pathlib import Path
+
+    job_dirname = generate_job_dirname(
+        request, solver, config.tp_size, config.pp_size, config.instance_type
+    )
+    output_dir = Path(f"outputs/{job_dirname}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    job_logger = setup_job_logger(config.decision_id, str(output_dir / "job.log"))
+
+    if early_messages:
+        for level, msg in early_messages:
+            getattr(job_logger, level.lower(), job_logger.info)(msg)
+
+    jt = get_job_tracker()
+    job_state = jt.build_job_state_batched(request, config)
+    jt.add(job_state)
+    jt.update_status(config.decision_id, "launching")
+
+    # Store job_dirname on the record for assembly
+    rec = jt.get(config.decision_id)
+    if rec:
+        rec._job_dirname = job_dirname
+
+    cm = get_cluster_manager()
+
+    # Launch all replicas in background threads so the server stays responsive.
+    # Each replica launch takes 5-15 min (SkyPilot provision + setup).
+    # If we did this inline, the event loop would be blocked and chunk pull
+    # requests from already-running replicas would timeout.
+
+    # Pre-register all replicas as "launching"
+    for i in range(num_replicas):
+        rid = f"{config.decision_id}-r{i}"
+        cm.set_replica_state(config.decision_id, rid, phase="launching")
+        cm.register_for_job(config.decision_id, rid)
+
+    def _launch_replica_thread(i):
+        import asyncio as _aio
+        replica_id = f"{config.decision_id}-r{i}"
+        replica_config = config.model_copy(update={
+            "decision_id": replica_id,
+            "replicas": 1,
+            "num_instances": config.pp_size,
+        })
+        job_logger.info(f"[Chunked] Launching replica {i}/{num_replicas}: {replica_id}")
+        try:
+            loop = _aio.new_event_loop()
+            loop.run_until_complete(_launch_chunked_replica(
+                request, replica_config, replica_id,
+                parent_job_id=config.decision_id,
+                job_dirname=job_dirname,
+                job_logger=job_logger,
+                quota_tracker=quota_tracker,
+                persist=persist,
+            ))
+            loop.close()
+        except Exception as e:
+            job_logger.error(f"[Chunked] Failed to launch replica {replica_id}: {e}")
+            cm.set_replica_state(config.decision_id, replica_id, phase="failed")
+
+    for i in range(num_replicas):
+        t = threading.Thread(
+            target=_launch_replica_thread, args=(i,),
+            daemon=False, name=f"orca-launch-r{i}",
+        )
+        t.start()
+
+    # Track parent job (individual replicas register themselves on launch)
+    cm.register(config.decision_id, config.decision_id,
+                instance_type=config.instance_type,
+                num_instances=num_replicas * config.pp_size)
+    return True
+
+
+async def _launch_chunked_replica(
+    request: BatchedRequest,
+    config: MagicOutput,
+    replica_id: str,
+    parent_job_id: str,
+    job_dirname: str,
+    job_logger=None,
+    quota_tracker=None,
+    persist: bool = False,
+):
+    """Launch a single replica cluster for chunked batch inference."""
+    from pathlib import Path
+
+    hf_token = request.hf_token or HF_TOKEN or ""
+    num_nodes = config.num_nodes
+
+    # Get quota-aware ordered regions
+    instance_family = get_instance_family(config.instance_type)
+    quotas = get_cached_quotas(instance_family)
+    ordered_regions = get_ordered_regions(
+        instance_type=config.instance_type,
+        num_nodes=num_nodes,
+        quotas=quotas,
+        prefer_spot=getattr(request, "prefer_spot", True),
+    )
+
+    if ordered_regions:
+        any_of_resources = []
+        for candidate in ordered_regions[:5]:
+            any_of_resources.append({
+                "region": candidate.region,
+                "instance_type": config.instance_type,
+                "use_spot": candidate.use_spot,
+                "disk_size": "300GB",
+                "ports": VLLM_PORT,
+            })
+        resources_config = {"any_of": any_of_resources}
+    else:
+        resources_config = {
+            "infra": "aws",
+            "instance_type": config.instance_type,
+            "disk_size": "300GB",
+            "ports": VLLM_PORT,
+        }
+
+    # Build YAML using the chunked runner template
+    replace_run_dict = replace_run_vllm(request, config, job_dirname, logger=job_logger)
+    run_string = update_template("templates/vllm_run_chunked", replace_run_dict)
+
+    yaml_output = f"temp/output_{replica_id}.yaml"
+    replace_yaml = {
+        "name": replica_id,
+        "num_nodes": num_nodes,
+        "resources": resources_config,
+        "run": run_string,
+        "envs.HF_TOKEN": hf_token,
+        "envs.ORCA_SERVER_URL": _cfg.ORCA_SERVER_URL,
+        "envs.JOB_ID": parent_job_id,
+        "envs.REPLICA_ID": replica_id,
+        "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,
+        "envs.AVG_INPUT_TOKENS": str(request.avg_input_tokens or 2000),
+        "envs.AVG_OUTPUT_TOKENS": str(request.avg_output_tokens or 1024),
+        "envs.VLLM_USE_V1": "1" if _cfg.supports_vllm_v1(config.instance_type) else "0",
+    }
+    update_yaml_file("templates/vllm_chunked.yaml", replace_yaml, yaml_output)
+
+    task = sky.Task.from_yaml(yaml_output)
+    result_id = sky.launch(task, cluster_name=replica_id, down=True)
+    job_id_sky, handle = sky.stream_and_get(result_id, follow=True)
+
+    actual_region = handle.launched_resources.region
+    actual_market = "spot" if handle.launched_resources.use_spot else "on_demand"
+    if quota_tracker is not None:
+        quota_tracker.reserve_cluster(
+            cluster_name=replica_id,
+            region=actual_region,
+            market=actual_market,
+            instance_type=config.instance_type,
+            num_instances=num_nodes,
+        )
+
+    cm = get_cluster_manager()
+    cm.register(replica_id, parent_job_id,
+                region=actual_region, market=actual_market,
+                instance_type=config.instance_type, num_instances=num_nodes)
+    cm.set_replica_state(parent_job_id, replica_id,
+                         phase="provisioned", region=actual_region,
+                         market=actual_market, instance_type=config.instance_type)
+
+    def monitor_replica(sky_job_id):
+        """Background thread: stream replica logs, tear down when done."""
+        cm.set_replica_state(parent_job_id, replica_id, phase="running")
+        try:
+            sky.tail_logs(cluster_name=replica_id, job_id=sky_job_id, follow=True)
+            if job_logger:
+                job_logger.info(f"[Chunked] Replica {replica_id} completed")
+            cm.set_replica_state(parent_job_id, replica_id, phase="completed")
+        except Exception as e:
+            if job_logger:
+                job_logger.error(f"[Chunked] Replica {replica_id} error: {e}")
+            cm.set_replica_state(parent_job_id, replica_id, phase="failed")
+        finally:
+            if quota_tracker is not None:
+                quota_tracker.release_cluster(replica_id)
+            cm.unregister(replica_id)
+            cm.unregister_thread(replica_id)
+            if not persist:
+                sky_down_with_retry(replica_id)
+
+    t = threading.Thread(
+        target=monitor_replica, args=(job_id_sky,),
+        daemon=False, name=f"orca-replica-{replica_id[:12]}",
+    )
+    cm.register_thread(replica_id, t)
+    t.start()
+
+
 async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutput):
     """Launch persistent vllm online deployment"""
     replace_run_dict = replace_run_vllm_online(request, config)
@@ -415,14 +630,14 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
 
     endpoint_url = f"http://{public_ip}:{VLLM_PORT}"
 
-    print(f"vLLM server launched at {endpoint_url}")
+    logger.info(f"vLLM server launched at {endpoint_url}")
 
     url = f"http://{public_ip}:{VLLM_PORT}/v1/models"
     response = requests.get(url, timeout=5)
     if (
         response.status_code == 200
     ):  # do sth here for a valid API up and sth else otherwise
-        print(f"vLLM server API is up at {endpoint_url}")
+        logger.info(f"vLLM server API is up at {endpoint_url}")
         return endpoint_url
     else:
         raise Exception(f"vLLM server API is not up at {endpoint_url}")

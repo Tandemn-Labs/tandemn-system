@@ -193,7 +193,11 @@ class TestIngestRingBuffer:
 
         snap = mc.get_latest(job_id)
         assert snap is not None
-        assert snap.avg_generation_throughput_toks_per_s == pytest.approx(800.0)
+        # Throughput is computed from ring buffer window, not per-snapshot.
+        # With identical Prometheus text across snapshots, counter delta is 0.
+        # Verify the snapshot was ingested with correct gauge/counter values.
+        assert snap.gpu_cache_usage_perc == pytest.approx(0.5)
+        assert snap.num_requests_running == 32
 
     def test_unknown_job_still_persists_to_db(self, ingest_app):
         """Jobs not registered in MetricsCollector still get DB writes (no crash)."""

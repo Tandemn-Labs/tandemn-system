@@ -7,6 +7,7 @@ import re
 import subprocess
 import threading
 import time
+from dataclasses import dataclass, field
 from threading import Lock
 from typing import Dict, Literal, Optional
 
@@ -17,7 +18,26 @@ from orca_server.config import INSTANCE_TO_GPU
 logger = logging.getLogger(__name__)
 from models.requests import BatchedRequest
 from models.resources import MagicOutput
-from quota.tracker import JobRecord, JobSpec, JobState
+from quota.tracker import JobSpec, JobState
+
+# Extended JobRecord that supports chunked jobs
+@dataclass
+class JobRecord:
+    state: JobState
+    status: Literal[
+        "queued", "launching", "running", "succeeded", "failed", "cancelled",
+        "loading_model", "model_ready", "generating",
+    ] = "queued"
+    endpoint_url: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    last_updated_at: float = field(default_factory=time.time)
+    head_ip: Optional[str] = None
+    output_s3_path: Optional[str] = None
+    # Chunked job extensions
+    is_chunked: bool = False
+    total_chunks: Optional[int] = None
+    num_replicas: int = 1
+    _job_dirname: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -108,6 +128,10 @@ class ClusterManager:
         self.active_clusters: Dict[str, dict] = {}
         self._threads: Dict[str, threading.Thread] = {}
         self._persist_set: set = set()
+        self._job_clusters: Dict[str, list] = {}  # job_id → [cluster_names]
+        self._replica_states: Dict[str, Dict[str, dict]] = {}  # job_id → {replica_id → state}
+        self._swap_in_progress: Dict[str, bool] = {}
+        self._swap_version: Dict[str, int] = {}  # job_id → next version counter
         self.lock = Lock()
 
     def register(self, cluster_name: str, job_id: str, region: str = None,
@@ -137,6 +161,35 @@ class ClusterManager:
     def mark_persist(self, cluster_name: str):
         with self.lock:
             self._persist_set.add(cluster_name)
+
+    def register_for_job(self, job_id: str, cluster_name: str):
+        with self.lock:
+            if job_id not in self._job_clusters:
+                self._job_clusters[job_id] = []
+            if cluster_name not in self._job_clusters[job_id]:
+                self._job_clusters[job_id].append(cluster_name)
+
+    def get_job_clusters(self, job_id: str) -> list:
+        with self.lock:
+            return list(self._job_clusters.get(job_id, []))
+
+    def set_replica_state(self, job_id: str, replica_id: str, **kwargs):
+        with self.lock:
+            if job_id not in self._replica_states:
+                self._replica_states[job_id] = {}
+            if replica_id not in self._replica_states[job_id]:
+                self._replica_states[job_id][replica_id] = {}
+            self._replica_states[job_id][replica_id].update(kwargs)
+
+    def get_replica_states(self, job_id: str) -> Dict[str, dict]:
+        with self.lock:
+            return dict(self._replica_states.get(job_id, {}))
+
+    def next_swap_version(self, job_id: str) -> int:
+        with self.lock:
+            v = self._swap_version.get(job_id, 2)
+            self._swap_version[job_id] = v + 1
+            return v
 
     def get_active_threads(self) -> Dict[str, threading.Thread]:
         with self.lock:
@@ -253,6 +306,15 @@ class JobTracker:
                 job_record.state.progress_frac = progress_frac
                 job_record.last_updated_at = time.time()
             return job_record
+
+    def set_chunked_info(self, job_id: str, total_chunks: int, num_replicas: int):
+        with self.lock:
+            rec = self.jobs.get(job_id)
+            if rec:
+                rec.is_chunked = True
+                rec.total_chunks = total_chunks
+                rec.num_replicas = num_replicas
+                rec.last_updated_at = time.time()
 
     def update_status(
         self,
@@ -386,7 +448,7 @@ def poll_job_progress(
                 break
         except Exception as e:
             # keep polling, simple prototype, but log the error
-            print(f"[ERROR] Polling job {job_id} failed: {e}")
+            logger.error(f"[ERROR] Polling job {job_id} failed: {e}")
             pass
         time.sleep(interval_sec)
 
@@ -409,9 +471,9 @@ def jobtracker_snapshot(tracker: JobTracker) -> dict:
 def log_jobtracker_loop(tracker: JobTracker, interval_sec: int = 0.5):
     while True:
         snap = jobtracker_snapshot(tracker)
-        print("\n[JobTracker] snapshot:")
+        logger.debug("[JobTracker] snapshot:")
         for job_id, d in snap.items():
-            print(
+            logger.debug(
                 f"  - {job_id} status={d['status']} "
                 f"progress={d['progress'] * 100:.1f}% "
                 f"lines={d['num_lines']} head_ip={d['head_ip']} "

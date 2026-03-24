@@ -1,0 +1,100 @@
+name: default-chunked-replica
+
+num_nodes: 1
+
+resources:
+  infra: aws
+  disk_size: 300GB
+  instance_type: p3.gxlarge
+  ports: 8001
+
+envs:
+  HF_TOKEN: null
+  VLLM_USE_V1: "1"
+  VLLM_NO_USAGE_STATS: "1"
+  VLLM_LOG_STATS_INTERVAL: "1"
+  CUDA_DEVICE_ORDER: "PCI_BUS_ID"
+  NCCL_ASYNC_ERROR_HANDLING: "1"
+  CUDA_LAUNCH_BLOCKING: "0"
+  ORCA_SERVER_URL: ""
+  JOB_ID: ""
+  REPLICA_ID: ""
+  ORCA_API_KEY: ""
+  AVG_INPUT_TOKENS: "2000"
+  AVG_OUTPUT_TOKENS: "500"
+
+file_mounts:
+  ~/batch_runner.py: ./templates/vllm_batch_runner_chunked.py
+  ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py
+
+setup: |
+  export PYTHONHASHSEED=0
+  set -euxo pipefail
+  python3 -m pip install -U pip
+  python3 -m pip install -U uv
+
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+
+  uv pip install "ray[default]>=2.48.0"
+
+  echo "=== Installing vLLM 0.10.0 ==="
+  uv pip install "vllm==0.10.0" aiohttp pynvml
+
+  python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Available:', torch.cuda.is_available())"
+
+  SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+
+  WEIGHT_UTILS="$SITE_PACKAGES/vllm/model_executor/model_loader/weight_utils.py"
+  sed -i 's/super().__init__(\*args, \*\*kwargs, disable=True)/kwargs.pop("disable", None); super().__init__(*args, **kwargs, disable=True)/' "$WEIGHT_UTILS"
+  echo "Patched vLLM DisabledTqdm"
+
+  cp ~/vllm_compat_patch.py "$SITE_PACKAGES/vllm_compat_patch.py"
+  echo "import vllm_compat_patch" > "$SITE_PACKAGES/sitecustomize.py"
+  echo "Installed vLLM compatibility patch for transformers 5.x"
+
+  python3 -c "from vllm import LLM; print('vLLM import successful')"
+
+  if systemctl list-units --type=service --all | grep -q nvidia-fabricmanager; then
+    echo "=== NVSwitch Instance Detected ==="
+    if systemctl is-active --quiet nvidia-fabricmanager; then
+      echo "[NVSwitch] Fabric Manager: active"
+    else
+      echo "[NVSwitch] Attempting to start Fabric Manager..."
+      sudo systemctl start nvidia-fabricmanager
+      sleep 2
+      if ! systemctl is-active --quiet nvidia-fabricmanager; then
+        echo "[NVSwitch] FATAL: Fabric Manager failed to start."
+        exit 1
+      fi
+    fi
+    nvidia-smi topo -m
+    nvidia-smi nvlink -s
+  else
+    echo "=== Non-NVSwitch instance — skipping Fabric Manager check ==="
+  fi
+
+run: |
+  set -euxo pipefail
+  source .venv/bin/activate
+
+  RAY_PORT=6379
+  if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo "Starting Ray head node..."
+    ray start --head --port=$RAY_PORT --dashboard-host=0.0.0.0 --disable-usage-stats
+  else
+    echo "Starting Ray worker node..."
+    HEAD_IP=$(echo "$SKYPILOT_NODE_IPS" | head -n1)
+    for i in {1..60}; do
+      if ray start --address="$HEAD_IP:$RAY_PORT" --disable-usage-stats 2>/dev/null; then
+        echo "Connected to Ray head"
+        break
+      fi
+      sleep 2
+    done
+  fi
+  ray status
+
+  if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
+    echo "Ready for chunked batch job"
+  fi

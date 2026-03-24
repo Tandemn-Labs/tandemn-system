@@ -16,6 +16,7 @@ from fastapi.responses import Response, StreamingResponse
 logger = logging.getLogger(__name__)
 
 from orca_server.config import (
+    CHUNK_RECLAIM_INTERVAL,
     CHUNK_SIZE_BYTES,
     INSTANCE_TO_GPU,
     ORCA_API_KEY,
@@ -30,7 +31,12 @@ from orca_server.job_manager import get_cluster_manager, get_job_tracker, jobtra
 from orca_server.launcher import (
     sp_launch_vllm_batch_with_fallback,
     sp_launch_vllm_online,
+    launch_chunked_replicas,
+    _launch_chunked_replica,
 )
+from orca_server.job_manager import sky_down_with_retry
+import threading
+from orca_server.chunk_manager import get_chunk_manager
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from placement.roofline_magic import (
@@ -81,6 +87,21 @@ async def lifespan(app: FastAPI):
     app.state.metrics_collector = get_metrics_collector()
     app.state.metrics_db = get_metrics_db()
 
+    # Redis health check — required for chunked multi-replica jobs
+    try:
+        import redis as _redis
+        from orca_server.config import REDIS_URL
+        _r = _redis.from_url(REDIS_URL, socket_connect_timeout=3, socket_timeout=3)
+        _r.ping()
+        logger.info(f"[Redis] Connected at {REDIS_URL}")
+        app.state.redis_available = True
+    except Exception as _e:
+        logger.warning(
+            f"[Redis] Unavailable at {REDIS_URL}: {_e} — "
+            "chunked multi-replica jobs will fail. Single-cluster jobs unaffected."
+        )
+        app.state.redis_available = False
+
     # Reconcile stale reservations against live SkyPilot clusters
     try:
         request_id = sky.status()
@@ -90,7 +111,133 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[Quota] Could not reconcile on startup: {e}")
 
+    # Active reclaim loop: scans all jobs every CHUNK_RECLAIM_INTERVAL seconds
+    # and re-queues inflight chunks whose leases have expired.
+    async def _reclaim_loop():
+        while True:
+            await asyncio.sleep(CHUNK_RECLAIM_INTERVAL)
+            if not getattr(app.state, "redis_available", False):
+                continue
+            try:
+                cm = get_chunk_manager()
+                keys = list(cm._r.scan_iter("chunk:job:*:inflight"))
+                for key in keys:
+                    # key format: "chunk:job:{job_id}:inflight"
+                    prefix = "chunk:job:"
+                    suffix = ":inflight"
+                    job_id = key[len(prefix):-len(suffix)]
+                    result = cm.reclaim_expired_chunks(job_id)
+                    if result["reclaimed"] or result["failed"]:
+                        logger.info(
+                            f"[Reclaim] {job_id}: reclaimed={result['reclaimed']} "
+                            f"failed={result['failed']}"
+                        )
+                    # If reclaim pushed a job to all_done, trigger assembly
+                    if result["failed"]:
+                        progress = cm.get_progress(job_id)
+                        if progress and progress["all_done"]:
+                            asyncio.create_task(_assemble_output(job_id))
+            except Exception as e:
+                logger.warning(f"[Reclaim] Error: {e}")
+
+    reclaim_task = asyncio.create_task(_reclaim_loop())
+
+    # Replica watchdog: detect dead replicas via heartbeat, force-reclaim, recover
+    watchdog_task = None
+    if getattr(app.state, "redis_available", False):
+        from orca_server.watchdog import ReplicaWatchdog
+
+        def _watchdog_recover(job_id: str, replica_id: str):
+            """Relaunch a dead replica in a background thread."""
+            cm = app.state.cluster_manager
+            cluster_info = cm.active_clusters.get(job_id, {})
+            instance_type = cluster_info.get("instance_type", "g5.xlarge")
+            # Recover replica state to get original config
+            states = cm.get_replica_states(job_id)
+            old_state = states.get(replica_id, {})
+            orig_instance = old_state.get("instance_type") or instance_type
+
+            chunk_mgr = get_chunk_manager()
+            meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
+            model_name = meta.get("model_name", "unknown")
+
+            # Determine TP from instance GPU count
+            from orca_server.config import AWS_INSTANCES
+            gpu_name, gpu_count, _ = AWS_INSTANCES.get(orig_instance, ("A10G", 1, 4))
+
+            config = MagicOutput(
+                decision_id=job_id,
+                engine="vllm",
+                instance_type=orig_instance,
+                tp_size=gpu_count,
+                pp_size=1,
+                replicas=1,
+                num_instances=1,
+            )
+            req = BatchedRequest(
+                user_id="watchdog-recovery",
+                model_name=model_name,
+                input_file=meta.get("s3_output_base", f"s3://tandemn-orca/{job_id}") + "/recovery.jsonl",
+                output_file="output.jsonl",
+                description="watchdog-recovery",
+                task_type="batch",
+                task_priority="normal",
+                engine="vllm",
+                slo_mode="cost_first",
+                placement="user_specified",
+                num_lines=int(meta.get("total_chunks", 1)) * 100,
+                avg_input_tokens=2000,
+                avg_output_tokens=1024,
+            )
+            replica_config = config.model_copy(update={
+                "decision_id": replica_id,
+                "replicas": 1,
+            })
+
+            def _do_recover():
+                import asyncio as _aio
+                cm.set_replica_state(job_id, replica_id, phase="launching")
+                try:
+                    loop = _aio.new_event_loop()
+                    loop.run_until_complete(_launch_chunked_replica(
+                        req, replica_config, replica_id,
+                        parent_job_id=job_id,
+                        job_dirname=f"recovery-{job_id}",
+                    ))
+                    loop.close()
+                    logger.info("[Watchdog] Recovery launched for %s", replica_id)
+                except Exception as e:
+                    logger.error("[Watchdog] Recovery failed for %s: %s", replica_id, e)
+                    cm.set_replica_state(job_id, replica_id, phase="failed")
+
+            t = threading.Thread(target=_do_recover, daemon=False, name=f"orca-recover-{replica_id[:16]}")
+            t.start()
+
+        watchdog = ReplicaWatchdog(
+            metrics_collector=app.state.metrics_collector,
+            cluster_manager=app.state.cluster_manager,
+            job_tracker=get_job_tracker(),
+            chunk_manager_fn=get_chunk_manager,
+            assembly_callback=lambda jid: asyncio.create_task(_assemble_output(jid)),
+            recover_callback=_watchdog_recover,
+        )
+        app.state.watchdog = watchdog
+        watchdog_task = asyncio.create_task(watchdog.run())
+        logger.info("[Watchdog] Started replica watchdog")
+
     yield
+
+    if watchdog_task:
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except asyncio.CancelledError:
+            pass
+    reclaim_task.cancel()
+    try:
+        await reclaim_task
+    except asyncio.CancelledError:
+        pass
 
     # Shutdown: join non-daemon monitor threads so they can finish teardown
     cm = app.state.cluster_manager
@@ -172,9 +319,38 @@ async def list_jobs():
 @app.get("/job/{job_id}/metrics")
 async def get_job_metrics(job_id: str):
     """Get latest live metrics snapshot for a running job."""
-    snap = app.state.metrics_collector.get_latest(job_id)
+    snap = app.state.metrics_collector.get_aggregated(job_id)
     if snap is None:
         raise HTTPException(404, f"No metrics for {job_id}")
+    return snap.to_dict()
+
+
+@app.get("/job/{job_id}/replicas")
+async def get_job_replicas(job_id: str):
+    """Get per-replica state and metrics availability for a chunked job."""
+    cm = app.state.cluster_manager
+    mc = app.state.metrics_collector
+    states = cm.get_replica_states(job_id)
+    metrics_ids = set(mc.list_replica_ids(job_id))
+    replicas = []
+    for rid, info in states.items():
+        replicas.append({
+            "replica_id": rid,
+            "phase": info.get("phase", "unknown"),
+            "region": info.get("region"),
+            "market": info.get("market"),
+            "instance_type": info.get("instance_type"),
+            "has_metrics": rid in metrics_ids,
+        })
+    return {"replicas": replicas}
+
+
+@app.get("/job/{job_id}/replicas/{replica_id}/metrics")
+async def get_replica_metrics(job_id: str, replica_id: str):
+    """Get latest live metrics snapshot for a specific replica."""
+    snap = app.state.metrics_collector.get_replica_latest(job_id, replica_id)
+    if snap is None:
+        raise HTTPException(404, f"No metrics for replica {replica_id}")
     return snap.to_dict()
 
 
@@ -216,6 +392,7 @@ async def ingest_job_metrics(
 
     body = await request.json()
     snapshots_raw = body.get("snapshots", [])
+    replica_id = body.get("replica_id")
 
     # Update progress bar if runner included done/total counts
     done = body.get("done")
@@ -230,6 +407,20 @@ async def ingest_job_metrics(
     mc = app.state.metrics_collector
     db = app.state.metrics_db
 
+    # Ensure job-level and per-replica collectors exist (auto-create on first ingest)
+    mc.start_collecting(job_id)
+    if replica_id:
+        mc.start_replica_collecting(job_id, replica_id)
+        # Update phase to "running" on first ingest (handles recovered replicas)
+        cm = app.state.cluster_manager
+        states = cm.get_replica_states(job_id)
+        if replica_id in states and states[replica_id].get("phase") in ("launching", "provisioned", "dead"):
+            cm.set_replica_state(job_id, replica_id, phase="running", running_since=time.time())
+        # Clear watchdog dead tracking if this replica recovered
+        wd = getattr(app.state, "watchdog", None)
+        if wd:
+            wd.clear_dead(replica_id)
+
     ingested = 0
     batch_for_db = []
     prev_snap = None
@@ -241,26 +432,44 @@ async def ingest_job_metrics(
             continue
 
         snap = MetricsSnapshot.from_prometheus_text(job_id, text, ts)
+        snap.replica_id = replica_id
 
-        # Compute throughput from counter deltas (vLLM >=0.10 removed the gauge)
-        if snap.avg_generation_throughput_toks_per_s == 0 and prev_snap is not None:
-            dt = snap.timestamp - prev_snap.timestamp
-            if dt > 0:
-                snap.avg_generation_throughput_toks_per_s = (
-                    snap.generation_tokens_total - prev_snap.generation_tokens_total
-                ) / dt
-                snap.avg_prompt_throughput_toks_per_s = (
-                    snap.prompt_tokens_total - prev_snap.prompt_tokens_total
-                ) / dt
-        prev_snap = snap
+        # Merge live per-token counters from SSE stream (smooth, no completion-burst)
+        live_gen = item.get("live_gen_tokens_total")
+        live_prompt = item.get("live_prompt_tokens_total")
+        if live_gen is not None:
+            snap.live_gen_tokens_total = float(live_gen)
+        if live_prompt is not None:
+            snap.live_prompt_tokens_total = float(live_prompt)
 
-        # Write into ring buffer for live SSE / REST
+        # Throughput is NOT computed here — it's computed from the ring buffer
+        # over a fixed window (INSTANT_THROUGHPUT_WINDOW_SEC, default 10s) when
+        # the snapshot is read via latest(). This avoids noisy rates from
+        # variable-interval sidecar batch items.
+
+        # Merge GPU hardware utilization from sidecar payload
+        gpu_sm = item.get("gpu_sm_util_pct")
+        gpu_bw = item.get("gpu_mem_bw_util_pct")
+        if gpu_sm is not None:
+            snap.gpu_sm_util_pct = float(gpu_sm)
+        if gpu_bw is not None:
+            snap.gpu_mem_bw_util_pct = float(gpu_bw)
+
+        # Write into aggregated job-level ring buffer
         with mc._lock:
             jc = mc._jobs.get(job_id)
         if jc:
             with jc.lock:
                 jc.buffer.append(snap)
-                # Don't add to _unflushed — we persist directly below
+
+        # Write into per-replica ring buffer
+        if replica_id:
+            rkey = f"{job_id}:{replica_id}"
+            with mc._lock:
+                rc = mc._replicas.get(rkey)
+            if rc:
+                with rc.lock:
+                    rc.buffer.append(snap)
 
         batch_for_db.append(snap.to_dict())
         ingested += 1
@@ -273,6 +482,27 @@ async def ingest_job_metrics(
             logger.warning("[Ingest] timeseries write failed for %s: %s", job_id, e)
 
     return {"ok": True, "ingested": ingested}
+
+
+@app.post("/job/{job_id}/metrics/summary")
+async def ingest_replica_summary(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Called by each replica after all chunks are done with its build_metrics dict."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = await request.json()
+    replica_id = body.get("replica_id")
+    metrics = body.get("metrics")
+    if not replica_id or not metrics:
+        raise HTTPException(status_code=400, detail="replica_id and metrics required")
+
+    app.state.metrics_db.push_replica_summary(job_id, replica_id, metrics)
+    logger.info("[Summary] Stored replica summary for %s / %s", job_id, replica_id)
+    return {"ok": True}
 
 
 @app.post("/job/{job_id}/phase")
@@ -293,6 +523,212 @@ async def update_job_phase(
     return {"ok": True}
 
 
+@app.post("/job/{job_id}/chunks/pull")
+async def pull_chunk(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Replica calls to get next chunk. Returns 204 when queue is empty."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    replica_id = body.get("replica_id", "unknown")
+
+    cm = get_chunk_manager()
+    chunk_info = cm.pull_chunk(job_id, replica_id)
+    if chunk_info is None:
+        return Response(status_code=204)
+    return chunk_info
+
+
+@app.post("/job/{job_id}/chunks/complete")
+async def complete_chunk(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Replica reports chunk done. Triggers assembly when all chunks are complete."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    chunk_id = body.get("chunk_id")
+    replica_id = body.get("replica_id", "unknown")
+
+    cm = get_chunk_manager()
+    progress = cm.complete_chunk(job_id, chunk_id, replica_id)
+
+    # Update job tracker progress
+    if progress["total"] > 0:
+        frac = (progress["completed"] + progress["failed"]) / progress["total"]
+        get_job_tracker().update_progress(job_id, frac)
+
+    if progress["all_done"]:
+        asyncio.create_task(_assemble_output(job_id))
+
+    return progress
+
+
+@app.post("/job/{job_id}/chunks/renew")
+async def renew_chunk_lease(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Replica calls every CHUNK_RENEW_INTERVAL to extend its lease on an inflight chunk."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    chunk_id = body.get("chunk_id")
+    replica_id = body.get("replica_id", "unknown")
+
+    cm = get_chunk_manager()
+    result = cm.renew_lease(job_id, chunk_id, replica_id)
+    return result
+
+
+@app.get("/job/{job_id}/chunks/progress")
+async def chunk_progress(
+    job_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    """Chunk-level progress for CLI."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    cm = get_chunk_manager()
+    progress = cm.get_progress(job_id)
+    if progress is None:
+        raise HTTPException(status_code=404, detail=f"No chunk queue for job {job_id}")
+    return progress
+
+
+async def _assemble_output(job_id: str):
+    """Combine per-chunk outputs into final ordered output.jsonl."""
+    job_logger = logging.getLogger(f"orca.job.{job_id}")
+    job_logger.info(f"[Assembly] Starting output assembly for {job_id}")
+
+    cm = get_chunk_manager()
+
+    # Assembly-once guard: prevent two concurrent triggers (reclaim loop + complete_chunk)
+    # from both running assembly. SETNX returns True only for the winner; 5-min TTL as safety net.
+    lock_key = f"chunk:job:{job_id}:assembling"
+    if not cm._r.set(lock_key, "1", nx=True, ex=300):
+        job_logger.info(f"[Assembly] Job {job_id} assembly already in progress, skipping")
+        return
+
+    meta = cm._r.hgetall(f"chunk:job:{job_id}:meta")
+    if not meta:
+        job_logger.info(f"[Assembly] Job {job_id} metadata gone (already assembled?), skipping")
+        return
+    s3_output_base = meta.get("s3_output_base", "")
+    ordered_ids = cm.get_output_order(job_id)
+
+    failed_ids = cm.get_failed_chunk_ids(job_id)
+    if failed_ids:
+        job_logger.warning(
+            f"[Assembly] {len(failed_ids)} chunk(s) permanently failed and will be skipped: "
+            f"{sorted(failed_ids)}"
+        )
+
+    combined_path = f"/tmp/assembly_{job_id}.jsonl"
+    try:
+        with open(combined_path, "w") as combined:
+            for cid in ordered_ids:
+                if cid in failed_ids:
+                    continue
+                chunk_info = cm.get_chunk_info(job_id, cid)
+                s3_out = chunk_info.get("s3_output_path", "")
+                local_tmp = f"/tmp/assemble_{job_id}_{cid}.jsonl"
+                try:
+                    await storage_backend.download_file(s3_out, local_tmp, user="system")
+                except Exception as dl_err:
+                    job_logger.error(f"[Assembly] Failed to download {s3_out}: {dl_err}")
+                    continue
+                with open(local_tmp) as cf:
+                    for line in cf:
+                        combined.write(line)
+                os.unlink(local_tmp)
+
+        # Upload combined output
+        final_s3 = f"{s3_output_base}/output.jsonl"
+        await storage_backend.upload_file(combined_path, final_s3, user="system")
+        os.unlink(combined_path)
+        job_logger.info(f"[Assembly] Uploaded combined output to {final_s3}")
+
+        # Download to local outputs/
+        from orca_server.job_manager import download_output_from_s3, prefix_job_dirname
+        tracker = get_job_tracker()
+        rec = tracker.get(job_id)
+        if rec:
+            job_dirname = getattr(rec, '_job_dirname', job_id)
+            status_prefix = "partial" if failed_ids else "success"
+            job_dirname = prefix_job_dirname(job_dirname, status_prefix)
+            download_output_from_s3(final_s3, job_dirname, logger=job_logger)
+
+        # Aggregate per-replica summaries into job-level metrics
+        from orca_server.metrics_db import get_metrics_db
+        db = get_metrics_db()
+        try:
+            agg = db.aggregate_replica_summaries(job_id)
+            if agg:
+                # Write aggregated metrics.csv to temp, push into DB
+                import csv as _csv
+                metrics_csv_path = f"/tmp/assembly_metrics_{job_id}.csv"
+                with open(metrics_csv_path, "w", newline="") as mf:
+                    writer = _csv.writer(mf)
+                    writer.writerow(["metric", "value"])
+                    for k, v in agg.items():
+                        if isinstance(v, float):
+                            v = f"{v:.4f}"
+                        writer.writerow([k, v])
+                # Determine context for push_run
+                actual_region = ""
+                actual_market = "spot"
+                solver = "chunked"
+                if rec:
+                    actual_region = getattr(rec.state, "actual_region", "") or ""
+                    actual_market = getattr(rec.state, "actual_market", "spot") or "spot"
+                db.push_run(
+                    job_id, metrics_csv_path,
+                    actual_region=actual_region,
+                    actual_market=actual_market,
+                    solver=solver,
+                    job_dirname=job_dirname if rec else job_id,
+                )
+                os.unlink(metrics_csv_path)
+                job_logger.info(f"[Assembly] Wrote aggregated metrics to DB for {job_id}")
+
+                # Upload aggregated metrics.csv to S3
+                agg_metrics_path = f"/tmp/assembly_metrics_final_{job_id}.csv"
+                with open(agg_metrics_path, "w", newline="") as mf:
+                    writer = _csv.writer(mf)
+                    writer.writerow(["metric", "value"])
+                    for k, v in agg.items():
+                        if isinstance(v, float):
+                            v = f"{v:.4f}"
+                        writer.writerow([k, v])
+                metrics_s3 = f"{s3_output_base}/metrics.csv"
+                await storage_backend.upload_file(agg_metrics_path, metrics_s3, user="system")
+                os.unlink(agg_metrics_path)
+                job_logger.info(f"[Assembly] Uploaded aggregated metrics.csv to {metrics_s3}")
+            else:
+                job_logger.info(f"[Assembly] No replica summaries found for {job_id}, skipping metrics aggregation")
+        except Exception as me:
+            job_logger.warning(f"[Assembly] Metrics aggregation failed for {job_id}: {me}")
+
+        get_job_tracker().update_status(job_id, "succeeded")
+        get_job_tracker().update_progress(job_id, 1.0)
+        cm.cleanup_job(job_id)
+        job_logger.info(f"[Assembly] Job {job_id} completed successfully")
+
+    except Exception as e:
+        job_logger.error(f"[Assembly] Failed for {job_id}: {e}")
+        get_job_tracker().update_status(job_id, "failed")
+        cm._r.delete(lock_key)  # release assembly lock so retry can happen immediately
+        if os.path.exists(combined_path):
+            os.unlink(combined_path)
+
+
 @app.get("/job/{job_id}/throughput")
 async def get_job_throughput(job_id: str, window: float = 60.0):
     """Sustained throughput for the controller: rolling window + epoch (since baseline)."""
@@ -301,6 +737,231 @@ async def get_job_throughput(job_id: str, window: float = 60.0):
         raise HTTPException(404, "No throughput data (insufficient samples)")
     result["job_id"] = job_id
     return result
+
+
+@app.get("/job/{job_id}/replicas/summaries")
+async def get_replica_summaries_endpoint(job_id: str):
+    """Return per-replica build_metrics dicts for a completed chunked job."""
+    summaries = app.state.metrics_db.get_replica_summaries(job_id)
+    if not summaries:
+        raise HTTPException(404, f"No replica summaries for {job_id}")
+    return {"job_id": job_id, "count": len(summaries), "summaries": summaries}
+
+
+@app.post("/job/{job_id}/swap")
+async def swap_replicas(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Hot-swap replicas to a new GPU/TP/PP config mid-job.
+
+    Launches new replicas with the new config (same Redis queue), waits for
+    first metrics ingest from K new replicas, then force-reclaims old replicas'
+    inflight chunks and tears them down.
+    """
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    jt = get_job_tracker()
+    rec = jt.get(job_id)
+    # Check if chunked: either flag is set, or Redis has a chunk queue for this job
+    chunk_mgr = get_chunk_manager()
+    progress = chunk_mgr.get_progress(job_id)
+    if rec is None and progress is None:
+        raise HTTPException(404, "Job not found")
+    if progress is None:
+        raise HTTPException(400, "Job is not a chunked job — swap requires a chunked deployment")
+    if rec and rec.status in ("succeeded", "failed", "cancelled"):
+        raise HTTPException(409, f"Job status '{rec.status}' is not swappable")
+
+    cm = app.state.cluster_manager
+    if cm._swap_in_progress.get(job_id):
+        raise HTTPException(409, "Swap already in progress for this job")
+
+    body = await request.json()
+    gpu_type = body.get("gpu_type")
+    tp_size = body.get("tp_size", 1)
+    pp_size = body.get("pp_size", 1)
+    num_replicas = body.get("num_replicas")
+    ready_threshold = body.get("ready_threshold", 1)
+    on_demand = body.get("on_demand", False)
+    force = body.get("force", False)
+
+    if not gpu_type:
+        raise HTTPException(400, "gpu_type is required")
+
+    # Validate feasibility
+    try:
+        instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp_size)
+    except Exception as e:
+        raise HTTPException(400, f"Cannot resolve GPU config: {e}")
+
+    if not force:
+        feasibility = check_user_specified_feasibility(
+            gpu_type=gpu_type, tp_size=tp_size, pp_size=pp_size,
+            model_name=getattr(rec.state, "spec", None) and rec.state.spec.model_name or "",
+        )
+        if not feasibility.get("feasible", True):
+            return {"status": "confirm", "message": feasibility.get("reason", "Config may not be feasible"),
+                    "detail": feasibility}
+
+    # Snapshot old replicas
+    old_states = cm.get_replica_states(job_id)
+    old_replicas = [rid for rid, info in old_states.items()
+                    if info.get("phase") not in ("dead", "completed", "failed", "swapped_out")]
+
+    # Default replicas count = same as current active
+    if num_replicas is None:
+        num_replicas = len(old_replicas) or 1
+
+    ready_threshold = min(ready_threshold, num_replicas)
+
+    # Generate versioned replica names
+    version = cm.next_swap_version(job_id)
+    new_replicas = [f"{job_id}-v{version}-r{i}" for i in range(num_replicas)]
+
+    # Mark swap in progress
+    with cm.lock:
+        cm._swap_in_progress[job_id] = True
+
+    # Pre-register new replicas
+    for rid in new_replicas:
+        cm.set_replica_state(job_id, rid, phase="launching")
+        cm.register_for_job(job_id, rid)
+
+    # Build new config for launching
+    new_config = MagicOutput(
+        decision_id=job_id,
+        engine="vllm",
+        instance_type=instance_type,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        replicas=num_replicas,
+        num_instances=pp_size,
+    )
+
+    # Build a BatchedRequest for the new replicas. Always construct from available info
+    # (rec.state.spec is a JobSpec not BatchedRequest, so we build one either way)
+    meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
+    s3_base = meta.get("s3_output_base", "s3://tandemn-orca/swap")
+    spec = rec.state.spec if rec and hasattr(rec, "state") and hasattr(rec.state, "spec") else None
+    original_request = BatchedRequest(
+        user_id="swap",
+        model_name=(spec.model_name if spec else meta.get("model_name", "unknown")),
+        input_file=f"{s3_base}/swap_input.jsonl",
+        output_file="output.jsonl",
+        description="swap",
+        task_type="batch",
+        task_priority="normal",
+        engine="vllm",
+        slo_mode="cost_first",
+        placement="user_specified",
+        num_lines=int(meta.get("total_chunks", 1)) * 100,
+        avg_input_tokens=(spec.avg_input_tokens if spec else body.get("avg_input_tokens", 2000)),
+        avg_output_tokens=(spec.avg_output_tokens if spec else body.get("avg_output_tokens", 1024)),
+    )
+
+    # Launch new replicas in background threads
+    job_dirname = getattr(rec, "_job_dirname", None) or f"swap-{job_id}"
+
+    def _launch_swap_replica(replica_id):
+        import asyncio as _aio
+        replica_config = new_config.model_copy(update={
+            "decision_id": replica_id,
+            "replicas": 1,
+            "num_instances": pp_size,
+        })
+        try:
+            loop = _aio.new_event_loop()
+            loop.run_until_complete(_launch_chunked_replica(
+                original_request, replica_config, replica_id,
+                parent_job_id=job_id,
+                job_dirname=job_dirname,
+                persist=False,
+            ))
+            loop.close()
+        except Exception as e:
+            logger.error(f"[Swap] Failed to launch new replica {replica_id}: {e}")
+            cm.set_replica_state(job_id, replica_id, phase="failed")
+
+    for rid in new_replicas:
+        t = threading.Thread(target=_launch_swap_replica, args=(rid,), daemon=False,
+                             name=f"orca-swap-{rid[:16]}")
+        t.start()
+
+    # Start swap monitor
+    asyncio.create_task(_swap_monitor(job_id, old_replicas, list(new_replicas), ready_threshold))
+
+    return {
+        "status": "swapping",
+        "old_replicas": old_replicas,
+        "new_replicas": new_replicas,
+        "ready_threshold": ready_threshold,
+        "version": version,
+    }
+
+
+async def _swap_monitor(job_id: str, old_replicas: list[str],
+                         new_replicas: list[str], ready_threshold: int):
+    """Wait for K new replicas to send first ingest POST, then kill old ones."""
+    mc = app.state.metrics_collector
+    cm = app.state.cluster_manager
+    deadline = time.time() + 1800  # 30 min timeout
+    ready_set: set[str] = set()
+
+    logger.info(
+        "[Swap] Monitor started for %s: waiting for %d/%d new replicas",
+        job_id, ready_threshold, len(new_replicas),
+    )
+
+    while len(ready_set) < ready_threshold and time.time() < deadline:
+        await asyncio.sleep(5)
+
+        # Check if job is already done
+        jt = get_job_tracker()
+        rec = jt.get(job_id)
+        if rec and rec.status in ("succeeded", "failed", "cancelled"):
+            logger.info("[Swap] Job %s ended during swap, aborting monitor", job_id)
+            break
+
+        # Check which new replicas have sent heartbeats
+        for rid in new_replicas:
+            if rid in ready_set:
+                continue
+            key = f"{job_id}:{rid}"
+            with mc._lock:
+                rc = mc._replicas.get(key)
+            if rc:
+                with rc.lock:
+                    if rc.buffer:
+                        ready_set.add(rid)
+                        logger.info("[Swap] New replica %s is active (%d/%d)",
+                                    rid, len(ready_set), ready_threshold)
+
+    if len(ready_set) >= ready_threshold:
+        logger.info("[Swap] Threshold met for %s, killing old replicas: %s", job_id, old_replicas)
+
+        # Force-reclaim old replicas' inflight chunks
+        chunk_mgr = get_chunk_manager()
+        result = chunk_mgr.force_reclaim(job_id, old_replicas)
+        logger.info("[Swap] Reclaimed from old replicas: %s", result)
+
+        # Tear down old clusters in background
+        for rid in old_replicas:
+            cm.set_replica_state(job_id, rid, phase="swapped_out")
+            threading.Thread(
+                target=sky_down_with_retry, args=(rid,),
+                daemon=True, name=f"swap-down-{rid[:12]}",
+            ).start()
+    else:
+        logger.warning(
+            "[Swap] Timeout for %s: only %d/%d new replicas ready. Old replicas kept alive.",
+            job_id, len(ready_set), ready_threshold,
+        )
+
+    with cm.lock:
+        cm._swap_in_progress.pop(job_id, None)
 
 
 @app.get("/analytics/runs")
@@ -351,24 +1012,30 @@ async def submit_batch(request: BatchedRequest):
     - "roofline": Deterministic roofline-based solver (default)
     - "user_specified": User provides GPU/TP/PP directly
     """
-    # Download S3 input if needed, then parse local file for stats
-    local_input, tmp_cleanup = await _resolve_input_file(request.input_file)
-    try:
-        num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
-            local_input, model_name=request.model_name
-        )
-    finally:
-        if tmp_cleanup:
-            os.unlink(tmp_cleanup)
+    # For chunked jobs the CLI already parsed stats and uploaded chunks — skip file download
+    if request.chunks and request.num_lines is not None and request.avg_input_tokens is not None:
+        num_lines = request.num_lines
+        avg_input_tokens = request.avg_input_tokens
+        max_input_tokens = request.max_input_tokens
+    else:
+        # Download S3 input if needed, then parse local file for stats
+        local_input, tmp_cleanup = await _resolve_input_file(request.input_file)
+        try:
+            num_lines, avg_input_tokens, max_input_tokens = parse_input_file_stats(
+                local_input, model_name=request.model_name
+            )
+        finally:
+            if tmp_cleanup:
+                os.unlink(tmp_cleanup)
 
-    # Update request with parsed values (these override any user-provided values)
-    request = request.model_copy(
-        update={
-            "num_lines": num_lines,
-            "avg_input_tokens": avg_input_tokens,
-            "max_input_tokens": max_input_tokens,
-        }
-    )
+        # Update request with parsed values (these override any user-provided values)
+        request = request.model_copy(
+            update={
+                "num_lines": num_lines,
+                "avg_input_tokens": avg_input_tokens,
+                "max_input_tokens": max_input_tokens,
+            }
+        )
 
     # Collect log messages before the job logger is created
     early_messages = []
@@ -521,7 +1188,64 @@ async def submit_batch(request: BatchedRequest):
                 },
             }
 
-    # Launch with fallback support
+    # ── Chunked path: CLI already split + uploaded chunks to S3 ──
+    if request.chunks and not getattr(app.state, "redis_available", False):
+        raise HTTPException(503, "Redis unavailable — chunked jobs require Redis. "
+                            "Start Redis (docker run -d -p 6379:6379 redis) and restart the server.")
+
+    if request.chunks:
+        effective_replicas = request.replicas or len(request.chunks)
+        primary = configs[0]
+        job_id = primary.decision_id
+
+        # S3 output base (same bucket as first chunk)
+        first_chunk_s3 = request.chunks[0]["s3_input_path"]
+        s3_base = "/".join(first_chunk_s3.split("/")[:3])
+        from orca_server.job_manager import generate_job_dirname
+        job_dirname = generate_job_dirname(request, use_solver, primary.tp_size, primary.pp_size, primary.instance_type)
+        s3_output_base = f"{s3_base}/{job_dirname}"
+
+        cm = get_chunk_manager()
+        cm.create_job_queue(job_id, request.chunks, request.model_name, s3_output_base)
+
+        msg = f"[Chunked] {len(request.chunks)} chunks, {effective_replicas} replicas"
+        logger.info(msg)
+        early_messages.append(("INFO", msg))
+
+        success = await launch_chunked_replicas(
+            request, primary, effective_replicas,
+            solver=use_solver, early_messages=early_messages,
+            quota_tracker=get_quota_tracker(),
+            persist=getattr(request, "persist", False),
+        )
+
+        if success:
+            return {
+                "status": "launched",
+                "job_id": job_id,
+                "config": {
+                    "instance_type": primary.instance_type,
+                    "tp_size": primary.tp_size,
+                    "pp_size": primary.pp_size,
+                },
+                "chunks": len(request.chunks),
+                "replicas": effective_replicas,
+                "input_stats": {
+                    "num_lines": num_lines,
+                    "avg_input_tokens": avg_input_tokens,
+                    "max_input_tokens": max_input_tokens,
+                },
+                "quota_warning": quota_warning,
+                "message": f"Chunked job launched with {effective_replicas} replicas. Track: GET /job/{job_id}",
+            }
+        else:
+            return {
+                "status": "error",
+                "job_id": job_id,
+                "message": "Failed to launch chunked replicas",
+            }
+
+    # ── Single-cluster path (existing, unchanged) ──
     success, used_config = await sp_launch_vllm_batch_with_fallback(
         request, configs, solver=use_solver, early_messages=early_messages,
         quota_tracker=get_quota_tracker(),
@@ -665,6 +1389,7 @@ async def test_placement(request: BatchedRequest):
                 "pp_size": mo.pp_size,
                 "num_instances": mo.num_instances or mo.num_nodes,
                 "max_model_len": mo.max_model_len,
+                "replicas": mo.replicas,
             }
             if mo.throughput_tokens_per_sec is not None:
                 cfg["throughput_tokens_per_sec"] = mo.throughput_tokens_per_sec
@@ -824,6 +1549,29 @@ async def download_file_from_storage(user: str, file_path: str):
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 
+@app.get("/storage/download_s3")
+async def download_s3_file(path: str, user: str = "default"):
+    """Download a file by full S3 URI (s3://bucket/key). Used by chunked runners."""
+    if not path.startswith("s3://"):
+        raise HTTPException(status_code=400, detail="path must be a full s3:// URI")
+    try:
+        logger.info(f"[Storage] download_s3 path={path} user={user}")
+        filename = path.split("/")[-1] or "download"
+
+        async def file_stream_iterator():
+            async for chunk in storage_backend.stream_file(path, user):
+                yield chunk
+
+        return StreamingResponse(
+            file_stream_iterator(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        logger.error(f"[Storage] Error downloading S3 file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+
 @app.delete("/storage/delete/{user}/{file_path:path}")
 async def delete_file_from_storage(user: str, file_path: str):
     """Delete a file from storage backend."""
@@ -843,6 +1591,25 @@ async def delete_file_from_storage(user: str, file_path: str):
         raise
     except Exception as e:
         logger.error(f"[Storage] Error deleting file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
+
+
+@app.delete("/storage/delete_s3")
+async def delete_s3_file(path: str, user: str = "default"):
+    """Delete a file by full S3 URI (s3://bucket/key)."""
+    if not path.startswith("s3://"):
+        raise HTTPException(status_code=400, detail="path must be a full s3:// URI")
+    try:
+        logger.info(f"[Storage] delete_s3 path={path} user={user}")
+        success = await storage_backend.delete_file(path, user)
+        if success:
+            return {"status": "success", "path": path}
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to delete {path}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Storage] Error deleting S3 file: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
 
 
@@ -896,6 +1663,56 @@ async def multipart_complete(
 
 
 if __name__ == "__main__":
+    import argparse as _ap
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=26336)
+    _parser = _ap.ArgumentParser(description="Orca control plane server")
+    _parser.add_argument("--url", help="Public URL for this server (e.g. Cloudflare tunnel URL). Overrides ORCA_SERVER_URL env var.")
+    _parser.add_argument("--port", type=int, default=26336)
+    _parser.add_argument("--tunnel", action="store_true", help="Auto-start a Cloudflare tunnel and use its URL")
+    _args = _parser.parse_args()
+
+    if _args.tunnel:
+        import sys
+        import subprocess as _sp
+        import re as _re
+        import signal as _sig
+
+        import shutil as _sh
+        _cf_bin = _sh.which("cloudflared") or os.path.join(os.path.dirname(__file__), "cloudflared")
+        if not os.path.isfile(_cf_bin):
+            print("[Server] ERROR: cloudflared not found on PATH or in repo root")
+            sys.exit(1)
+        print(f"[Server] Starting Cloudflare tunnel on port {_args.port}...")
+        _tunnel_proc = _sp.Popen(
+            [_cf_bin, "tunnel", "--url", f"http://localhost:{_args.port}"],
+            stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
+        )
+        _tunnel_url = None
+        for _line in iter(_tunnel_proc.stdout.readline, ""):
+            _m = _re.search(r"(https://[a-z0-9-]+\.trycloudflare\.com)", _line)
+            if _m:
+                _tunnel_url = _m.group(1)
+                break
+        if not _tunnel_url:
+            print("[Server] ERROR: Could not detect Cloudflare tunnel URL")
+            _tunnel_proc.kill()
+            sys.exit(1)
+        _args.url = _tunnel_url
+        print(f"[Server] Tunnel ready: {_tunnel_url}")
+
+        def _cleanup_tunnel(*_a):
+            _tunnel_proc.terminate()
+            _tunnel_proc.wait(timeout=5)
+        import atexit
+        atexit.register(_cleanup_tunnel)
+        _sig.signal(_sig.SIGINT, lambda *_a: (atexit._run_exitfuncs(), sys.exit(0)))
+        _sig.signal(_sig.SIGTERM, lambda *_a: (atexit._run_exitfuncs(), sys.exit(0)))
+
+    if _args.url:
+        from orca_server import config as _cfg
+        _cfg.ORCA_SERVER_URL = _args.url
+        os.environ["ORCA_SERVER_URL"] = _args.url
+        print(f"[Server] ORCA_SERVER_URL set to {_args.url}")
+
+    uvicorn.run(app, host="0.0.0.0", port=_args.port)
