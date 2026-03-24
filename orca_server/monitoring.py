@@ -110,6 +110,8 @@ class MetricsSnapshot:
     # GPU hardware utilization (from pynvml via sidecar)
     gpu_sm_util_pct: float = 0.0
     gpu_mem_bw_util_pct: float = 0.0
+    # Per-GPU metrics (from pynvml via sidecar): {gpu0_sm_pct, gpu0_membw_pct, gpu0_mem_gb, gpu0_mem_pct, ...}
+    per_gpu: dict | None = None
     # Live per-token counters (from SSE stream via sidecar, smoother than Prometheus)
     live_gen_tokens_total: float = 0.0
     live_prompt_tokens_total: float = 0.0
@@ -164,7 +166,7 @@ class MetricsSnapshot:
         return snap
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "job_id": self.job_id,
             "timestamp": self.timestamp,
             "replica_id": self.replica_id,
@@ -205,6 +207,10 @@ class MetricsSnapshot:
             "live_gen_tokens_total": self.live_gen_tokens_total,
             "live_prompt_tokens_total": self.live_prompt_tokens_total,
         }
+        # Flatten per-GPU metrics into top-level keys for timeseries CSV
+        if self.per_gpu:
+            d.update(self.per_gpu)
+        return d
 
 
 _SUM_FIELDS = {

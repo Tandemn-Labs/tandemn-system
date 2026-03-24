@@ -57,6 +57,46 @@ from quota.tracker import VPCQuotaTracker
 from orca_server.utils import make_job_id as _make_job_id
 
 
+# ---------------------------------------------------------------------------
+# Replica log forwarding
+# ---------------------------------------------------------------------------
+_replica_log_locks: dict[str, threading.Lock] = {}
+_replica_log_locks_lock = threading.Lock()
+
+# Per-replica previous snapshot for computing throughput deltas at ingest time
+_ingest_prev_snaps: dict[str, "MetricsSnapshot"] = {}
+
+
+def _write_replica_logs(job_id: str, replica_id: str, log_lines: list):
+    """Append forwarded log lines to the per-replica log file."""
+    tracker = get_job_tracker()
+    rec = tracker.get(job_id)
+    if not rec:
+        return
+    job_dirname = getattr(rec, "_job_dirname", None)
+    if not job_dirname:
+        return
+
+    replica_dir = Path(f"outputs/{job_dirname}/replicas")
+    replica_dir.mkdir(parents=True, exist_ok=True)
+    log_path = replica_dir / f"{replica_id}.log"
+
+    # Per-file lock to prevent interleaved writes from concurrent requests
+    with _replica_log_locks_lock:
+        if replica_id not in _replica_log_locks:
+            _replica_log_locks[replica_id] = threading.Lock()
+        lock = _replica_log_locks[replica_id]
+
+    with lock:
+        with open(log_path, "a") as f:
+            for entry in log_lines:
+                ts = entry.get("ts", 0)
+                msg = entry.get("msg", "")
+                if msg:
+                    timestr = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+                    f.write(f"{timestr}  {msg}\n")
+
+
 async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:
     """If input_file is an S3 URI, download via storage backend to a temp file.
 
@@ -442,10 +482,29 @@ async def ingest_job_metrics(
         if live_prompt is not None:
             snap.live_prompt_tokens_total = float(live_prompt)
 
-        # Throughput is NOT computed here — it's computed from the ring buffer
-        # over a fixed window (INSTANT_THROUGHPUT_WINDOW_SEC, default 10s) when
-        # the snapshot is read via latest(). This avoids noisy rates from
-        # variable-interval sidecar batch items.
+        # Compute throughput from counter deltas and persist in the snapshot.
+        # Ring buffer still computes its own windowed throughput for latest(),
+        # but this ensures timeseries CSV has non-zero throughput values.
+        prev_key = f"{job_id}:{replica_id or ''}"
+        prev = _ingest_prev_snaps.get(prev_key)
+        if prev is not None:
+            dt = snap.timestamp - prev.timestamp
+            if dt > 0.1:
+                if snap.live_gen_tokens_total > 0:
+                    snap.avg_generation_throughput_toks_per_s = max(0, (
+                        snap.live_gen_tokens_total - prev.live_gen_tokens_total
+                    ) / dt)
+                    snap.avg_prompt_throughput_toks_per_s = max(0, (
+                        snap.live_prompt_tokens_total - prev.live_prompt_tokens_total
+                    ) / dt)
+                else:
+                    snap.avg_generation_throughput_toks_per_s = max(0, (
+                        snap.generation_tokens_total - prev.generation_tokens_total
+                    ) / dt)
+                    snap.avg_prompt_throughput_toks_per_s = max(0, (
+                        snap.prompt_tokens_total - prev.prompt_tokens_total
+                    ) / dt)
+        _ingest_prev_snaps[prev_key] = snap
 
         # Merge GPU hardware utilization from sidecar payload
         gpu_sm = item.get("gpu_sm_util_pct")
@@ -454,6 +513,11 @@ async def ingest_job_metrics(
             snap.gpu_sm_util_pct = float(gpu_sm)
         if gpu_bw is not None:
             snap.gpu_mem_bw_util_pct = float(gpu_bw)
+
+        # Merge per-GPU metrics (forwarded raw from sidecar's pynvml)
+        per_gpu = item.get("per_gpu")
+        if per_gpu:
+            snap.per_gpu = per_gpu
 
         # Write into aggregated job-level ring buffer
         with mc._lock:
@@ -480,6 +544,11 @@ async def ingest_job_metrics(
             db.append_timeseries(job_id, batch_for_db)
         except Exception as e:
             logger.warning("[Ingest] timeseries write failed for %s: %s", job_id, e)
+
+    # --- Replica log forwarding ---
+    log_lines = body.get("log_lines", [])
+    if log_lines and replica_id:
+        _write_replica_logs(job_id, replica_id, log_lines)
 
     return {"ok": True, "ingested": ingested}
 

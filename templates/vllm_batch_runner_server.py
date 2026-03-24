@@ -402,7 +402,8 @@ class MetricsPoller:
 # Sidecar — push to control plane (bonus, works when reachable)
 # ---------------------------------------------------------------------------
 
-def _sidecar_loop(stop_event: threading.Event, orca_url: str, orca_key: str, job_id: str, live_counter: Optional[LiveTokenCounter] = None):
+def _sidecar_loop(stop_event: threading.Event, orca_url: str, orca_key: str, job_id: str, live_counter: Optional[LiveTokenCounter] = None, gpu_monitor_ref: list | None = None):
+    """gpu_monitor_ref is a mutable [GPUMonitor | None] list so the monitor can be set after thread start."""
     if not orca_url:
         return
 
@@ -421,6 +422,18 @@ def _sidecar_loop(stop_event: threading.Event, orca_url: str, orca_key: str, job
             if live_counter:
                 snap["live_gen_tokens_total"] = live_counter.generation_tokens
                 snap["live_prompt_tokens_total"] = live_counter.prompt_tokens
+            # Inject GPU hardware utilization from pynvml
+            gpu_mon = gpu_monitor_ref[0] if gpu_monitor_ref else None
+            if gpu_mon:
+                latest = gpu_mon.get_latest()
+                if latest:
+                    sm_vals = [v for k, v in latest.items() if "_sm_pct" in k]
+                    bw_vals = [v for k, v in latest.items() if "_membw_pct" in k]
+                    if sm_vals:
+                        snap["gpu_sm_util_pct"] = round(sum(sm_vals) / len(sm_vals), 1)
+                    if bw_vals:
+                        snap["gpu_mem_bw_util_pct"] = round(sum(bw_vals) / len(bw_vals), 1)
+                    snap["per_gpu"] = {k: v for k, v in latest.items() if k != "t"}
             buffer.append(snap)
         except Exception:
             pass
@@ -526,7 +539,7 @@ def start_vllm_server(args) -> subprocess.Popen:
     return subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, env=env)
 
 
-def wait_for_server(timeout_sec: int = 600) -> float:
+def wait_for_server(timeout_sec: int = 1200) -> float:
     start = time.time()
     while time.time() - start < timeout_sec:
         try:
@@ -1175,10 +1188,14 @@ def main():
         orca_key = os.getenv("ORCA_API_KEY", "")
         job_id = os.getenv("JOB_ID", "unknown")
         live_counter = LiveTokenCounter()
+        # gpu_monitor is created later (after model loading) but sidecar needs to
+        # start now for phase reporting. Use a mutable container so the sidecar
+        # picks up the monitor once it's ready.
+        gpu_monitor_ref: list = [None]  # [GPUMonitor | None]
         stop_sidecar = threading.Event()
         sidecar_thread = threading.Thread(
             target=_sidecar_loop,
-            args=(stop_sidecar, orca_url, orca_key, job_id, live_counter),
+            args=(stop_sidecar, orca_url, orca_key, job_id, live_counter, gpu_monitor_ref),
             daemon=True, name="orca-sidecar",
         )
         sidecar_thread.start()
@@ -1202,6 +1219,7 @@ def main():
         # 7. Start GPU monitor + scheduler poller (0.5s sampling, matches profiling repo)
         gpu_monitor = GPUMonitor(sample_interval=0.5)
         gpu_monitor.start()
+        gpu_monitor_ref[0] = gpu_monitor  # sidecar thread picks this up on next iteration
         metrics_poller = MetricsPoller(interval=0.5)
         metrics_poller.start()
 
