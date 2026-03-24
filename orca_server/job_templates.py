@@ -67,7 +67,7 @@ def replace_run_vllm(
 ):
     replace = {}
 
-    if request.s3_models:
+    if request.s3_model_path:
         replace["model"] = f"/models/{request.model_name}"
     else:
         replace["model"] = request.model_name
