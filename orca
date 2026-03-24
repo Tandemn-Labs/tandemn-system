@@ -1714,7 +1714,7 @@ def cmd_history(args):
 
 
 def cmd_ls(args):
-    """List all jobs with detailed info — one box per job, most recent first."""
+    """List all jobs in a clean table, most recent first."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     STATUS_COLORS = {
@@ -1725,12 +1725,23 @@ def cmd_ls(args):
         "model_ready": BLUE,
         "launching": YELLOW,
         "queued": YELLOW,
+        "running": CYAN,
+        "cancelled": DIM,
+    }
+    STATUS_ICONS = {
+        "succeeded": f"{GREEN}\u2713{RESET}",
+        "failed": f"{RED}\u2717{RESET}",
+        "cancelled": f"{DIM}\u2717{RESET}",
+    }
+    STATUS_LABELS = {
+        "loading_model": "loading model",
+        "model_ready": "model ready",
     }
     INACTIVE = {"succeeded", "failed", "cancelled"}
 
     resp = api("get", "/jobs", timeout=15)
     if resp.status_code != 200:
-        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        print(f"{RED}Error:{RESET} {resp.text}")
         return
 
     jobs = resp.json()
@@ -1738,9 +1749,7 @@ def cmd_ls(args):
         jobs = jobs.get("jobs", [])
 
     if not jobs:
-        print(LOGO)
-        header("JOBS")
-        print(f"\n  {DIM}No jobs found.{RESET}\n")
+        print(f"{DIM}No jobs found.{RESET}")
         return
 
     # Sort by created_at descending
@@ -1752,6 +1761,8 @@ def cmd_ls(args):
         return
 
     # --- Enrichment ---
+    verbose = getattr(args, "verbose", False)
+
     def enrich(job):
         jid = job.get("job_id") or job.get("id", "")
         info = {"replicas": [], "chunks": {}, "metrics": {}, "detail": {}}
@@ -1774,17 +1785,16 @@ def cmd_ls(args):
                 info["chunks"] = r.json()
         except Exception:
             pass
-        try:
-            r = api("get", f"/job/{jid}/metrics", timeout=8)
-            if r.status_code == 200:
-                info["metrics"] = r.json()
-        except Exception:
-            pass
+        if verbose:
+            try:
+                r = api("get", f"/job/{jid}/metrics", timeout=8)
+                if r.status_code == 200:
+                    info["metrics"] = r.json()
+            except Exception:
+                pass
         return jid, info
 
     enrich_all = getattr(args, "all", False)
-    active_jobs = {(j.get("job_id") or j.get("id", "")): j for j in jobs
-                   if j.get("status") not in INACTIVE}
     enrichment: dict = {}
 
     jobs_to_enrich = jobs if enrich_all else [j for j in jobs if j.get("status") not in INACTIVE]
@@ -1798,135 +1808,158 @@ def cmd_ls(args):
                 except Exception:
                     pass
 
-    # --- Render ---
-    print(LOGO)
-    header("JOBS")
+    # --- Helpers ---
+    def _status_display(status):
+        icon = STATUS_ICONS.get(status, f"{STATUS_COLORS.get(status, DIM)}\u25cf{RESET}")
+        label = STATUS_LABELS.get(status, status)
+        return f"{icon} {c(label, STATUS_COLORS.get(status, DIM))}"
+
+    def _progress_str(job, info):
+        num_lines = job.get("num_lines", 0) or 0
+        chunks = info.get("chunks", {})
+        # Use chunk-level completed count if available (more accurate for chunked jobs)
+        done_reqs = 0
+        if chunks.get("completed", 0) and chunks.get("total", 0):
+            # Estimate completed prompts from chunk ratio
+            chunk_ratio = chunks["completed"] / chunks["total"]
+            done_reqs = int(num_lines * chunk_ratio)
+        elif job.get("progress") is not None:
+            done_reqs = int(num_lines * float(job["progress"]))
+        elif job.get("status") == "succeeded":
+            done_reqs = num_lines
+        if num_lines:
+            return f"{done_reqs:,d}/{num_lines:,d}"
+        return f"{DIM}\u2014{RESET}"
+
+    def _instance_str(job, info):
+        replicas = info.get("replicas", [])
+        detail = info.get("detail", {})
+        instance = ""
+        if replicas:
+            instance = replicas[0].get("instance_type", "")
+        if not instance:
+            instance = detail.get("instance_type", "")
+        if not instance:
+            return f"{DIM}\u2014{RESET}", ""
+        num_replicas = len(replicas) if replicas else 1
+        inst_str = instance
+        if num_replicas > 1:
+            inst_str += f" {DIM}(\u00d7{num_replicas}){RESET}"
+        return inst_str, instance
+
+    def _region_str(info):
+        replicas = info.get("replicas", [])
+        if replicas:
+            region = replicas[0].get("region") or ""
+            if region:
+                return f"aws {region}"
+        return ""
+
+    # --- Render table ---
     print()
+    hdr = (
+        f"  {BOLD}{DIM}{'MODEL':<34s} {'STATUS':<20s} {'PROGRESS':<16s} "
+        f"{'INSTANCE':<24s} {'REGION':<16s}{RESET}"
+    )
+    print(hdr)
+    print(f"  {DIM}{'─' * 110}{RESET}")
 
     for job in jobs:
         jid = job.get("job_id") or job.get("id", "")
-        short_id = jid[:24]
         model = job.get("model_name", "?")
         status = job.get("status", "unknown")
-        status_color = STATUS_COLORS.get(status, DIM)
-        num_lines = job.get("num_lines", 0) or 0
-        created_str = ""
-        if job.get("created_at"):
-            try:
-                created_str = datetime.fromtimestamp(job["created_at"]).strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                created_str = str(job["created_at"])
-
-        # Progress
-        pct = 0.0
-        if job.get("progress") is not None:
-            pct = float(job["progress"])
-        elif status == "succeeded":
-            pct = 1.0
-
-        lines = []
-        status_str = c(status, status_color + BOLD)
-        lines.append(
-            f"{DIM}Status:{RESET}     {status_str:<28s} {DIM}Progress:{RESET} {bar(pct, 30)}"
-        )
-        prompts_str = f"{num_lines:,d}" if num_lines else "—"
-        lines.append(
-            f"{DIM}Prompts:{RESET}    {prompts_str:<20s}       {DIM}Created:{RESET}  {created_str}"
-        )
-
         info = enrichment.get(jid, {})
-        enrich_all = getattr(args, "all", False)
 
-        if status not in INACTIVE or enrich_all:
-            # Instance / config from replicas or detail
-            replicas = info.get("replicas", [])
-            detail = info.get("detail", {})
-            # Try to get instance_type from first replica
-            instance = ""
-            if replicas:
-                instance = replicas[0].get("instance_type", "")
-            if not instance:
-                instance = detail.get("instance_type", "")
-            if instance:
-                lines.append(f"{DIM}Instance:{RESET}   {c(instance, WHITE+BOLD)}")
+        # Truncate model name if too long
+        model_display = model if len(model) <= 32 else model[:29] + "..."
+
+        status_display = _status_display(status)
+        progress = _progress_str(job, info)
+        inst_display, _ = _instance_str(job, info)
+        region = _region_str(info)
+
+        # Build row — use visible_len-aware padding for colored fields
+        model_pad = 34 - visible_len(model_display)
+        status_pad = 20 - visible_len(status_display)
+        progress_pad = 16 - visible_len(progress)
+        inst_pad = 24 - visible_len(inst_display)
+
+        row = (
+            f"  {model_display}{' ' * max(0, model_pad)}"
+            f" {status_display}{' ' * max(0, status_pad)}"
+            f" {progress}{' ' * max(0, progress_pad)}"
+            f" {inst_display}{' ' * max(0, inst_pad)}"
+            f" {region}"
+        )
+        print(row)
+
+        # --- Verbose: detail lines under each active job ---
+        if verbose and (status not in INACTIVE or enrich_all):
+            detail_parts = []
 
             # Endpoint
-            endpoint = detail.get("endpoint_url", "")
+            endpoint = info.get("detail", {}).get("endpoint_url", "")
             if endpoint:
-                lines.append(f"{DIM}Endpoint:{RESET}   {endpoint}")
+                detail_parts.append(f"endpoint: {endpoint}")
 
-            # Chunks (keys match /job/{id}/chunks/progress response)
+            # Chunks
             chunks = info.get("chunks", {})
-            completed = chunks.get("completed", 0)
-            inflight = chunks.get("inflight", 0)
-            pending = chunks.get("pending", 0)
-            failed = chunks.get("failed", 0)
             total_chunks = chunks.get("total", 0)
             if total_chunks:
-                chunk_line = f"{DIM}Chunks:{RESET}     {c(str(completed), GREEN)}/{total_chunks} done"
+                chunk_parts = [f"{chunks.get('completed', 0)}/{total_chunks} chunks"]
+                inflight = chunks.get("inflight", 0)
                 if inflight:
-                    chunk_line += f"  {c(str(inflight), CYAN)} in-flight"
-                if pending:
-                    chunk_line += f"  {pending} pending"
+                    chunk_parts.append(f"{c(str(inflight), CYAN)} in-flight")
+                failed = chunks.get("failed", 0)
                 if failed:
-                    chunk_line += f"  {c(str(failed), RED)} failed"
-                lines.append(chunk_line)
+                    chunk_parts.append(f"{c(str(failed), RED)} failed")
+                detail_parts.append("  ".join(chunk_parts))
 
-            # Metrics (keys match /job/{id}/metrics response - MetricsSnapshot.to_dict())
+            # Metrics
             metrics = info.get("metrics", {})
             tps = metrics.get("avg_generation_throughput_toks_per_s")
             kv = metrics.get("gpu_cache_usage_perc")
             running = metrics.get("num_requests_running")
-            waiting = metrics.get("num_requests_waiting")
-            done_reqs = metrics.get("request_success_total")
-            if any(v is not None for v in [tps, kv, running, waiting]):
-                parts = []
+            if any(v is not None for v in [tps, kv, running]):
+                m_parts = []
                 if tps is not None:
-                    parts.append(f"{c(f'{tps:,.0f}', GREEN+BOLD)} tok/s")
+                    m_parts.append(f"{c(f'{tps:,.0f}', GREEN)} tok/s")
                 if kv is not None:
                     kv_pct = kv * 100 if kv <= 1 else kv
-                    parts.append(f"KV {kv_pct:.0f}%")
+                    m_parts.append(f"KV {kv_pct:.0f}%")
                 if running is not None:
-                    parts.append(f"{c(str(int(running)), CYAN)} running")
-                if waiting is not None and int(waiting) > 0:
-                    parts.append(f"{int(waiting)} waiting")
-                if done_reqs is not None and int(done_reqs) > 0:
-                    parts.append(f"{int(done_reqs)} done")
-                lines.append(f"{DIM}Metrics:{RESET}    {'   '.join(parts)}")
+                    m_parts.append(f"{int(running)} running")
+                detail_parts.append("  ".join(m_parts))
 
-                # GPU utilization if available
-                gpu_sm = metrics.get("gpu_sm_util_pct")
-                gpu_bw = metrics.get("gpu_mem_bw_util_pct")
-                if gpu_sm and gpu_sm > 0:
-                    gpu_parts = [f"GPU SM {gpu_sm:.0f}%"]
-                    if gpu_bw and gpu_bw > 0:
-                        gpu_parts.append(f"MemBW {gpu_bw:.0f}%")
-                    lines.append(f"{DIM}GPU:{RESET}        {'   '.join(gpu_parts)}")
+            if detail_parts:
+                print(f"  {DIM}{'':34s} {' \u00b7 '.join(detail_parts)}{RESET}")
 
-            # Replicas (keys match /job/{id}/replicas response)
-            if replicas:
-                lines.append(f"{DIM}Replicas:{RESET}")
+            # Replicas
+            replicas = info.get("replicas", [])
+            if replicas and len(replicas) > 1:
                 PHASE_COLORS = {"running": GREEN, "generating": GREEN, "launching": YELLOW,
                                 "provisioned": CYAN, "completed": GREEN, "failed": RED,
                                 "dead": RED, "swapped_out": DIM}
                 for rep in replicas:
                     rid = rep.get("replica_id", "?")
-                    # Short label: last part after last dash
                     short_r = rid.rsplit("-", 1)[-1] if "-r" in rid else rid[-8:]
                     phase = rep.get("phase", "?")
                     phase_color = PHASE_COLORS.get(phase, DIM)
-                    region = rep.get("region") or ""
+                    r_region = rep.get("region") or ""
                     market = rep.get("market") or ""
                     inst = rep.get("instance_type") or ""
-                    lines.append(
-                        f"  {short_r:<6s} {c(phase, phase_color):<22s} {region:<14s} {market:<12s} {inst}"
+                    print(
+                        f"  {'':34s} {DIM}{short_r}{RESET}  "
+                        f"{c(phase, phase_color):<18s}  {r_region}  {market}  {inst}"
                     )
 
-        title = f"{short_id} {DIM}─{RESET} {model}"
-        print(box(lines, title=title))
-        print()
+        # blank line between jobs only in verbose mode
+        if verbose:
+            print()
 
-    print(f"  {DIM}{len(jobs)} job(s) total{RESET}\n")
+    print()
+    print(f"  {DIM}{len(jobs)} job(s){RESET}")
+    print()
 
 
 def cmd_web(args):
@@ -2067,6 +2100,7 @@ Examples:
     p_ls = subparsers.add_parser("ls", help="List all jobs with detailed info")
     p_ls.add_argument("--all", "-a", action="store_true", help="Fetch metrics/replicas for completed jobs too")
     p_ls.add_argument("--json", action="store_true", help="Output as JSON")
+    p_ls.add_argument("-v", "--verbose", action="store_true", help="Show detailed metrics, chunks, and replica info")
 
     args = parser.parse_args()
 
