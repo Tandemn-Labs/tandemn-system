@@ -7,6 +7,8 @@ import time
 import os
 import tempfile
 import json
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import sky
@@ -282,6 +284,7 @@ async def lifespan(app: FastAPI):
     # Shutdown: join non-daemon monitor threads so they can finish teardown
     cm = app.state.cluster_manager
     threads = cm.get_active_threads()
+    stale_clusters = []
     if threads:
         logger.info(f"[Shutdown] Waiting for {len(threads)} monitor thread(s) to finish teardown...")
         for name, t in threads.items():
@@ -289,7 +292,16 @@ async def lifespan(app: FastAPI):
             t.join(timeout=120)
             if t.is_alive():
                 logger.warning(f"[Shutdown] Thread for {name} did not finish within 120s")
+                stale_clusters.append(name)
         logger.info("[Shutdown] All monitor threads joined.")
+
+    # Force-teardown clusters whose monitor threads didn't finish in time
+    for name in stale_clusters:
+        logger.info(f"[Shutdown] Force-tearing down orphaned cluster {name}...")
+        try:
+            sky_down_with_retry(name)
+        except Exception as e:
+            logger.error(f"[Shutdown] Failed to tear down {name}: {e}")
 
 
 app = FastAPI(
@@ -297,6 +309,9 @@ app = FastAPI(
     description="API for receiving job requests",
     lifespan=lifespan,
 )
+
+from orca_server.dashboard import dashboard_router
+app.include_router(dashboard_router)
 
 storage_backend = get_storage_backend()
 
@@ -724,19 +739,22 @@ async def _assemble_output(job_id: str):
         os.unlink(combined_path)
         job_logger.info(f"[Assembly] Uploaded combined output to {final_s3}")
 
-        # Download to local outputs/
-        from orca_server.job_manager import download_output_from_s3, prefix_job_dirname
+        # Write all outputs into the original job directory (where job.log lives),
+        # then rename with success-/partial- prefix — matching single-cluster behavior.
+        from orca_server.job_manager import download_output_from_s3, prefix_job_dirname, close_job_logger
         tracker = get_job_tracker()
         rec = tracker.get(job_id)
-        if rec:
-            job_dirname = getattr(rec, '_job_dirname', job_id)
-            status_prefix = "partial" if failed_ids else "success"
-            job_dirname = prefix_job_dirname(job_dirname, status_prefix)
-            download_output_from_s3(final_s3, job_dirname, logger=job_logger)
+        job_dirname = getattr(rec, '_job_dirname', job_id) if rec else job_id
+        base_dir = Path(f"outputs/{job_dirname}")
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        # Download assembled output.jsonl into the base directory
+        download_output_from_s3(final_s3, job_dirname, logger=job_logger)
 
         # Aggregate per-replica summaries into job-level metrics
         from orca_server.metrics_db import get_metrics_db
         db = get_metrics_db()
+        local_metrics_path = None
         try:
             agg = db.aggregate_replica_summaries(job_id)
             if agg:
@@ -762,33 +780,71 @@ async def _assemble_output(job_id: str):
                     actual_region=actual_region,
                     actual_market=actual_market,
                     solver=solver,
-                    job_dirname=job_dirname if rec else job_id,
+                    job_dirname=job_dirname,
                 )
                 os.unlink(metrics_csv_path)
                 job_logger.info(f"[Assembly] Wrote aggregated metrics to DB for {job_id}")
 
-                # Upload aggregated metrics.csv to S3
-                agg_metrics_path = f"/tmp/assembly_metrics_final_{job_id}.csv"
-                with open(agg_metrics_path, "w", newline="") as mf:
+                # Save metrics.csv to the base experiment directory
+                local_metrics_path = base_dir / "metrics.csv"
+                with open(local_metrics_path, "w", newline="") as mf:
                     writer = _csv.writer(mf)
                     writer.writerow(["metric", "value"])
                     for k, v in agg.items():
                         if isinstance(v, float):
                             v = f"{v:.4f}"
                         writer.writerow([k, v])
+                job_logger.info(f"[Assembly] Saved metrics.csv to {local_metrics_path}")
+
+                # Upload aggregated metrics.csv to S3
                 metrics_s3 = f"{s3_output_base}/metrics.csv"
-                await storage_backend.upload_file(agg_metrics_path, metrics_s3, user="system")
-                os.unlink(agg_metrics_path)
+                await storage_backend.upload_file(str(local_metrics_path), metrics_s3, user="system")
                 job_logger.info(f"[Assembly] Uploaded aggregated metrics.csv to {metrics_s3}")
             else:
                 job_logger.info(f"[Assembly] No replica summaries found for {job_id}, skipping metrics aggregation")
         except Exception as me:
             job_logger.warning(f"[Assembly] Metrics aggregation failed for {job_id}: {me}")
 
+        # Export timeseries to the base experiment directory
+        try:
+            import csv as _csv2
+            ts_data = db.get_timeseries(job_id)
+            if ts_data:
+                ts_path = base_dir / "timeseries.csv"
+                # Use all keys from first sample as columns
+                all_keys = list(ts_data[0].keys())
+                with open(ts_path, "w", newline="") as tf:
+                    writer = _csv2.DictWriter(tf, fieldnames=all_keys, extrasaction="ignore")
+                    writer.writeheader()
+                    for row in ts_data:
+                        writer.writerow(row)
+                job_logger.info(f"[Assembly] Saved timeseries.csv ({len(ts_data)} samples) to {ts_path}")
+
+                # Generate timeseries PDF
+                try:
+                    from orca_server.plot_timeseries import plot_timeseries as _plot_ts
+                    pdf_path = base_dir / "timeseries.pdf"
+                    _metrics_arg = str(local_metrics_path) if local_metrics_path and local_metrics_path.exists() else None
+                    _plot_ts(str(ts_path), str(pdf_path), metrics_csv_path=_metrics_arg)
+                    job_logger.info(f"[Assembly] Generated timeseries.pdf at {pdf_path}")
+                except Exception as pe:
+                    job_logger.warning(f"[Assembly] Timeseries plot failed: {pe}")
+        except Exception as te:
+            job_logger.warning(f"[Assembly] Timeseries export failed for {job_id}: {te}")
+
         get_job_tracker().update_status(job_id, "succeeded")
         get_job_tracker().update_progress(job_id, 1.0)
         cm.cleanup_job(job_id)
         job_logger.info(f"[Assembly] Job {job_id} completed successfully")
+
+        # Rename directory with success-/partial- prefix (after all writes are done)
+        status_prefix = "partial" if failed_ids else "success"
+        prefixed_dirname = prefix_job_dirname(job_dirname, status_prefix)
+        target_dir = Path(f"outputs/{prefixed_dirname}")
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        job_logger.info(f"[Assembly] {status_prefix.upper()}: outputs/{prefixed_dirname}")
+        close_job_logger(job_logger)
+        base_dir.rename(target_dir)
 
     except Exception as e:
         job_logger.error(f"[Assembly] Failed for {job_id}: {e}")
@@ -796,6 +852,19 @@ async def _assemble_output(job_id: str):
         cm._r.delete(lock_key)  # release assembly lock so retry can happen immediately
         if os.path.exists(combined_path):
             os.unlink(combined_path)
+        # Rename to failed- prefix so the directory is clearly marked
+        try:
+            rec = get_job_tracker().get(job_id)
+            _dirname = getattr(rec, '_job_dirname', job_id) if rec else job_id
+            _base = Path(f"outputs/{_dirname}")
+            if _base.exists():
+                _failed = Path(f"outputs/{prefix_job_dirname(_dirname, 'failed')}")
+                _failed.parent.mkdir(parents=True, exist_ok=True)
+                job_logger.info(f"[Assembly] FAILED: outputs/{prefix_job_dirname(_dirname, 'failed')}")
+                close_job_logger(job_logger)
+                _base.rename(_failed)
+        except Exception:
+            pass
 
 
 @app.get("/job/{job_id}/throughput")

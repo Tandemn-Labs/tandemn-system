@@ -290,8 +290,9 @@ async def sp_launch_vllm_batch(
                 from orca_server.monitoring import get_metrics_collector
                 from orca_server.metrics_db import get_metrics_db
                 last_snap = get_metrics_collector().get_latest(config.decision_id)
+                db = get_metrics_db()
                 try:
-                    get_metrics_db().push_run(
+                    db.push_run(
                         job_id=config.decision_id,
                         metrics_csv_path=str(base_dir / "metrics.csv"),
                         actual_region=actual_region,
@@ -302,6 +303,33 @@ async def sp_launch_vllm_batch(
                     )
                 except Exception as db_err:
                     job_logger.warning(f"[MetricsDB] Push failed: {db_err}")
+
+                # Export timeseries to local experiment directory
+                try:
+                    import csv as _csv
+                    ts_data = db.get_timeseries(config.decision_id)
+                    if ts_data:
+                        ts_path = base_dir / "timeseries.csv"
+                        all_keys = list(ts_data[0].keys())
+                        with open(ts_path, "w", newline="") as tf:
+                            writer = _csv.DictWriter(tf, fieldnames=all_keys, extrasaction="ignore")
+                            writer.writeheader()
+                            for row in ts_data:
+                                writer.writerow(row)
+                        job_logger.info(f"[Job] Saved timeseries.csv ({len(ts_data)} samples) to {ts_path}")
+
+                        # Generate timeseries PDF
+                        try:
+                            from orca_server.plot_timeseries import plot_timeseries as _plot_ts
+                            pdf_path = base_dir / "timeseries.pdf"
+                            _metrics_csv = str(base_dir / "metrics.csv")
+                            _metrics_arg = _metrics_csv if (base_dir / "metrics.csv").exists() else None
+                            _plot_ts(str(ts_path), str(pdf_path), metrics_csv_path=_metrics_arg)
+                            job_logger.info(f"[Job] Generated timeseries.pdf at {pdf_path}")
+                        except Exception as pe:
+                            job_logger.warning(f"[Job] Timeseries plot failed: {pe}")
+                except Exception as te:
+                    job_logger.warning(f"[Job] Timeseries export failed: {te}")
 
             # Rename dir with success-/failed- prefix
             status = "success" if is_success else "failed"
@@ -406,6 +434,13 @@ async def launch_chunked_replicas(
     Each replica is an independent cluster that pulls chunks from the Redis queue
     via HTTP endpoints on the control plane.
     """
+    if not _cfg.ORCA_SERVER_URL:
+        raise ValueError(
+            "ORCA_SERVER_URL is not set. Chunked replicas need the control plane URL "
+            "to pull chunks. Start the server with --url or --tunnel, or set the "
+            "ORCA_SERVER_URL environment variable."
+        )
+
     if early_messages is None:
         early_messages = []
 
@@ -420,6 +455,7 @@ async def launch_chunked_replicas(
     )
     output_dir = Path(f"outputs/{job_dirname}")
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "replicas").mkdir(exist_ok=True)
     job_logger = setup_job_logger(config.decision_id, str(output_dir / "job.log"))
 
     if early_messages:

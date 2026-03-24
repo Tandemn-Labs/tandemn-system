@@ -24,5 +24,9 @@ PyYAML
 # Distributed chunk queue
 redis>=5.0
 
+# Plotting (timeseries PDF generation)
+matplotlib
+numpy
+
 # Solver dependencies (swap this line to use a different solver)
 -r LLM_placement_solver/requirements.txt

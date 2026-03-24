@@ -30,6 +30,7 @@ def _hours(value):
         return float(s[:-1]) / 60
     return float(s.rstrip("hH"))
 
+import math
 import os
 import re
 import sys
@@ -215,8 +216,28 @@ def upload_to_server(local_path: str, user: str = "orca-cli") -> str:
 
 
 def split_and_upload_chunks(input_file: str, chunk_size: int) -> list:
-    """Split a local JSONL file into chunks, upload each to S3, return chunk metadata."""
+    """Split a JSONL file into chunks, upload each to S3, return chunk metadata.
+
+    For S3 inputs, downloads to a temp file first.
+    """
     import tempfile as _tf
+
+    # If input is on S3, download to a local temp file first
+    tmp_download = None
+    if input_file.startswith("s3://"):
+        step(f"Downloading S3 input for chunking: {c(input_file, DIM)}")
+        tmp_download = _tf.NamedTemporaryFile(suffix='.jsonl', delete=False)
+        tmp_download.close()
+        resp = api("get", "/storage/download_s3", params={"path": input_file})
+        if resp.status_code != 200:
+            print(f"\n  {RED}Failed to download S3 input for chunking:{RESET} {resp.text}")
+            sys.exit(1)
+        with open(tmp_download.name, "wb") as df:
+            df.write(resp.content)
+        local_file = tmp_download.name
+    else:
+        local_file = input_file
+
     chunks = []
     current_lines = []
     chunk_idx = 0
@@ -230,7 +251,7 @@ def split_and_upload_chunks(input_file: str, chunk_size: int) -> list:
         os.unlink(tmp.name)
         return {"chunk_id": cid, "s3_input_path": s3_uri, "num_lines": len(lines)}
 
-    with open(input_file) as f:
+    with open(local_file) as f:
         for line in f:
             if not line.strip():
                 continue
@@ -241,6 +262,8 @@ def split_and_upload_chunks(input_file: str, chunk_size: int) -> list:
                 chunk_idx += 1
     if current_lines:
         chunks.append(_flush(current_lines, chunk_idx))
+    if tmp_download:
+        os.unlink(tmp_download.name)
     return chunks
 
 
@@ -1677,6 +1700,244 @@ def cmd_history(args):
     print()
 
 
+def cmd_ls(args):
+    """List all jobs with detailed info — one box per job, most recent first."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    STATUS_COLORS = {
+        "succeeded": GREEN,
+        "failed": RED,
+        "generating": CYAN,
+        "loading_model": BLUE,
+        "model_ready": BLUE,
+        "launching": YELLOW,
+        "queued": YELLOW,
+    }
+    INACTIVE = {"succeeded", "failed", "cancelled"}
+
+    resp = api("get", "/jobs", timeout=15)
+    if resp.status_code != 200:
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        return
+
+    jobs = resp.json()
+    if isinstance(jobs, dict):
+        jobs = jobs.get("jobs", [])
+
+    if not jobs:
+        print(LOGO)
+        header("JOBS")
+        print(f"\n  {DIM}No jobs found.{RESET}\n")
+        return
+
+    # Sort by created_at descending
+    jobs.sort(key=lambda j: j.get("created_at", 0), reverse=True)
+
+    # --- JSON mode ---
+    if getattr(args, "json", False):
+        print(json.dumps(jobs, indent=2, default=str))
+        return
+
+    # --- Enrichment ---
+    def enrich(job):
+        jid = job.get("job_id") or job.get("id", "")
+        info = {"replicas": [], "chunks": {}, "metrics": {}, "detail": {}}
+        try:
+            r = api("get", f"/job/{jid}", timeout=8)
+            if r.status_code == 200:
+                info["detail"] = r.json()
+        except Exception:
+            pass
+        try:
+            r = api("get", f"/job/{jid}/replicas", timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                info["replicas"] = data if isinstance(data, list) else data.get("replicas", [])
+        except Exception:
+            pass
+        try:
+            r = api("get", f"/job/{jid}/chunks/progress", timeout=8)
+            if r.status_code == 200:
+                info["chunks"] = r.json()
+        except Exception:
+            pass
+        try:
+            r = api("get", f"/job/{jid}/metrics", timeout=8)
+            if r.status_code == 200:
+                info["metrics"] = r.json()
+        except Exception:
+            pass
+        return jid, info
+
+    enrich_all = getattr(args, "all", False)
+    active_jobs = {(j.get("job_id") or j.get("id", "")): j for j in jobs
+                   if j.get("status") not in INACTIVE}
+    enrichment: dict = {}
+
+    jobs_to_enrich = jobs if enrich_all else [j for j in jobs if j.get("status") not in INACTIVE]
+    if jobs_to_enrich:
+        with ThreadPoolExecutor(max_workers=min(8, len(jobs_to_enrich))) as pool:
+            futs = {pool.submit(enrich, j): j for j in jobs_to_enrich}
+            for fut in as_completed(futs):
+                try:
+                    jid, info = fut.result()
+                    enrichment[jid] = info
+                except Exception:
+                    pass
+
+    # --- Render ---
+    print(LOGO)
+    header("JOBS")
+    print()
+
+    for job in jobs:
+        jid = job.get("job_id") or job.get("id", "")
+        short_id = jid[:24]
+        model = job.get("model_name", "?")
+        status = job.get("status", "unknown")
+        status_color = STATUS_COLORS.get(status, DIM)
+        num_lines = job.get("num_lines", 0) or 0
+        created_str = ""
+        if job.get("created_at"):
+            try:
+                created_str = datetime.fromtimestamp(job["created_at"]).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                created_str = str(job["created_at"])
+
+        # Progress
+        pct = 0.0
+        if job.get("progress") is not None:
+            pct = float(job["progress"])
+        elif status == "succeeded":
+            pct = 1.0
+
+        lines = []
+        status_str = c(status, status_color + BOLD)
+        lines.append(
+            f"{DIM}Status:{RESET}     {status_str:<28s} {DIM}Progress:{RESET} {bar(pct, 30)}"
+        )
+        prompts_str = f"{num_lines:,d}" if num_lines else "—"
+        lines.append(
+            f"{DIM}Prompts:{RESET}    {prompts_str:<20s}       {DIM}Created:{RESET}  {created_str}"
+        )
+
+        info = enrichment.get(jid, {})
+        enrich_all = getattr(args, "all", False)
+
+        if status not in INACTIVE or enrich_all:
+            # Instance / config from replicas or detail
+            replicas = info.get("replicas", [])
+            detail = info.get("detail", {})
+            # Try to get instance_type from first replica
+            instance = ""
+            if replicas:
+                instance = replicas[0].get("instance_type", "")
+            if not instance:
+                instance = detail.get("instance_type", "")
+            if instance:
+                lines.append(f"{DIM}Instance:{RESET}   {c(instance, WHITE+BOLD)}")
+
+            # Endpoint
+            endpoint = detail.get("endpoint_url", "")
+            if endpoint:
+                lines.append(f"{DIM}Endpoint:{RESET}   {endpoint}")
+
+            # Chunks (keys match /job/{id}/chunks/progress response)
+            chunks = info.get("chunks", {})
+            completed = chunks.get("completed", 0)
+            inflight = chunks.get("inflight", 0)
+            pending = chunks.get("pending", 0)
+            failed = chunks.get("failed", 0)
+            total_chunks = chunks.get("total", 0)
+            if total_chunks:
+                chunk_line = f"{DIM}Chunks:{RESET}     {c(str(completed), GREEN)}/{total_chunks} done"
+                if inflight:
+                    chunk_line += f"  {c(str(inflight), CYAN)} in-flight"
+                if pending:
+                    chunk_line += f"  {pending} pending"
+                if failed:
+                    chunk_line += f"  {c(str(failed), RED)} failed"
+                lines.append(chunk_line)
+
+            # Metrics (keys match /job/{id}/metrics response - MetricsSnapshot.to_dict())
+            metrics = info.get("metrics", {})
+            tps = metrics.get("avg_generation_throughput_toks_per_s")
+            kv = metrics.get("gpu_cache_usage_perc")
+            running = metrics.get("num_requests_running")
+            waiting = metrics.get("num_requests_waiting")
+            done_reqs = metrics.get("request_success_total")
+            if any(v is not None for v in [tps, kv, running, waiting]):
+                parts = []
+                if tps is not None:
+                    parts.append(f"{c(f'{tps:,.0f}', GREEN+BOLD)} tok/s")
+                if kv is not None:
+                    kv_pct = kv * 100 if kv <= 1 else kv
+                    parts.append(f"KV {kv_pct:.0f}%")
+                if running is not None:
+                    parts.append(f"{c(str(int(running)), CYAN)} running")
+                if waiting is not None and int(waiting) > 0:
+                    parts.append(f"{int(waiting)} waiting")
+                if done_reqs is not None and int(done_reqs) > 0:
+                    parts.append(f"{int(done_reqs)} done")
+                lines.append(f"{DIM}Metrics:{RESET}    {'   '.join(parts)}")
+
+                # GPU utilization if available
+                gpu_sm = metrics.get("gpu_sm_util_pct")
+                gpu_bw = metrics.get("gpu_mem_bw_util_pct")
+                if gpu_sm and gpu_sm > 0:
+                    gpu_parts = [f"GPU SM {gpu_sm:.0f}%"]
+                    if gpu_bw and gpu_bw > 0:
+                        gpu_parts.append(f"MemBW {gpu_bw:.0f}%")
+                    lines.append(f"{DIM}GPU:{RESET}        {'   '.join(gpu_parts)}")
+
+            # Replicas (keys match /job/{id}/replicas response)
+            if replicas:
+                lines.append(f"{DIM}Replicas:{RESET}")
+                PHASE_COLORS = {"running": GREEN, "generating": GREEN, "launching": YELLOW,
+                                "provisioned": CYAN, "completed": GREEN, "failed": RED,
+                                "dead": RED, "swapped_out": DIM}
+                for rep in replicas:
+                    rid = rep.get("replica_id", "?")
+                    # Short label: last part after last dash
+                    short_r = rid.rsplit("-", 1)[-1] if "-r" in rid else rid[-8:]
+                    phase = rep.get("phase", "?")
+                    phase_color = PHASE_COLORS.get(phase, DIM)
+                    region = rep.get("region") or ""
+                    market = rep.get("market") or ""
+                    inst = rep.get("instance_type") or ""
+                    lines.append(
+                        f"  {short_r:<6s} {c(phase, phase_color):<22s} {region:<14s} {market:<12s} {inst}"
+                    )
+
+        title = f"{short_id} {DIM}─{RESET} {model}"
+        print(box(lines, title=title))
+        print()
+
+    print(f"  {DIM}{len(jobs)} job(s) total{RESET}\n")
+
+
+def cmd_web(args):
+    """Open the Orca web dashboard in browser."""
+    import webbrowser
+    port = getattr(args, 'port', None)
+    if port:
+        url = f"http://localhost:{port}/dashboard"
+    else:
+        url = f"{ORCA_SERVER}/dashboard"
+    print(LOGO)
+    header("WEB DASHBOARD")
+    step(f"Dashboard URL: {c(url, CYAN+BOLD)}")
+    step(f"Opening in browser...")
+    print()
+    try:
+        webbrowser.open(url)
+    except Exception:
+        step(f"Could not open browser. Open manually: {url}")
+    step(f"{DIM}Dashboard connects to server via SSE for live updates.{RESET}")
+    step(f"{DIM}Press Ctrl+C to close.{RESET}")
+    print()
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
@@ -1783,6 +2044,15 @@ Examples:
     p_destroy.add_argument("job_id", nargs="?", help="Job ID to destroy clusters for")
     p_destroy.add_argument("--all", action="store_true", help="Destroy ALL Orca clusters")
 
+    # web
+    p_web = subparsers.add_parser("web", help="Open real-time web dashboard")
+    p_web.add_argument("--port", type=int, help="Override server port")
+
+    # ls
+    p_ls = subparsers.add_parser("ls", help="List all jobs with detailed info")
+    p_ls.add_argument("--all", "-a", action="store_true", help="Fetch metrics/replicas for completed jobs too")
+    p_ls.add_argument("--json", action="store_true", help="Output as JSON")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1804,6 +2074,8 @@ Examples:
         "stream": cmd_stream,
         "destroy": cmd_destroy,
         "swap": cmd_swap,
+        "web": cmd_web,
+        "ls": cmd_ls,
     }
 
     commands[args.command](args)
