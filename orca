@@ -355,6 +355,19 @@ def cmd_deploy(args):
         print(f"\n  {RED}Error:{RESET} Input file not found: {input_file}")
         sys.exit(1)
 
+    # ── Phase 0: Validate --s3-models path if provided ───────────────────
+    s3_model_path = getattr(args, 's3_models', None)
+    if s3_model_path:
+        step(f"Validating S3 model path: {c(s3_model_path, DIM)}")
+        import subprocess as _sp
+        _check = _sp.run(["aws", "s3", "ls", s3_model_path.rstrip("/") + "/"],
+                         capture_output=True, text=True, timeout=15)
+        if _check.returncode != 0 or not _check.stdout.strip():
+            print(f"\n  {RED}Error:{RESET} Model not found at {s3_model_path}")
+            print(f"  {DIM}Check the path and try again.{RESET}\n")
+            sys.exit(1)
+        step(f"Model found at S3 {c('OK', GREEN)}")
+
     # ── Phase 1: Parse input ─────────────────────────────────────────────
     if is_s3:
         step("Using S3 input (stats parsed by server)...")
@@ -424,7 +437,7 @@ def cmd_deploy(args):
         "slo_mode": "batch",
         "slo_deadline_hours": args.slo,
         "placement": "aws",
-        "s3_models": False,
+        "s3_model_path": getattr(args, 's3_models', None),
         "persist": args.persist,
         "prefer_spot": not args.on_demand,
         "hf_token": os.environ.get("HF_TOKEN", ""),
@@ -1973,6 +1986,8 @@ Examples:
     p_deploy.add_argument("--on-demand", action="store_true", help="Use on-demand instances instead of spot")
     p_deploy.add_argument("--replicas", type=int, default=None, help="Number of replica clusters (auto if omitted)")
     p_deploy.add_argument("--chunk-size", type=int, default=None, help="Lines per chunk for multi-replica (default: 1000)")
+    p_deploy.add_argument("--s3-models", type=str, default=None, metavar="S3_URI",
+                          help="S3 path to model weights (e.g. s3://tandemn-model-shards/hf-models/Qwen/Qwen3-32B)")
     p_deploy.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
 
     # plan

@@ -17,8 +17,6 @@ import yaml
 from orca_server import config as _cfg
 from orca_server.config import (
     HF_TOKEN,
-    S3_MODEL_BUCKET,
-    S3_MODEL_PREFIX,
     VLLM_PORT,
     YAML_OUTPUT,
 )
@@ -101,10 +99,8 @@ async def sp_launch_vllm_batch(
     s3_output_dir = f"{s3_base}/{job_dirname}"
 
     # Verify model exists in S3; fall back to HuggingFace if unavailable
-    if request.s3_models:
-        s3_model_path = (
-            f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}/"
-        )
+    if request.s3_model_path:
+        s3_model_path = request.s3_model_path.rstrip("/") + "/"
         s3_check = subprocess.run(
             ["aws", "s3", "ls", s3_model_path],
             capture_output=True,
@@ -113,10 +109,10 @@ async def sp_launch_vllm_batch(
         )
         if s3_check.returncode != 0 or not s3_check.stdout.strip():
             job_logger.warning(
-                f"[S3] Model '{request.model_name}' not found at {s3_model_path}. "
+                f"[S3] Model not found at {s3_model_path}. "
                 f"Falling back to HuggingFace download."
             )
-            request = request.model_copy(update={"s3_models": False})
+            request = request.model_copy(update={"s3_model_path": None})
         else:
             job_logger.info(f"[S3] Verified model exists at {s3_model_path}")
 
@@ -208,10 +204,12 @@ async def sp_launch_vllm_batch(
         yaml_data["envs"]["ORCA_API_KEY"] = _cfg.ORCA_API_KEY
 
         # Add S3 model weight mount if requested
-        if request.s3_models:
+        if request.s3_model_path:
+            s3_src = request.s3_model_path
+            s3_src = s3_src.rstrip("/")
             model_mount_path = f"/models/{request.model_name}"
             yaml_data["file_mounts"][model_mount_path] = {
-                "source": f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}",
+                "source": s3_src,
                 "mode": "COPY",
             }
 
@@ -240,11 +238,11 @@ async def sp_launch_vllm_batch(
         }
 
         # Add S3 model weight mount if requested
-        if request.s3_models:
+        if request.s3_model_path:
+            s3_src = request.s3_model_path
+            s3_src = s3_src.rstrip("/")
             model_mount_path = f"/models/{request.model_name}"
-            replace_yaml[f"file_mounts.{model_mount_path}.source"] = (
-                f"s3://{S3_MODEL_BUCKET}/{S3_MODEL_PREFIX}/{request.model_name}"
-            )
+            replace_yaml[f"file_mounts.{model_mount_path}.source"] = s3_src
             replace_yaml[f"file_mounts.{model_mount_path}.mode"] = "COPY"
 
         update_yaml_file("templates/vllm.yaml", replace_yaml, YAML_OUTPUT)
@@ -587,6 +585,15 @@ async def _launch_chunked_replica(
         "envs.AVG_OUTPUT_TOKENS": str(request.avg_output_tokens or 1024),
         "envs.VLLM_USE_V1": "1" if _cfg.supports_vllm_v1(config.instance_type) else "0",
     }
+
+    # Add S3 model weight mount if requested
+    if request.s3_model_path:
+        s3_src = request.s3_model_path
+        s3_src = s3_src.rstrip("/")
+        model_mount_path = f"/models/{request.model_name}"
+        replace_yaml[f"file_mounts.{model_mount_path}.source"] = s3_src
+        replace_yaml[f"file_mounts.{model_mount_path}.mode"] = "COPY"
+
     update_yaml_file("templates/vllm_chunked.yaml", replace_yaml, yaml_output)
 
     task = sky.Task.from_yaml(yaml_output)

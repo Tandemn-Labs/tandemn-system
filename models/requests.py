@@ -55,8 +55,8 @@ class BatchedRequest(BaseModel):
     # Use on-demand instances instead of spot (default: prefer spot)
     prefer_spot: Optional[bool] = True
 
-    # Load model weights from S3 instead of HuggingFace (faster, requires prior upload)
-    s3_models: Optional[bool] = False
+    # S3 URI to model weights — if set, loads from S3 instead of HuggingFace
+    s3_model_path: Optional[str] = None
     # HuggingFace token for gated models (Llama, etc.)
     hf_token: Optional[str] = None
     # OpenRouter API key for LLM-based placement solver
