@@ -770,10 +770,64 @@ def build_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Log collector — tee stdout/stderr into a buffer for forwarding
+# ---------------------------------------------------------------------------
+
+class LogCollector:
+    """Tee stdout/stderr into a buffer for forwarding to control plane."""
+
+    def __init__(self):
+        self._buffer: list = []
+        self._lock = threading.Lock()
+        self._orig_stdout = sys.stdout
+        self._orig_stderr = sys.stderr
+
+    def install(self):
+        sys.stdout = self._Tee(self._orig_stdout, self._buffer, self._lock)
+        sys.stderr = self._Tee(self._orig_stderr, self._buffer, self._lock)
+
+    def drain(self, max_lines: int = 500) -> list:
+        with self._lock:
+            lines = self._buffer[:max_lines]
+            self._buffer = self._buffer[max_lines:]
+            return lines
+
+    class _Tee:
+        def __init__(self, original, buffer, lock):
+            self._original = original
+            self._buffer = buffer
+            self._lock = lock
+
+        def write(self, data):
+            self._original.write(data)
+            if data and data.strip():
+                with self._lock:
+                    # Cap buffer at 5000 lines to prevent memory issues
+                    if len(self._buffer) < 5000:
+                        self._buffer.append({
+                            "ts": time.time(),
+                            "msg": data.rstrip("\n"),
+                        })
+
+        def flush(self):
+            self._original.flush()
+
+        def fileno(self):
+            return self._original.fileno()
+
+        def isatty(self):
+            return False
+
+        # Forward any other attribute access to the original
+        def __getattr__(self, name):
+            return getattr(self._original, name)
+
+
+# ---------------------------------------------------------------------------
 # Sidecar (same as single-cluster runner)
 # ---------------------------------------------------------------------------
 
-def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor"] = None, live_counter: Optional["LiveTokenCounter"] = None):
+def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor"] = None, live_counter: Optional["LiveTokenCounter"] = None, log_collector: Optional[LogCollector] = None):
     if not ORCA_URL:
         return
 
@@ -799,6 +853,8 @@ def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor
                         snap["gpu_sm_util_pct"] = round(sum(sm_vals) / len(sm_vals), 1)
                     if bw_vals:
                         snap["gpu_mem_bw_util_pct"] = round(sum(bw_vals) / len(bw_vals), 1)
+                    # Forward raw per-GPU metrics (sm, membw, mem_gb, mem_pct per GPU)
+                    snap["per_gpu"] = {k: v for k, v in latest.items() if k != "t"}
             # Inject live per-token counters (smooth, no completion-burst)
             if live_counter:
                 snap["live_gen_tokens_total"] = live_counter.generation_tokens
@@ -817,6 +873,10 @@ def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor
                     payload["total"] = prog.get("total", 0)
                 except Exception:
                     pass
+                if log_collector:
+                    log_lines = log_collector.drain()
+                    if log_lines:
+                        payload["log_lines"] = log_lines
                 requests.post(ingest_url, json=payload, headers=headers, timeout=5)
                 buffer = []
                 last_push = time.time()
@@ -827,7 +887,12 @@ def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor
 
     if buffer:
         try:
-            requests.post(ingest_url, json={"snapshots": buffer, "replica_id": REPLICA_ID}, headers=headers, timeout=5)
+            final_payload: dict = {"snapshots": buffer, "replica_id": REPLICA_ID}
+            if log_collector:
+                log_lines = log_collector.drain()
+                if log_lines:
+                    final_payload["log_lines"] = log_lines
+            requests.post(ingest_url, json=final_payload, headers=headers, timeout=5)
         except Exception:
             pass
 
@@ -836,7 +901,7 @@ def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor
 # vLLM server lifecycle
 # ---------------------------------------------------------------------------
 
-def start_vllm_server(args) -> subprocess.Popen:
+def start_vllm_server(args, log_collector: Optional[LogCollector] = None) -> subprocess.Popen:
     cmd = [
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", args.model,
@@ -855,10 +920,33 @@ def start_vllm_server(args) -> subprocess.Popen:
         cmd += ["--max-model-len", str(args.max_model_len)]
     env = os.environ.copy()
     env.setdefault("VLLM_LOG_STATS_INTERVAL", "1")
+
+    if log_collector:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=env, bufsize=1, text=True,
+        )
+
+        def _reader():
+            try:
+                for line in proc.stdout:
+                    log_collector._orig_stdout.write(line)
+                    log_collector._orig_stdout.flush()
+                    stripped = line.rstrip("\n")
+                    if stripped:
+                        with log_collector._lock:
+                            if len(log_collector._buffer) < 5000:
+                                log_collector._buffer.append({"ts": time.time(), "msg": stripped})
+            except Exception:
+                pass
+
+        threading.Thread(target=_reader, daemon=True, name="vllm-log-reader").start()
+        return proc
+
     return subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, env=env)
 
 
-def wait_for_server(timeout_sec: int = 600) -> float:
+def wait_for_server(timeout_sec: int = 1200) -> float:
     start = time.time()
     while time.time() - start < timeout_sec:
         try:
@@ -1378,9 +1466,13 @@ def main():
     job_start_time = time.time()
     job_start_timestamp = datetime.now().isoformat()
 
+    # 0. Install log collector (before vLLM so we capture startup output)
+    log_collector = LogCollector()
+    log_collector.install()
+
     # 1. Start vLLM server
     _report_phase("loading_model")
-    proc = start_vllm_server(args)
+    proc = start_vllm_server(args, log_collector=log_collector)
     try:
         print("[Runner] Waiting for vLLM server to be ready...")
         model_load_sec = wait_for_server()
@@ -1402,10 +1494,10 @@ def main():
         metrics_poller = MetricsPoller()
         live_counter = LiveTokenCounter()
 
-        # 5. Start sidecar (with GPU monitor + live token counter)
+        # 5. Start sidecar (with GPU monitor + live token counter + log collector)
         stop_sidecar = threading.Event()
         sidecar_thread = threading.Thread(
-            target=_sidecar_loop, args=(stop_sidecar, gpu_monitor, live_counter),
+            target=_sidecar_loop, args=(stop_sidecar, gpu_monitor, live_counter, log_collector),
             daemon=True, name="orca-sidecar",
         )
         sidecar_thread.start()
