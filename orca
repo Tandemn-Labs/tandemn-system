@@ -632,6 +632,12 @@ def cmd_plan(args):
             cph = cfg.get("cost_per_hour")
             if cph:
                 lines.append(f"{DIM}Est. cost:{RESET}   ${cph:.2f}/hr {DIM}(on-demand){RESET}")
+            eta = cfg.get("estimated_runtime_hours")
+            if eta is not None:
+                slo_ok = cfg.get("meets_slo", True)
+                eta_color = GREEN if slo_ok else RED
+                slo_label = "" if slo_ok else f"  {c('MISSES SLO', RED+BOLD)}"
+                lines.append(f"{DIM}Est. time:{RESET}   {c(f'{eta:.2f}h', eta_color)} / {args.slo:.1f}h SLO{slo_label}")
             if cfg.get("quota_warning"):
                 lines.append(f"{YELLOW}Quota:{RESET}       {cfg['quota_warning']}")
             print(box(lines, title="FEASIBILITY CHECK"))
@@ -673,7 +679,17 @@ def cmd_plan(args):
         cph = cfg.get("cost_per_hour")
         if cph:
             lines.append(f"{DIM}Est. cost:{RESET}   ${cph:.2f}/hr {DIM}(on-demand){RESET}")
+        eta = cfg.get("estimated_runtime_hours")
+        if eta is not None:
+            slo_ok = cfg.get("meets_slo", True)
+            eta_color = GREEN if slo_ok else RED
+            slo_label = "" if slo_ok else f"  {c('MISSES SLO', RED+BOLD)}"
+            lines.append(f"{DIM}Est. time:{RESET}   {c(f'{eta:.2f}h', eta_color)} / {args.slo:.1f}h SLO{slo_label}")
         print(box(lines, title=f"CONFIG {rank_label}"))
+        print()
+
+    if data.get("slo_warning"):
+        print(f"  {YELLOW}SLO warning:{RESET} {data['slo_warning']}")
         print()
 
     if args.verbose and data.get("solver_log"):

@@ -68,6 +68,7 @@ class SolverInput:
     output_length: int  # avg_output_tokens
     total_tokens: int  # num_requests * (input + output)
     slo_hours: float  # slo_deadline_hours
+    num_replicas: int = 1  # number of data-parallel replicas sharing the workload
 
     # Max token limits for feasibility checking (0 = use avg as fallback)
     max_input_tokens: int = 0
@@ -116,6 +117,10 @@ class SolverOutput:
     # Memory constraints - max context length this config can actually support
     # This should be passed to vLLM as --max-model-len to avoid KV cache OOM
     max_supported_context: int = 8192
+
+    # SLO
+    estimated_runtime_hours: float = 0.0
+    meets_slo: bool = True
 
     # Error info (if success=False)
     error_message: str = ""
@@ -433,6 +438,10 @@ class PlacementSolverAdapter:
                 max_num_seqs=input.max_num_seqs,
                 max_num_batched_tokens=input.max_num_batched_tokens,
                 gpu_memory_utilization=input.gpu_memory_utilization,
+                # SLO: pass per-replica workload and deadline so solver filters by feasibility
+                # Each replica processes total_tokens/num_replicas (work is split evenly)
+                total_tokens_to_process=input.total_tokens // max(1, input.num_replicas),
+                max_total_runtime_hours=input.slo_hours,
             )
 
             # Solve using homogeneous solver (fast enumeration)
@@ -516,6 +525,8 @@ class PlacementSolverAdapter:
                 gpus_per_instance=gpus_per_instance,
                 total_gpus=homo_cfg.get("instances_used", 1) * gpus_per_instance,
                 max_supported_context=max_context,
+                estimated_runtime_hours=sol.get("estimated_runtime_hours") or 0.0,
+                meets_slo=sol.get("meets_slo", True),
                 solve_log=getattr(solver, 'solve_log', ''),
             )
 
@@ -595,6 +606,7 @@ def create_solver_input_from_request(
     max_num_batched_tokens: int = 16384,
     gpu_memory_utilization: float = 0.90,
     log_level: str = "info",
+    num_replicas: int = 1,
 ) -> SolverInput:
     """
     Create SolverInput from Orca BatchedRequest fields.
@@ -611,6 +623,7 @@ def create_solver_input_from_request(
         max_num_batched_tokens: vLLM max tokens per prefill iteration (0 = fall back to max_model_len)
         gpu_memory_utilization: vLLM gpu_memory_utilization (0.0-1.0)
         log_level: Solver log level ("debug", "info", "warning")
+        num_replicas: Number of data-parallel replicas sharing the workload (for SLO calculation)
 
     Returns:
         SolverInput ready for solver
@@ -621,6 +634,7 @@ def create_solver_input_from_request(
         output_length=avg_output_tokens,
         total_tokens=num_requests * (avg_input_tokens + avg_output_tokens),
         slo_hours=slo_deadline_hours,
+        num_replicas=max(1, num_replicas),
         max_input_tokens=max_input_tokens,
         max_output_tokens=max_output_tokens,
         max_num_seqs=max_num_seqs,
