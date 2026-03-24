@@ -461,6 +461,7 @@ class RooflineAWSAllocation(VPCMagic):
             max_num_batched_tokens=max_num_batched_tokens,
             gpu_memory_utilization=gpu_memory_utilization,
             log_level=log_level,
+            num_replicas=req.replicas or 1,
         )
 
         # Run solver
@@ -502,6 +503,8 @@ class RooflineAWSAllocation(VPCMagic):
             throughput_tokens_per_sec=result.throughput_tokens_per_sec,
             cost_per_hour=result.cost_per_hour,
             cost_per_million_tokens=result.cost_per_million_tokens,
+            estimated_runtime_hours=result.estimated_runtime_hours or None,
+            meets_slo=result.meets_slo,
         )
 
     def _fallback_config(self, req: BatchedRequest) -> MagicOutput:
@@ -608,6 +611,7 @@ class RooflineAWSAllocation(VPCMagic):
             max_num_batched_tokens=max_num_batched_tokens,
             gpu_memory_utilization=gpu_memory_utilization,
             log_level=log_level,
+            num_replicas=req.replicas or 1,
         )
 
         # Run solver for multiple solutions
@@ -640,6 +644,8 @@ class RooflineAWSAllocation(VPCMagic):
                 throughput_tokens_per_sec=result.throughput_tokens_per_sec,
                 cost_per_hour=result.cost_per_hour,
                 cost_per_million_tokens=result.cost_per_million_tokens,
+                estimated_runtime_hours=result.estimated_runtime_hours or None,
+                meets_slo=result.meets_slo,
             )
             outputs.append(output)
             logger.info(

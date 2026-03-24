@@ -1162,6 +1162,13 @@ async def submit_batch(request: BatchedRequest):
         msg = f"[Placement] Fallbacks: {len(configs) - 1}"
         logger.info(msg)
         early_messages.append(("INFO", msg))
+    if configs[0].estimated_runtime_hours is not None:
+        eta = configs[0].estimated_runtime_hours
+        slo_ok = configs[0].meets_slo
+        slo_str = "meets SLO" if slo_ok else "MISSES SLO"
+        msg = f"[SLO] ETA: {eta:.2f}h / deadline: {request.slo_deadline_hours:.1f}h — {slo_str}"
+        logger.info(msg)
+        early_messages.append(("WARNING" if not slo_ok else "INFO", msg))
 
     # Pre-launch check: ensure max_model_len can accommodate the longest prompt
     max_output = request.max_output_tokens or request.avg_output_tokens
@@ -1253,7 +1260,7 @@ async def submit_batch(request: BatchedRequest):
     )
 
     if success:
-        return {
+        resp = {
             "status": "launched",
             "job_id": used_config.decision_id,
             "config": {
@@ -1269,6 +1276,11 @@ async def submit_batch(request: BatchedRequest):
             "quota_warning": quota_warning,
             "message": f"Job submitted. Check progress at GET /job/{used_config.decision_id}",
         }
+        if used_config.estimated_runtime_hours is not None:
+            resp["estimated_runtime_hours"] = round(used_config.estimated_runtime_hours, 2)
+            resp["meets_slo"] = used_config.meets_slo
+            resp["slo_deadline_hours"] = request.slo_deadline_hours
+        return resp
     else:
         return {
             "status": "error",
@@ -1397,6 +1409,10 @@ async def test_placement(request: BatchedRequest):
                 cfg["cost_per_hour"] = mo.cost_per_hour
             if mo.cost_per_million_tokens is not None:
                 cfg["cost_per_million_tokens"] = mo.cost_per_million_tokens
+            if mo.estimated_runtime_hours is not None:
+                cfg["estimated_runtime_hours"] = round(mo.estimated_runtime_hours, 2)
+            if mo.meets_slo is not None:
+                cfg["meets_slo"] = mo.meets_slo
             configs.append(cfg)
     else:
         return {
@@ -1416,6 +1432,15 @@ async def test_placement(request: BatchedRequest):
                 f"{required_context} exceeds max_model_len ({configs[0]['max_model_len']})"
             )
 
+    # SLO warning
+    slo_warning = None
+    if configs and configs[0].get("meets_slo") is False:
+        eta = configs[0].get("estimated_runtime_hours", "?")
+        slo_warning = (
+            f"No config meets the {request.slo_deadline_hours:.1f}h SLO. "
+            f"Best estimate: {eta}h. Consider adding more replicas or relaxing the deadline."
+        )
+
     response = {
         "status": "ok",
         "solver": use_solver,
@@ -1428,6 +1453,8 @@ async def test_placement(request: BatchedRequest):
     }
     if context_warning:
         response["context_warning"] = context_warning
+    if slo_warning:
+        response["slo_warning"] = slo_warning
     if solver_log:
         response["solver_log"] = solver_log
         os.makedirs("temp", exist_ok=True)
