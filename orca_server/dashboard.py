@@ -650,6 +650,12 @@ def _build_dashboard_payload(app_state) -> dict:
         for job_id, rec in job_items:
             try:
                 instance_type = rec.state.instance_types
+                # Fall back to replica instance_type if job-level isn't set yet
+                if not instance_type and cluster_mgr:
+                    for _rid, rs in cluster_mgr.get_replica_states(job_id).items():
+                        if rs.get("instance_type"):
+                            instance_type = rs["instance_type"]
+                            break
                 if not instance_type:
                     continue
                 region = rec.state.spec.region or "us-east-1"
