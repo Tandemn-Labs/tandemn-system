@@ -192,7 +192,7 @@ body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--tex
   </div>
 </div>
 <div class="wrap" id="wrap">
-  <div class="empty-state" id="empty">Connecting to Orca server...</div>
+  <div class="empty-state" id="empty">No jobs yet. Deploy a model to get started.</div>
 </div>
 <script>
 (function(){
@@ -286,7 +286,8 @@ function buildStructure() {
 function render(data) {
   const jobs = (data.jobs || []).slice().sort((a,b) => (b.created_at||0) - (a.created_at||0));
   if (!jobs.length) {
-    if (structureBuilt) { document.getElementById('wrap').innerHTML = '<div class="empty-state">No jobs yet. Deploy a model to get started.</div>'; structureBuilt = false; }
+    document.getElementById('wrap').innerHTML = '<div class="empty-state">No jobs yet. Deploy a model to get started.</div>';
+    structureBuilt = false;
     chartMgr.cleanup(new Set());
     return;
   }
