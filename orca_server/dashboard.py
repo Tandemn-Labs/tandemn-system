@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # SkyPilot price cache: (instance_type, market, region) -> (price_usd, cached_at)
 _price_cache: dict[tuple, tuple[float, float]] = {}
 _PRICE_CACHE_TTL = 300  # 5 min
+_peak_cost: dict[str, dict] = {}  # job_id -> last known cost dict (persists after completion)
 
 # Synthetic event log
 _event_log: deque[dict] = deque(maxlen=200)
@@ -818,15 +819,27 @@ def _build_dashboard_payload(app_state) -> dict:
                 progress = _enriched_progress.get(job_id, rec.state.progress_frac)
                 projected = accrued / progress if progress > 0.01 else None
                 eta_sec = ((1.0 - progress) / progress) * total_hours * 3600 if progress > 0.01 else None
-                payload["cost"][job_id] = {
+                cost_data = {
                     "price_per_hour": round(price, 4),
                     "accrued_usd": round(accrued, 4),
                     "projected_total_usd": round(projected, 4) if projected else None,
                     "eta_sec": round(eta_sec) if eta_sec else None,
                     "num_running_replicas": num_running,
                 }
+                # Persist peak cost so it survives after replicas stop
+                if accrued > 0:
+                    _peak_cost[job_id] = cost_data
+                elif job_id in _peak_cost:
+                    cost_data = _peak_cost[job_id]
+                    cost_data["num_running_replicas"] = 0
+                    cost_data["eta_sec"] = None
+                payload["cost"][job_id] = cost_data
             except Exception:
                 logger.debug("dashboard: cost error for %s", job_id, exc_info=True)
+        # Fall back to peak cost for jobs where instance_type wasn't found
+        for job_id, _rec in job_items:
+            if job_id not in payload["cost"] and job_id in _peak_cost:
+                payload["cost"][job_id] = _peak_cost[job_id]
 
         # Synthetic events
         for job_id, rec in job_items:
