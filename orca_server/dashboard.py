@@ -723,6 +723,22 @@ def _build_dashboard_payload(app_state) -> dict:
                 except Exception:
                     logger.debug("dashboard: metrics error for %s", job_id, exc_info=True)
 
+        # Enrich progress with per-request granularity from metrics
+        _enriched_progress = {}
+        for job_id, rec in job_items:
+            base = rec.state.progress_frac
+            m = payload["metrics"].get(job_id, {})
+            rst = m.get("request_success_total", 0)
+            nl = rec.state.spec.num_lines or 0
+            if rst > 0 and nl > 0 and base < 1.0:
+                _enriched_progress[job_id] = max(base, min(rst / nl, 0.99))
+            else:
+                _enriched_progress[job_id] = base
+        # Patch jobs array with enriched progress
+        for j in payload["jobs"]:
+            if j["job_id"] in _enriched_progress:
+                j["progress"] = round(_enriched_progress[j["job_id"]], 4)
+
         # Chunks
         if redis_ok:
             try:
@@ -799,7 +815,7 @@ def _build_dashboard_payload(app_state) -> dict:
                     total_hours = (now - rec.state.submitted_at) / 3600
                     num_running = getattr(rec, "num_replicas", 1) or 1
                 accrued = price * total_hours
-                progress = rec.state.progress_frac
+                progress = _enriched_progress.get(job_id, rec.state.progress_frac)
                 projected = accrued / progress if progress > 0.01 else None
                 eta_sec = ((1.0 - progress) / progress) * total_hours * 3600 if progress > 0.01 else None
                 payload["cost"][job_id] = {
