@@ -342,6 +342,17 @@ def _poll_replica_launch(job_id, num_replicas):
 
 
 # ─── Commands ────────────────────────────────────────────────────────────────
+def _slo_line(cfg: dict, slo_hours: float) -> str | None:
+    """Format SLO ETA line for display boxes. Returns None if no ETA available."""
+    eta = cfg.get("estimated_runtime_hours")
+    if eta is None:
+        return None
+    slo_ok = cfg.get("meets_slo", True)
+    eta_color = GREEN if slo_ok else RED
+    slo_label = "" if slo_ok else f"  {c('MISSES SLO', RED+BOLD)}"
+    return f"{DIM}Est. time:{RESET}   {c(f'{eta:.2f}h', eta_color)} / {slo_hours:.1f}h SLO{slo_label}"
+
+
 def cmd_deploy(args):
     """Deploy a model for batch inference."""
     print(LOGO)
@@ -668,12 +679,9 @@ def cmd_plan(args):
             cph = cfg.get("cost_per_hour")
             if cph:
                 lines.append(f"{DIM}Est. cost:{RESET}   ${cph:.2f}/hr {DIM}(on-demand){RESET}")
-            eta = cfg.get("estimated_runtime_hours")
-            if eta is not None:
-                slo_ok = cfg.get("meets_slo", True)
-                eta_color = GREEN if slo_ok else RED
-                slo_label = "" if slo_ok else f"  {c('MISSES SLO', RED+BOLD)}"
-                lines.append(f"{DIM}Est. time:{RESET}   {c(f'{eta:.2f}h', eta_color)} / {args.slo:.1f}h SLO{slo_label}")
+            slo = _slo_line(cfg, args.slo)
+            if slo:
+                lines.append(slo)
             if cfg.get("quota_warning"):
                 lines.append(f"{YELLOW}Quota:{RESET}       {cfg['quota_warning']}")
             print(box(lines, title="FEASIBILITY CHECK"))
@@ -715,12 +723,9 @@ def cmd_plan(args):
         cph = cfg.get("cost_per_hour")
         if cph:
             lines.append(f"{DIM}Est. cost:{RESET}   ${cph:.2f}/hr {DIM}(on-demand){RESET}")
-        eta = cfg.get("estimated_runtime_hours")
-        if eta is not None:
-            slo_ok = cfg.get("meets_slo", True)
-            eta_color = GREEN if slo_ok else RED
-            slo_label = "" if slo_ok else f"  {c('MISSES SLO', RED+BOLD)}"
-            lines.append(f"{DIM}Est. time:{RESET}   {c(f'{eta:.2f}h', eta_color)} / {args.slo:.1f}h SLO{slo_label}")
+        slo = _slo_line(cfg, args.slo)
+        if slo:
+            lines.append(slo)
         print(box(lines, title=f"CONFIG {rank_label}"))
         print()
 
@@ -883,7 +888,10 @@ def cmd_progress(args):
 
 
 def cmd_status(args):
-    """Show status of all jobs."""
+    """Show status of all jobs. Use -v for rich view with replicas, chunks, and GPU util."""
+    if getattr(args, "verbose", False):
+        return cmd_ls(args)
+
     print(LOGO)
     header("JOB STATUS")
 
@@ -1766,32 +1774,27 @@ def cmd_ls(args):
     def enrich(job):
         jid = job.get("job_id") or job.get("id", "")
         info = {"replicas": [], "chunks": {}, "metrics": {}, "detail": {}}
-        try:
-            r = api("get", f"/job/{jid}", timeout=8)
-            if r.status_code == 200:
-                info["detail"] = r.json()
-        except Exception:
-            pass
-        try:
-            r = api("get", f"/job/{jid}/replicas", timeout=8)
-            if r.status_code == 200:
-                data = r.json()
-                info["replicas"] = data if isinstance(data, list) else data.get("replicas", [])
-        except Exception:
-            pass
-        try:
-            r = api("get", f"/job/{jid}/chunks/progress", timeout=8)
-            if r.status_code == 200:
-                info["chunks"] = r.json()
-        except Exception:
-            pass
+        for label, path, key in [
+            ("details", f"/job/{jid}", "detail"),
+            ("replicas", f"/job/{jid}/replicas", "replicas"),
+            ("chunks", f"/job/{jid}/chunks/progress", "chunks"),
+        ]:
+            try:
+                r = api("get", path, timeout=8)
+                if r.status_code == 200:
+                    data = r.json()
+                    if key == "replicas":
+                        data = data if isinstance(data, list) else data.get("replicas", [])
+                    info[key] = data
+            except Exception as e:
+                print(f"  {DIM}Could not enrich {label} for {jid}: {e}{RESET}", file=sys.stderr)
         if verbose:
             try:
                 r = api("get", f"/job/{jid}/metrics", timeout=8)
                 if r.status_code == 200:
                     info["metrics"] = r.json()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  {DIM}Could not enrich metrics for {jid}: {e}{RESET}", file=sys.stderr)
         return jid, info
 
     enrich_all = getattr(args, "all", False)
@@ -1805,8 +1808,8 @@ def cmd_ls(args):
                 try:
                     jid, info = fut.result()
                     enrichment[jid] = info
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"  {DIM}Enrichment failed: {e}{RESET}", file=sys.stderr)
 
     # --- Helpers ---
     def _status_display(status):
@@ -2040,7 +2043,10 @@ Examples:
     p_progress.add_argument("job_id", nargs="?", help="Job ID to monitor (optional)")
 
     # status
-    subparsers.add_parser("status", help="Show status of all jobs")
+    p_status = subparsers.add_parser("status", help="Show status of all jobs")
+    p_status.add_argument("-v", "--verbose", action="store_true", help="Rich view with replicas, chunks, GPU util")
+    p_status.add_argument("--all", action="store_true", help="Enrich completed/failed jobs too (verbose mode)")
+    p_status.add_argument("--json", action="store_true", help="Output raw JSON")
 
     # logs
     p_logs = subparsers.add_parser("logs", help="Stream logs from a job cluster")
@@ -2097,11 +2103,6 @@ Examples:
     p_web.add_argument("--port", type=int, help="Override server port")
 
     # ls
-    p_ls = subparsers.add_parser("ls", help="List all jobs with detailed info")
-    p_ls.add_argument("--all", "-a", action="store_true", help="Fetch metrics/replicas for completed jobs too")
-    p_ls.add_argument("--json", action="store_true", help="Output as JSON")
-    p_ls.add_argument("-v", "--verbose", action="store_true", help="Show detailed metrics, chunks, and replica info")
-
     args = parser.parse_args()
 
     if not args.command:
@@ -2124,7 +2125,6 @@ Examples:
         "destroy": cmd_destroy,
         "swap": cmd_swap,
         "web": cmd_web,
-        "ls": cmd_ls,
     }
 
     commands[args.command](args)

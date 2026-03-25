@@ -835,6 +835,16 @@ async def _assemble_output(job_id: str):
         get_job_tracker().update_status(job_id, "succeeded")
         get_job_tracker().update_progress(job_id, 1.0)
         cm.cleanup_job(job_id)
+
+        # Clean up per-replica state to prevent memory leaks
+        for key in list(_ingest_prev_snaps):
+            if key.startswith(f"{job_id}:"):
+                del _ingest_prev_snaps[key]
+        with _replica_log_locks_lock:
+            for key in list(_replica_log_locks):
+                if key.startswith(f"{job_id}:") or key.startswith(job_id):
+                    del _replica_log_locks[key]
+
         job_logger.info(f"[Assembly] Job {job_id} completed successfully")
 
         # Rename directory with success-/partial- prefix (after all writes are done)
