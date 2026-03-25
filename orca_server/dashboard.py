@@ -163,7 +163,12 @@ body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--tex
 .charts-toggle{padding:4px 14px;border-top:1px solid var(--border);flex-shrink:0}
 .charts-toggle button{background:none;border:1px solid var(--border);border-radius:3px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;font-size:9px;padding:2px 8px;cursor:pointer}
 .charts-toggle button:hover{border-color:var(--cyan);color:var(--text)}
-.charts-wrap{border-top:1px solid var(--border);overflow-y:auto;max-height:450px}
+.charts-wrap{border-top:1px solid var(--border);overflow-y:auto;min-height:100px}
+/* Splitter handles */
+.split-v{width:5px;cursor:col-resize;background:transparent;flex-shrink:0;position:relative;z-index:10}
+.split-v:hover,.split-v.active{background:var(--cyan);opacity:0.3}
+.split-h{height:5px;cursor:row-resize;background:transparent;flex-shrink:0;position:relative;z-index:10}
+.split-h:hover,.split-h.active{background:var(--cyan);opacity:0.3}
 .charts-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.5rem;padding:0.5rem}
 .chart-wrap{background:var(--bg);border-radius:6px;padding:0.5rem;height:180px}
 .chart-wrap canvas{width:100%!important;height:100%!important}
@@ -233,22 +238,86 @@ function setConn(state) {
   l.textContent = {connected:'Connected',disconnected:'Disconnected',connecting:'Connecting...'}[state]||state;
 }
 
-/* ---- Chart infrastructure (kept from original) ---- */
+/* ---- Linked crosshair plugin ---- */
+let _syncingCharts = false;
+const linkedCrosshairPlugin = {
+  id: 'linkedCrosshair',
+  afterEvent(chart, args) {
+    if (_syncingCharts) return;
+    const evt = args.event;
+    if (evt.type === 'mousemove' || evt.type === 'mouseout') {
+      _syncingCharts = true;
+      const allCharts = Object.values(Chart.instances || {});
+      for (const other of allCharts) {
+        if (other === chart || other.canvas.offsetParent === null) continue;
+        if (evt.type === 'mouseout') {
+          other.setActiveElements([]);
+          other.tooltip.setActiveElements([], {x:0,y:0});
+          other.update('none');
+          continue;
+        }
+        // Map x pixel position from source chart to target chart
+        const srcArea = chart.chartArea;
+        const dstArea = other.chartArea;
+        if (!srcArea || !dstArea) continue;
+        const pctX = (evt.x - srcArea.left) / (srcArea.right - srcArea.left);
+        if (pctX < 0 || pctX > 1) continue;
+        const dstX = dstArea.left + pctX * (dstArea.right - dstArea.left);
+        const dstY = (dstArea.top + dstArea.bottom) / 2;
+        const elements = other.getElementsAtEventForMode({x: dstX, y: dstY}, 'index', {intersect: false}, false);
+        other.setActiveElements(elements.map(e => ({datasetIndex: e.datasetIndex, index: e.index})));
+        other.tooltip.setActiveElements(elements, {x: dstX, y: dstY});
+        other.update('none');
+      }
+      _syncingCharts = false;
+    }
+  }
+};
+Chart.register(linkedCrosshairPlugin);
+
+/* ---- Chart infrastructure ---- */
 const chartDefaults = {responsive:true,maintainAspectRatio:false,animation:false,
+  interaction:{mode:'index',intersect:false},
   scales:{x:{grid:{color:'#30363d'},ticks:{color:'#8b949e',font:{size:9}}},y:{grid:{color:'#30363d'},ticks:{color:'#8b949e',font:{size:9}},beginAtZero:true}},
-  plugins:{legend:{labels:{color:'#e6edf3',font:{size:9}},position:'top'}}};
+  plugins:{
+    legend:{labels:{color:'#e6edf3',font:{size:9}},position:'top'},
+    tooltip:{enabled:true,mode:'index',intersect:false,backgroundColor:'#161b22',borderColor:'#30363d',borderWidth:1,titleColor:'#8b949e',bodyColor:'#e6edf3',titleFont:{size:9},bodyFont:{size:9},padding:6,displayColors:true,boxWidth:8,boxHeight:8,
+      callbacks:{title:function(items){if(!items.length)return'';return 't+'+items[0].label+'s';}}
+    }
+  }};
 function mOpts(e){return JSON.parse(JSON.stringify(Object.assign({},chartDefaults,e||{})));}
 function pScale(){return{y:{grid:{color:'#30363d'},ticks:{color:'#8b949e',font:{size:9}},beginAtZero:true,max:100}};}
 const CDEFS=[
-  {key:'tp',label:'Throughput (10s avg)',type:'line',datasets:[{label:'Gen tok/s',borderColor:'#22d3ee',backgroundColor:'rgba(34,211,238,0.1)',field:'avg_generation_throughput_toks_per_s'},{label:'Prompt tok/s',borderColor:'#57ab5a',backgroundColor:'rgba(87,171,90,0.1)',field:'avg_prompt_throughput_toks_per_s'}]},
+  {key:'tp',label:'Throughput (10s avg)',type:'line',datasets:[{label:'Gen tok/s',borderColor:'#22d3ee',backgroundColor:'rgba(34,211,238,0.1)',field:'avg_generation_throughput_toks_per_s',yAxisID:'y'},{label:'Prompt tok/s',borderColor:'#57ab5a',backgroundColor:'rgba(87,171,90,0.1)',field:'avg_prompt_throughput_toks_per_s',yAxisID:'y1'}],opts:{scales:{y:{grid:{color:'#30363d'},ticks:{color:'#22d3ee',font:{size:9}},beginAtZero:true,position:'left',title:{display:true,text:'Gen tok/s',color:'#22d3ee',font:{size:8}}},y1:{grid:{drawOnChartArea:false},ticks:{color:'#57ab5a',font:{size:9}},beginAtZero:true,position:'right',title:{display:true,text:'Prompt tok/s',color:'#57ab5a',font:{size:8}}}}}},
   {key:'kv',label:'KV Cache',type:'line',datasets:[{label:'KV %',borderColor:'#c98c5a',backgroundColor:'rgba(201,140,90,0.25)',fill:true,field:'gpu_cache_usage_perc',scale:100}],opts:{scales:pScale()}},
   {key:'sched',label:'Scheduler',type:'line',datasets:[{label:'Running',borderColor:'#22d3ee',backgroundColor:'rgba(34,211,238,0.25)',fill:true,field:'num_requests_running'},{label:'Waiting',borderColor:'#c98c5a',backgroundColor:'rgba(201,140,90,0.25)',fill:true,field:'num_requests_waiting'},{label:'Swapped',borderColor:'#8b949e',backgroundColor:'rgba(139,148,158,0.25)',fill:true,field:'num_requests_swapped'}]},
   {key:'gpu',label:'GPU Utilization',type:'line',datasets:[{label:'SM %',borderColor:'#6cb6ff',backgroundColor:'rgba(108,182,255,0.1)',field:'gpu_sm_util_pct'},{label:'MemBW %',borderColor:'#57ab5a',backgroundColor:'rgba(87,171,90,0.1)',field:'gpu_mem_bw_util_pct'}],opts:{scales:pScale()}},
   {key:'lat',label:'Latency (ms)',type:'line',datasets:[{label:'TTFT p50',borderColor:'#6cb6ff',backgroundColor:'rgba(108,182,255,0.1)',field:'ttft_ms_p50'},{label:'TTFT p95',borderColor:'#3b82f6',borderDash:[4,2],field:'ttft_ms_p95'},{label:'TPOT p50',borderColor:'#c98c5a',backgroundColor:'rgba(201,140,90,0.1)',field:'tpot_ms_p50'},{label:'TPOT p95',borderColor:'#f97316',borderDash:[4,2],field:'tpot_ms_p95'}]},
   {key:'comp',label:'Completions',type:'line',datasets:[{label:'Success',borderColor:'#57ab5a',backgroundColor:'rgba(87,171,90,0.1)',field:'request_success_total'},{label:'Preemptions',borderColor:'#e5534b',backgroundColor:'rgba(229,83,75,0.1)',field:'num_preemptions_total'}]},
 ];
+/* Vertical crosshair line drawn on hover */
+const verticalLinePlugin = {
+  id: 'verticalLine',
+  afterDraw(chart) {
+    if (chart.tooltip._active && chart.tooltip._active.length) {
+      const x = chart.tooltip._active[0].element.x;
+      const ctx = chart.ctx;
+      const area = chart.chartArea;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(x, area.top);
+      ctx.lineTo(x, area.bottom);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(139,148,158,0.4)';
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+};
+Chart.register(verticalLinePlugin);
+
 class ChartMgr{constructor(){this.c={}}
-  getOrCreate(jid,def,cid){if(!this.c[jid])this.c[jid]={};if(this.c[jid][def.key])return this.c[jid][def.key];const cv=document.getElementById(cid);if(!cv)return null;const o=mOpts(def.opts);o.plugins=o.plugins||{};o.plugins.legend=o.plugins.legend||{};o.plugins.legend.labels={color:'#e6edf3',font:{size:9}};o.plugins.legend.position='top';o.plugins.title={display:true,text:def.label,color:'#8b949e',font:{size:10}};const ds=def.datasets.map(d=>({label:d.label,borderColor:d.borderColor,backgroundColor:d.backgroundColor||'transparent',borderWidth:1.5,borderDash:d.borderDash||[],tension:0.3,pointRadius:0,fill:d.fill||false,data:[]}));const ch=new Chart(cv.getContext('2d'),{type:def.type||'line',data:{labels:[],datasets:ds},options:o});this.c[jid][def.key]=ch;return ch}
+  getOrCreate(jid,def,cid){if(!this.c[jid])this.c[jid]={};if(this.c[jid][def.key])return this.c[jid][def.key];const cv=document.getElementById(cid);if(!cv)return null;const o=mOpts(def.opts);o.plugins=o.plugins||{};o.plugins.legend=o.plugins.legend||{};o.plugins.legend.labels={color:'#e6edf3',font:{size:9}};o.plugins.legend.position='top';o.plugins.title={display:true,text:def.label,color:'#8b949e',font:{size:10}};o.hover={mode:'index',intersect:false};const ds=def.datasets.map(d=>{const s={label:d.label,borderColor:d.borderColor,backgroundColor:d.backgroundColor||'transparent',borderWidth:1.5,borderDash:d.borderDash||[],tension:0.3,pointRadius:0,pointHoverRadius:4,fill:d.fill||false,data:[]};if(d.yAxisID)s.yAxisID=d.yAxisID;return s});const ch=new Chart(cv.getContext('2d'),{type:def.type||'line',data:{labels:[],datasets:ds},options:o});this.c[jid][def.key]=ch;return ch}
   update(jid,ts){if(!ts||!ts.length)return;const t0=ts[0].timestamp;const lbls=ts.map(p=>Math.round(p.timestamp-t0));for(const def of CDEFS){const ch=this.getOrCreate(jid,def,'chart-'+def.key+'-'+sid(jid));if(!ch)continue;ch.data.labels=lbls;for(let i=0;i<def.datasets.length;i++){const dd=def.datasets[i],sc=dd.scale||1;ch.data.datasets[i].data=ts.map(p=>{const v=p[dd.field];return v!=null?v*sc:null})}ch.update('none')}}
   cleanup(ids){for(const j in this.c){if(!ids.has(j)){for(const k in this.c[j])this.c[j][k].destroy();delete this.c[j]}}}}
 const chartMgr = new ChartMgr();
@@ -260,8 +329,9 @@ function buildStructure() {
   const w = document.getElementById('wrap');
   const e = document.getElementById('empty');
   if (e) e.remove();
-  w.innerHTML = '<div class="top-sec">'
-    + '<div class="wl-col"><div class="sec-hdr">workload</div><div class="wl-block" id="wl-block"></div></div>'
+  w.innerHTML = '<div class="top-sec" id="top-sec">'
+    + '<div class="wl-col" id="wl-col"><div class="sec-hdr">workload</div><div class="wl-block" id="wl-block"></div></div>'
+    + '<div class="split-v" id="split-top-v"></div>'
     + '<div class="chain-col"><div class="sec-hdr">chain</div>'
     + '<div class="chain-inner"><div class="chain-meta"><span id="chain-label" style="color:var(--text-muted)">initializing...</span><span class="chain-pct" id="chain-pct">0%</span><span class="chain-eta" id="chain-eta"></span></div>'
     + '<div class="prog-outer"><div class="prog-fill" id="prog-fill"></div></div>'
@@ -270,8 +340,10 @@ function buildStructure() {
     + '<div class="cost-cell"><span class="cost-lbl">projected total</span><span class="cost-val" id="c-proj">\u2014</span><span class="cost-sub" id="c-proj-sub">at current rate</span></div>'
     + '<div class="cost-cell"><span class="cost-lbl">time to complete</span><span class="cost-val" id="c-ttc">\u2014</span><span class="cost-sub" id="c-ttc-sub">projected</span></div>'
     + '<div class="cost-cell"><span class="cost-lbl">throughput</span><span class="cost-val" id="c-tps">\u2014</span><span class="cost-sub" id="c-tps-sub">10s avg</span></div></div></div></div>'
-    + '<div class="bot-sec"><div class="res-col"><div class="sec-hdr">resource pool</div><div class="res-list" id="res-list"></div>'
+    + '<div class="split-h" id="split-mid-h"></div>'
+    + '<div class="bot-sec" id="bot-sec"><div class="res-col" id="res-col"><div class="sec-hdr">resource pool</div><div class="res-list" id="res-list"></div>'
     + '<div class="job-sel"><div class="sec-hdr">jobs</div><div class="jbtns" id="jbtns"></div></div></div>'
+    + '<div class="split-v" id="split-bot-v"></div>'
     + '<div class="log-col"><div class="sec-hdr">event log</div><div class="log-area" id="log-area"></div></div></div>'
     + '<div class="charts-toggle" id="charts-toggle"><button id="charts-btn">Show Charts</button></div>'
     + '<div class="charts-wrap" id="charts-wrap" style="display:none"></div>';
@@ -280,6 +352,47 @@ function buildStructure() {
     document.getElementById('charts-wrap').style.display = chartsVisible ? '' : 'none';
     this.textContent = chartsVisible ? 'Hide Charts' : 'Show Charts';
   };
+  // Tmux-style splitter drag logic
+  (function(){
+    let drag = null; // {type:'v'|'h', el, startPos, panelA, panelB, startA, startB}
+    function onDown(e) {
+      const t = e.target;
+      if (!t.classList.contains('split-v') && !t.classList.contains('split-h')) return;
+      e.preventDefault();
+      t.classList.add('active');
+      const isV = t.classList.contains('split-v');
+      const panelA = t.previousElementSibling;
+      const panelB = t.nextElementSibling;
+      drag = {
+        isV: isV, el: t, panelA: panelA, panelB: panelB,
+        startPos: isV ? e.clientX : e.clientY,
+        startA: isV ? panelA.offsetWidth : panelA.offsetHeight,
+        startB: isV ? panelB.offsetWidth : panelB.offsetHeight,
+      };
+      document.body.style.cursor = isV ? 'col-resize' : 'row-resize';
+      document.body.style.userSelect = 'none';
+    }
+    function onMove(e) {
+      if (!drag) return;
+      const d = drag;
+      const delta = (d.isV ? e.clientX : e.clientY) - d.startPos;
+      const newA = Math.max(80, d.startA + delta);
+      const newB = Math.max(80, d.startB - delta);
+      if (d.isV) {
+        d.panelA.style.width = newA + 'px'; d.panelA.style.flexShrink = '0';
+        d.panelB.style.width = newB + 'px'; d.panelB.style.flexShrink = '0';
+      } else {
+        d.panelA.style.height = newA + 'px'; d.panelA.style.flexShrink = '0';
+        d.panelB.style.height = newB + 'px'; d.panelB.style.flex = '0 0 ' + newB + 'px';
+      }
+    }
+    function onUp() {
+      if (drag) { drag.el.classList.remove('active'); drag = null; document.body.style.cursor = ''; document.body.style.userSelect = ''; }
+    }
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  })();
 }
 
 /* ---- Render ---- */
