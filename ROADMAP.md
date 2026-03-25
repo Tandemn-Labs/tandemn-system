@@ -88,6 +88,7 @@ What's coming next for Orca.
 - **Cost tracking across swap.** Track GPU hours and cost from all replicas (including swapped-out ones) for accurate total job cost.
 - **Cost tracking dashboard.** Surface cumulative spend per model, per GPU type, and per time period in the CLI and API.
 - **Alerting.** Webhook or Slack notification when a job completes, fails, or exceeds its SLO deadline.
+- **Freeze metrics on job completion.** When a job succeeds/fails, the dashboard keeps showing stale metrics (last throughput, GPU util, etc.) as if they're live. Metrics should be frozen at their final values and clearly marked as "final"; charts should stop accumulating zero-value data points.
 
 ---
 
