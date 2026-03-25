@@ -10,12 +10,62 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from dataclasses import asdict
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level state for SSE enrichment
+# ---------------------------------------------------------------------------
+
+# SkyPilot price cache: (instance_type, market, region) -> (price_usd, cached_at)
+_price_cache: dict[tuple, tuple[float, float]] = {}
+_PRICE_CACHE_TTL = 300  # 5 min
+
+# Synthetic event log
+_event_log: deque[dict] = deque(maxlen=200)
+_prev_job_status: dict[str, str] = {}
+_prev_chunk_progress: dict[str, dict] = {}
+_prev_replica_phases: dict[str, dict[str, str]] = {}
+
+ACTIVE_PHASES = {"launching", "loading_model", "model_ready", "generating", "running"}
+
+
+def _get_cached_price(instance_type: str, region: str, market: str) -> float | None:
+    """Cache-wrapped SkyPilot price lookup (same pattern as metrics_db._get_price_per_hour)."""
+    key = (instance_type, market, region)
+    now = time.time()
+    cached = _price_cache.get(key)
+    if cached and now - cached[1] < _PRICE_CACHE_TTL:
+        return cached[0]
+    try:
+        from sky import catalog
+        price = catalog.get_hourly_cost(
+            instance_type=instance_type,
+            use_spot=(market == "spot"),
+            region=region,
+            zone=None,
+            clouds="aws",
+        )
+        _price_cache[key] = (price, now)
+        return price
+    except Exception:
+        logger.debug("dashboard: price lookup failed for %s", instance_type, exc_info=True)
+        return None
+
+
+def _emit_event(level: str, message: str, job_id: str = ""):
+    """Append a synthetic event to the module-level log."""
+    _event_log.append({
+        "ts": time.time(),
+        "level": level,
+        "job_id": job_id,
+        "message": message,
+    })
 
 dashboard_router = APIRouter()
 
@@ -616,6 +666,8 @@ async def dashboard_stream(request: Request):
                 break
 
             payload = {"jobs": [], "metrics": {}, "chunks": {}, "replicas": {}}
+            mc = None
+            cluster_mgr = None
 
             try:
                 # ---- Jobs ----
@@ -638,6 +690,13 @@ async def dashboard_stream(request: Request):
                             "instance_type": rec.state.instance_types,
                             "tp": rec.state.tp,
                             "pp": rec.state.pp,
+                            "slo_hours": rec.state.spec.slo_hours,
+                            "avg_input_tokens": rec.state.spec.avg_input_tokens,
+                            "avg_output_tokens": rec.state.spec.avg_output_tokens,
+                            "market": rec.state.spec.market,
+                            "submitted_at": rec.state.submitted_at,
+                            "num_replicas": getattr(rec, "num_replicas", 1),
+                            "is_chunked": getattr(rec, "is_chunked", False),
                         }
                         payload["jobs"].append(job_data)
                     except Exception:
@@ -709,6 +768,7 @@ async def dashboard_stream(request: Request):
                                             "market": rstate.get("market", ""),
                                             "instance_type": rstate.get("instance_type", ""),
                                             "has_metrics": rstate.get("has_metrics", False),
+                                            "running_since": rstate.get("running_since"),
                                         })
                                     if replicas:
                                         payload["replicas"][job_id] = replicas
@@ -716,6 +776,122 @@ async def dashboard_stream(request: Request):
                                 logger.debug("dashboard: replica error for %s", job_id, exc_info=True)
                 except Exception:
                     logger.debug("dashboard: cluster_manager error", exc_info=True)
+
+                # ---- Cost (via SkyPilot pricing) ----
+                payload["cost"] = {}
+                try:
+                    if cluster_mgr is None:
+                        cluster_mgr = getattr(request.app.state, "cluster_manager", None)
+                    now = time.time()
+                    for job_id, rec in job_items:
+                        try:
+                            instance_type = rec.state.instance_types
+                            if not instance_type:
+                                continue
+                            region = rec.state.spec.region or "us-east-1"
+                            market = rec.state.spec.market or "spot"
+                            price = _get_cached_price(instance_type, region, market)
+                            if price is None:
+                                continue
+
+                            # Sum running hours across replicas
+                            total_running_hours = 0.0
+                            num_running = 0
+                            rep_states = {}
+                            try:
+                                if cluster_mgr:
+                                    rep_states = cluster_mgr.get_replica_states(job_id)
+                            except Exception:
+                                pass
+
+                            for _rid, rs in rep_states.items():
+                                rs_since = rs.get("running_since")
+                                if rs_since and rs.get("phase") in ACTIVE_PHASES:
+                                    total_running_hours += (now - rs_since) / 3600
+                                    num_running += 1
+
+                            # Fallback: use submitted_at if no per-replica data
+                            if total_running_hours == 0 and rec.status in ACTIVE_PHASES:
+                                total_running_hours = (now - rec.state.submitted_at) / 3600
+                                num_running = getattr(rec, "num_replicas", 1) or 1
+
+                            accrued = price * total_running_hours
+                            progress = rec.state.progress_frac
+                            projected = None
+                            eta_sec = None
+                            if progress > 0.01:
+                                projected = accrued / progress
+                                elapsed = total_running_hours * 3600
+                                eta_sec = ((1.0 - progress) / progress) * elapsed
+
+                            payload["cost"][job_id] = {
+                                "price_per_hour": round(price, 4),
+                                "accrued_usd": round(accrued, 4),
+                                "projected_total_usd": round(projected, 4) if projected else None,
+                                "eta_sec": round(eta_sec) if eta_sec else None,
+                                "num_running_replicas": num_running,
+                            }
+                        except Exception:
+                            logger.debug("dashboard: cost error for %s", job_id, exc_info=True)
+                except Exception:
+                    logger.debug("dashboard: cost section error", exc_info=True)
+
+                # ---- Synthetic events ----
+                try:
+                    for job_id, rec in job_items:
+                        jid_short = job_id[:12]
+                        # Status transitions
+                        prev_st = _prev_job_status.get(job_id)
+                        if prev_st is not None and prev_st != rec.status:
+                            lvl = "error" if rec.status == "failed" else "ok" if rec.status == "succeeded" else "info"
+                            _emit_event(lvl, f"{jid_short} {prev_st} -> {rec.status}", job_id)
+                        _prev_job_status[job_id] = rec.status
+
+                        # Chunk milestones (25/50/75/100%)
+                        ch = payload.get("chunks", {}).get(job_id)
+                        if ch and ch.get("total", 0) > 0:
+                            prev_ch = _prev_chunk_progress.get(job_id, {})
+                            prev_pct = prev_ch.get("completed", 0) / ch["total"] * 100 if prev_ch.get("completed") is not None else 0
+                            cur_pct = ch["completed"] / ch["total"] * 100
+                            for milestone in (25, 50, 75, 100):
+                                if prev_pct < milestone <= cur_pct:
+                                    _emit_event("ok", f"{jid_short} chunks {milestone}% ({ch['completed']}/{ch['total']})", job_id)
+                            _prev_chunk_progress[job_id] = dict(ch)
+
+                        # Replica phase changes
+                        reps = payload.get("replicas", {}).get(job_id, [])
+                        prev_phases = _prev_replica_phases.get(job_id, {})
+                        cur_phases = {}
+                        for r in reps:
+                            rid = r["replica_id"]
+                            phase = r["phase"]
+                            cur_phases[rid] = phase
+                            if rid in prev_phases and prev_phases[rid] != phase:
+                                lvl = "error" if phase in ("failed", "dead") else "info"
+                                _emit_event(lvl, f"replica {rid[-8:]} -> {phase}", job_id)
+                        _prev_replica_phases[job_id] = cur_phases
+
+                    payload["events"] = list(_event_log)[-50]
+                except Exception:
+                    logger.debug("dashboard: events error", exc_info=True)
+                    payload["events"] = []
+
+                # ---- Timeseries (SSE resilience) ----
+                payload["timeseries"] = {}
+                try:
+                    if mc is None:
+                        mc = getattr(request.app.state, "metrics_collector", None)
+                    if mc is not None:
+                        for job_id, _rec in job_items:
+                            if _rec.status in ACTIVE_PHASES:
+                                try:
+                                    recent = mc.get_recent(job_id, n=60)
+                                    if recent:
+                                        payload["timeseries"][job_id] = recent
+                                except Exception:
+                                    logger.debug("dashboard: timeseries error for %s", job_id, exc_info=True)
+                except Exception:
+                    logger.debug("dashboard: timeseries section error", exc_info=True)
 
             except Exception:
                 logger.debug("dashboard: top-level SSE error", exc_info=True)
