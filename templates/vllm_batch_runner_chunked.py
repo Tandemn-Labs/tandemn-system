@@ -1634,6 +1634,10 @@ def main():
         executor.shutdown(wait=False)
         generation_time = time.time() - generation_start
 
+        # 7b. Signal replica completion IMMEDIATELY (before slow metrics/upload)
+        print(f"[Runner] Signaling replica_complete to control plane")
+        _report_phase("replica_complete")
+
         # 8. Post-scrape Prometheus + stop monitors
         post_prom_text = _scrape_prom()
         gpu_monitor.stop()
@@ -1675,10 +1679,6 @@ def main():
 
         # 11. POST summary to control plane
         _post_summary(metrics_dict)
-
-        # 11b. Signal replica completion to control plane (triggers metrics cleanup + teardown)
-        print(f"[Runner] Signaling replica_complete to control plane")
-        _report_phase("replica_complete")
 
         # 12. Stop sidecar
         stop_sidecar.set()
