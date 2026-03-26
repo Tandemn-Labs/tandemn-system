@@ -75,8 +75,11 @@ def _report_phase(phase: str):
         headers = {"Content-Type": "application/json"}
         if ORCA_KEY:
             headers["Authorization"] = f"Bearer {ORCA_KEY}"
+        body = {"phase": phase}
+        if REPLICA_ID:
+            body["replica_id"] = REPLICA_ID
         requests.post(f"{ORCA_URL}/job/{JOB_ID}/phase",
-                      json={"phase": phase}, headers=headers, timeout=5)
+                      json=body, headers=headers, timeout=5)
     except Exception:
         pass
 
@@ -1672,6 +1675,10 @@ def main():
 
         # 11. POST summary to control plane
         _post_summary(metrics_dict)
+
+        # 11b. Signal replica completion to control plane (triggers metrics cleanup + teardown)
+        print(f"[Runner] Signaling replica_complete to control plane")
+        _report_phase("replica_complete")
 
         # 12. Stop sidecar
         stop_sidecar.set()

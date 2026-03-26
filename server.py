@@ -609,6 +609,22 @@ async def update_job_phase(
         raise HTTPException(status_code=401, detail="Unauthorized")
     body = await request.json()
     phase = body.get("phase")
+    replica_id = body.get("replica_id")
+
+    if phase == "replica_complete" and replica_id:
+        # Replica finished its chunks; clean up metrics + schedule teardown
+        cm = app.state.cluster_manager
+        cm.set_replica_state(job_id, replica_id, phase="completed")
+        app.state.metrics_collector.stop_replica_collecting(job_id, replica_id)
+        try:
+            app.state.quota_tracker.release_cluster(replica_id)
+        except Exception:
+            pass
+        import threading
+        threading.Thread(target=sky_down_with_retry, args=(replica_id,), daemon=True).start()
+        logger.info("[Phase] Replica %s completed, metrics stopped, teardown scheduled", replica_id)
+        return {"ok": True}
+
     if phase:
         get_job_tracker().update_status(job_id, phase)
         if phase == "generating":
