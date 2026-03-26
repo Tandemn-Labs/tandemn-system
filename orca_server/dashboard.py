@@ -410,24 +410,39 @@ function buildStructure() {
 /* ---- Render ---- */
 function render(data) {
   const jobs = (data.jobs || []).slice().sort((a,b) => (b.created_at||0) - (a.created_at||0));
-  if (!jobs.length) {
-    document.getElementById('wrap').innerHTML = '<div class="empty-state">No jobs yet. Deploy a model to get started.</div>';
-    structureBuilt = false;
-    chartMgr.cleanup(new Set());
-    return;
-  }
   buildStructure();
 
-  // Auto-select active job
-  if (!activeJobId || !jobs.find(j => j.job_id === activeJobId)) activeJobId = jobs[0].job_id;
-  const job = jobs.find(j => j.job_id === activeJobId);
-  const m = (data.metrics||{})[activeJobId] || {};
-  const ch = (data.chunks||{})[activeJobId] || null;
-  const reps = (data.replicas||{})[activeJobId] || [];
-  const cost = (data.cost||{})[activeJobId] || null;
-  const prog = job.progress || 0;
-  const isActive = ACTIVE.has(job.status);
+  if (!jobs.length) {
+    // No jobs — clear main panels but keep sidebar (quota + jobs)
+    const wl = document.getElementById('wl-block');
+    if (wl) wl.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:10px">No jobs yet. Deploy a model to get started.</div>';
+    const cl = document.getElementById('chain-label');
+    if (cl) { cl.textContent = 'waiting for jobs...'; cl.style.color = 'var(--text-muted)'; }
+    const cp = document.getElementById('chain-pct');
+    if (cp) cp.textContent = '';
+    const eta = document.getElementById('chain-eta');
+    if (eta) eta.textContent = '';
+    const pf = document.getElementById('prog-fill');
+    if (pf) pf.style.width = '0%';
+    const svg = document.getElementById('chain-svg');
+    if (svg) svg.innerHTML = '';
+    chartMgr.cleanup(new Set());
+    // Still render quota + job buttons below
+  }
 
+  // Auto-select active job
+  const job = jobs.length ? (jobs.find(j => j.job_id === activeJobId) || jobs[0]) : null;
+  if (job) activeJobId = job.job_id;
+  const m = job ? ((data.metrics||{})[activeJobId] || {}) : {};
+  const ch = job ? ((data.chunks||{})[activeJobId] || null) : null;
+  const reps = job ? ((data.replicas||{})[activeJobId] || []) : [];
+  const cost = job ? ((data.cost||{})[activeJobId] || null) : null;
+  const prog = job ? (job.progress || 0) : 0;
+  const isActive = job ? ACTIVE.has(job.status) : false;
+
+  // Workload panel (skip if no job — already handled above)
+  if (!job) { /* quota + job buttons rendered below */ }
+  else {
   // Workload panel
   const wl = document.getElementById('wl-block');
   if (wl) {
@@ -483,6 +498,8 @@ function render(data) {
     tpsEl.textContent = tps ? fmt(tps) + ' tok/s' : '\u2014';
     tpsEl.style.color = tps ? 'var(--green)' : 'var(--text-muted)';
   }
+
+  } // end if (job) block
 
   // Quota display
   const rl = document.getElementById('res-list');
@@ -676,7 +693,7 @@ def _build_dashboard_payload(app_state) -> dict:
     from orca_server.job_manager import get_job_tracker
     from orca_server.chunk_manager import get_chunk_manager
 
-    payload = {"jobs": [], "metrics": {}, "chunks": {}, "replicas": {}}
+    payload = {"jobs": [], "metrics": {}, "chunks": {}, "replicas": {}, "quota": []}
     mc = getattr(app_state, "metrics_collector", None)
     cluster_mgr = getattr(app_state, "cluster_manager", None)
     redis_ok = getattr(app_state, "redis_available", False)
@@ -880,7 +897,7 @@ def _build_dashboard_payload(app_state) -> dict:
                 if rid in prev_phases and prev_phases[rid] != phase:
                     _emit_event("error" if phase in ("failed", "dead") else "info", f"replica {rid[-8:]} -> {phase}", job_id)
             _prev_replica_phases[job_id] = cur_phases
-        payload["events"] = list(_event_log)[-50]
+        payload["events"] = list(_event_log)[-50:]
 
         # Timeseries
         payload["timeseries"] = {}
@@ -895,16 +912,14 @@ def _build_dashboard_payload(app_state) -> dict:
                         logger.debug("dashboard: timeseries error for %s", job_id, exc_info=True)
 
         # Quota
-        payload["quota"] = []
         try:
-            from quota.tracker import VPCQuotaTracker
             qt = getattr(app_state, "quota_tracker", None)
-            if qt is not None:
-                summary = qt.status_summary()
+            if qt is not None and hasattr(qt, "full_quota_summary"):
+                summary = qt.full_quota_summary()
                 if not summary.empty:
                     payload["quota"] = summary.to_dict("records")
         except Exception:
-            logger.debug("dashboard: quota error", exc_info=True)
+            pass
 
     except Exception:
         logger.debug("dashboard: top-level payload error", exc_info=True)
