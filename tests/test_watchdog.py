@@ -19,6 +19,7 @@ from orca_server.watchdog import ReplicaWatchdog
 @dataclass
 class FakeSnap:
     timestamp: float
+    request_success_total: float = 0.0
 
 
 class FakeReplicaCollector:
@@ -38,6 +39,16 @@ class FakeMetricsCollector:
 
     def add_replica(self, key: str, timestamps: list[float] | None = None):
         self._replicas[key] = FakeReplicaCollector(timestamps)
+
+    def get_replica_latest(self, job_id: str, replica_id: str):
+        key = f"{job_id}:{replica_id}"
+        rc = self._replicas.get(key)
+        if rc is None or not rc.buffer:
+            return None
+        return rc.buffer[-1]
+
+    def stop_replica_collecting(self, job_id: str, replica_id: str):
+        self._replicas.pop(f"{job_id}:{replica_id}", None)
 
 
 class FakeJobRecord:

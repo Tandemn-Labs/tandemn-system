@@ -481,6 +481,15 @@ class MetricsCollector:
         for rc in replica_collectors:
             rc.stop()
 
+    def stop_replica_collecting(self, job_id: str, replica_id: str) -> None:
+        """Remove a single replica from aggregation (e.g. after graceful completion)."""
+        key = f"{job_id}:{replica_id}"
+        with self._lock:
+            rc = self._replicas.pop(key, None)
+        if rc:
+            rc.stop()
+            logger.info("[MetricsCollector] Stopped replica collector %s", key)
+
     def get_latest(self, job_id: str) -> MetricsSnapshot | None:
         with self._lock:
             jc = self._jobs.get(job_id)
