@@ -140,6 +140,9 @@ body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--tex
 .res-list{flex:1;overflow-y:auto;padding:6px 10px;display:flex;flex-direction:column;gap:4px}
 .res-row{display:flex;align-items:center;font-size:10px;padding:3px 6px;border-radius:3px;border:1px solid var(--bar-bg);background:var(--bg);transition:border-color .3s,background .3s}
 .res-row.on{background:#0d1f2e;border-color:var(--cyan)}
+.res-bar{flex:1;height:4px;background:var(--bar-bg);border-radius:2px;margin:0 6px;overflow:hidden}
+.res-bar-fill{height:4px;border-radius:2px;transition:width .5s}
+.res-pct{font-size:8px;min-width:36px;text-align:right}
 .res-cnt{color:var(--text-muted);min-width:22px;text-align:right;margin-right:6px;font-size:9px}
 .res-gpu{flex:1;color:var(--text)}.res-rgn{color:var(--text-muted);font-size:9px;margin-left:4px}
 .res-ind{width:6px;height:6px;border-radius:50%;background:var(--bar-bg);margin-left:6px;flex-shrink:0;transition:background .3s}
@@ -342,7 +345,7 @@ function buildStructure() {
     + '<div class="cost-cell"><span class="cost-lbl">time to complete</span><span class="cost-val" id="c-ttc">\u2014</span><span class="cost-sub" id="c-ttc-sub">projected</span></div>'
     + '<div class="cost-cell"><span class="cost-lbl">throughput</span><span class="cost-val" id="c-tps">\u2014</span><span class="cost-sub" id="c-tps-sub">10s avg</span></div></div></div></div>'
     + '<div class="split-h" id="split-mid-h"></div>'
-    + '<div class="bot-sec" id="bot-sec"><div class="res-col" id="res-col"><div class="sec-hdr">resource pool</div><div class="res-list" id="res-list"></div>'
+    + '<div class="bot-sec" id="bot-sec"><div class="res-col" id="res-col"><div class="sec-hdr">quota (aws)</div><div class="res-list" id="res-list"></div>'
     + '<div class="job-sel"><div class="sec-hdr">jobs</div><div class="jbtns" id="jbtns"></div></div></div>'
     + '<div class="split-v" id="split-bot-v"></div>'
     + '<div class="log-col"><div class="sec-hdr">event log</div><div class="log-area" id="log-area"></div></div></div>'
@@ -481,23 +484,33 @@ function render(data) {
     tpsEl.style.color = tps ? 'var(--green)' : 'var(--text-muted)';
   }
 
-  // Resource pool
+  // Quota display
   const rl = document.getElementById('res-list');
   if (rl) {
-    const groups = {};
-    reps.forEach(r => {
-      const key = (r.instance_type||'unknown') + '|' + (r.region||'');
-      if (!groups[key]) groups[key] = {inst: r.instance_type, region: r.region, count: 0, active: false};
-      groups[key].count++;
-      if (ACTIVE.has(r.phase)) groups[key].active = true;
-    });
+    const quotaData = data.quota || [];
+    // Active regions from replicas
+    const activeRegions = new Set(reps.map(r => r.region).filter(Boolean));
     let rh = '';
-    for (const k in groups) {
-      const g = groups[k];
-      const on = g.active ? ' on' : '';
-      rh += '<div class="res-row' + on + '"><span class="res-cnt">' + g.count + '\u00d7</span><span class="res-gpu">' + esc(gpuName(g.inst)) + '</span><span class="res-rgn">' + esc(g.region||'') + '</span><span class="res-ind' + on + '"></span></div>';
+    if (quotaData.length) {
+      quotaData.forEach(q => {
+        const base = q.Baseline || 0;
+        if (base <= 0) return;
+        const used = q.Used || 0;
+        const pct = Math.round(used / base * 100);
+        const free = base - used;
+        const freePct = free / base;
+        const color = freePct > 0.5 ? 'var(--green)' : freePct > 0.2 ? 'var(--yellow)' : 'var(--red)';
+        const active = activeRegions.has(q.Region) ? ' on' : '';
+        rh += '<div class="res-row' + active + '">'
+          + '<span class="res-gpu" style="min-width:60px">' + esc(q.Region) + '</span>'
+          + '<span class="res-cnt">' + esc(q.Family) + '</span>'
+          + '<span class="res-rgn">' + esc(q.Market) + '</span>'
+          + '<div class="res-bar"><div class="res-bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>'
+          + '<span class="res-pct" style="color:' + color + '">' + used + '/' + base + '</span>'
+          + '</div>';
+      });
     }
-    if (!rh) rh = '<div style="padding:8px;font-size:10px;color:var(--text-muted)">No replicas</div>';
+    if (!rh) rh = '<div style="padding:8px;font-size:10px;color:var(--text-muted)">No quota data</div>';
     rl.innerHTML = rh;
   }
 
@@ -880,6 +893,18 @@ def _build_dashboard_payload(app_state) -> dict:
                             payload["timeseries"][job_id] = recent
                     except Exception:
                         logger.debug("dashboard: timeseries error for %s", job_id, exc_info=True)
+
+        # Quota
+        payload["quota"] = []
+        try:
+            from quota.tracker import VPCQuotaTracker
+            qt = getattr(app_state, "quota_tracker", None)
+            if qt is not None:
+                summary = qt.status_summary()
+                if not summary.empty:
+                    payload["quota"] = summary.to_dict("records")
+        except Exception:
+            logger.debug("dashboard: quota error", exc_info=True)
 
     except Exception:
         logger.debug("dashboard: top-level payload error", exc_info=True)
