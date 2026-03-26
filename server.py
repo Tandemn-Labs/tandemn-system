@@ -124,6 +124,15 @@ async def lifespan(app: FastAPI):
     # Initialize quota tracker (replays persisted reservations from SQLite)
     app.state.quota_tracker = VPCQuotaTracker()
 
+    # Refresh AWS quotas in background (non-blocking)
+    import threading
+    from quota.region_selector import refresh_quotas_from_aws
+    threading.Thread(
+        target=refresh_quotas_from_aws,
+        kwargs={"quota_tracker": app.state.quota_tracker},
+        daemon=True,
+    ).start()
+
     from orca_server.monitoring import get_metrics_collector
     from orca_server.metrics_db import get_metrics_db
     app.state.metrics_collector = get_metrics_collector()
