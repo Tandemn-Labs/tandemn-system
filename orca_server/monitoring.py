@@ -451,6 +451,7 @@ class MetricsCollector:
     def __init__(self):
         self._jobs: dict[str, _JobCollector] = {}
         self._replicas: dict[str, _JobCollector] = {}  # "job_id:replica_id" → collector
+        self._excluded_replicas: set[str] = set()  # replicas excluded from aggregation
         self._lock = threading.Lock()
 
     def start_collecting(self, job_id: str, endpoint_url: str | None = None) -> None:
@@ -490,6 +491,16 @@ class MetricsCollector:
             rc.stop()
             logger.info("[MetricsCollector] Stopped replica collector %s", key)
 
+    def exclude_replica(self, job_id: str, replica_id: str) -> None:
+        """Exclude a replica from aggregation without removing its collector.
+
+        The sidecar may keep sending data (stored for post-mortem) but the
+        replica will be skipped by get_aggregated().
+        """
+        key = f"{job_id}:{replica_id}"
+        self._excluded_replicas.add(key)
+        logger.info("[MetricsCollector] Excluded replica %s from aggregation", key)
+
     def get_latest(self, job_id: str) -> MetricsSnapshot | None:
         with self._lock:
             jc = self._jobs.get(job_id)
@@ -504,7 +515,8 @@ class MetricsCollector:
     def list_replica_ids(self, job_id: str) -> list[str]:
         prefix = f"{job_id}:"
         with self._lock:
-            return [k[len(prefix):] for k in self._replicas if k.startswith(prefix)]
+            return [k[len(prefix):] for k in self._replicas
+                    if k.startswith(prefix) and k not in self._excluded_replicas]
 
     def get_aggregated(self, job_id: str) -> MetricsSnapshot | None:
         """Return a merged view across all replicas, or fall back to get_latest."""

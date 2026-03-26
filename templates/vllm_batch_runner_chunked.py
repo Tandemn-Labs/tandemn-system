@@ -235,6 +235,19 @@ def calculate_percentiles(values: List[int]) -> Dict[str, float]:
 # Prometheus delta helpers — warmup subtraction
 # ---------------------------------------------------------------------------
 
+def _check_vllm_idle() -> bool:
+    """Check if vLLM has zero requests running (truly idle)."""
+    try:
+        text = requests.get(f"{BASE_URL}/metrics", timeout=5).text
+        for line in text.splitlines():
+            if line.startswith("vllm:num_requests_running"):
+                val = float(line.split()[-1])
+                return val == 0
+    except Exception:
+        pass
+    return False
+
+
 def _scrape_prom() -> str:
     try:
         return requests.get(f"{BASE_URL}/metrics", timeout=10).text
@@ -1524,6 +1537,8 @@ def main():
 
         # Prefetch first chunk (renewal starts immediately inside)
         prefetch_future = executor.submit(pull_and_download_chunk)
+        _signaled_idle = False
+        _idle_since = None
 
         while True:
             chunk_info, chunk_requests, renewal_ctx = prefetch_future.result()
@@ -1536,7 +1551,25 @@ def main():
                     break
                 inflight = progress.get("inflight", 0)
                 if inflight > 0:
-                    print(f"[Runner] Queue empty but {inflight} chunk(s) still inflight — waiting for possible reclaim...")
+                    # Confirm vLLM is truly idle: 3 checks over 30s (not a brief inter-chunk gap)
+                    vllm_idle = False
+                    if not _signaled_idle and _check_vllm_idle():
+                        vllm_idle = True
+                        for _ in range(2):
+                            time.sleep(10)
+                            if not _check_vllm_idle():
+                                vllm_idle = False
+                                break
+                    if vllm_idle and not _signaled_idle:
+                        print(f"[Runner] Queue empty, vLLM idle, {inflight} chunk(s) on other replicas")
+                        print(f"[Runner] Signaling replica_complete (metrics cleanup)")
+                        _report_phase("replica_complete")
+                        _signaled_idle = True
+                        _idle_since = time.time()
+                    # Give up after 60s idle (only count from when vLLM actually went idle)
+                    if _idle_since and time.time() - _idle_since > 60:
+                        print("[Runner] Idle 60s with no reclaim — exiting")
+                        break
                     time.sleep(15)
                     prefetch_future = executor.submit(pull_and_download_chunk)
                     continue
@@ -1556,6 +1589,10 @@ def main():
                 continue
 
             consecutive_errors = 0  # reset on success
+            if _signaled_idle:
+                print("[Runner] Got reclaimed chunk after idle — resuming")
+                _signaled_idle = False
+                _idle_since = None
             cid = chunk_info.get("chunk_id", "unknown")
             s3_output_path = chunk_info.get("s3_output_path", "")
 

@@ -615,7 +615,7 @@ async def update_job_phase(
         # Replica finished its chunks; clean up metrics + schedule teardown
         cm = app.state.cluster_manager
         cm.set_replica_state(job_id, replica_id, phase="completed")
-        app.state.metrics_collector.stop_replica_collecting(job_id, replica_id)
+        app.state.metrics_collector.exclude_replica(job_id, replica_id)
         try:
             app.state.quota_tracker.release_cluster(replica_id)
         except Exception:
