@@ -45,6 +45,7 @@ setup: |
   # This generic template is for L40S and other GPUs that work with vLLM 0.10.0
   # ========================================================================
   echo "=== Installing vLLM 0.10.0 ==="
+  uv pip install "transformers==4.57.6"  # transformers > 5.0.0 breaks vLLM 0.10.0
   uv pip install "vllm==0.10.0" aiohttp pynvml
 
   # Verify PyTorch CUDA

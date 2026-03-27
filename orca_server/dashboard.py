@@ -511,7 +511,9 @@ function render(data) {
   if (job) activeJobId = job.job_id;
   const m = job ? ((data.metrics||{})[activeJobId] || {}) : {};
   const ch = job ? ((data.chunks||{})[activeJobId] || null) : null;
-  const reps = job ? ((data.replicas||{})[activeJobId] || []) : [];
+  const allReps = job ? ((data.replicas||{})[activeJobId] || []) : [];
+  const DEAD_PHASES = new Set(['failed','dead','killed','swapped_out']);
+  const reps = allReps.filter(r => !DEAD_PHASES.has(r.phase));
   const cost = job ? ((data.cost||{})[activeJobId] || null) : null;
   const prog = job ? (job.progress || 0) : 0;
   const isActive = job ? ACTIVE.has(job.status) : false;

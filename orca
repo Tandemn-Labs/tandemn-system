@@ -1063,6 +1063,112 @@ def cmd_swap(args):
     print(f"  Old replicas will be killed after {data.get('ready_threshold', 1)} new replica(s) start inferring.{RESET}\n")
 
 
+def cmd_add(args):
+    """Add replicas to a running chunked job."""
+    print(LOGO)
+    header("ADD REPLICAS")
+    job_id = args.job_id
+
+    # Show current state
+    resp = api("get", f"/job/{job_id}", timeout=10)
+    if resp.status_code == 200:
+        job = resp.json()
+        print(f"\n  Job: {c(job_id, BOLD)}")
+        print(f"  Status: {job.get('status', '?')}")
+    else:
+        progress_resp = api("get", f"/job/{job_id}/chunks/progress", timeout=10)
+        if progress_resp.status_code != 200:
+            print(f"\n  {RED}Job {job_id} not found{RESET}\n")
+            sys.exit(1)
+        progress = progress_resp.json()
+        print(f"\n  Job: {c(job_id, BOLD)} {DIM}(recovered from Redis){RESET}")
+        print(f"  Chunks: {progress['completed']}/{progress['total']} completed")
+
+    # Show current replicas
+    rep_resp = api("get", f"/job/{job_id}/replicas", timeout=10)
+    if rep_resp.status_code == 200:
+        replicas = rep_resp.json().get("replicas", [])
+        print(f"\n  Current replicas ({len(replicas)}):")
+        for r in replicas:
+            rid = r.get("replica_id", "?")
+            phase = r.get("phase", "?")
+            color = GREEN if phase == "running" else YELLOW if phase == "launching" else RED
+            print(f"    {rid}: {c(phase, color)}")
+
+    # Build payload
+    payload = {"count": args.count}
+    if args.gpu:
+        payload["gpu_type"] = args.gpu
+    if args.tp:
+        payload["tp_size"] = args.tp
+    if args.pp:
+        payload["pp_size"] = args.pp
+    if args.on_demand:
+        payload["on_demand"] = True
+    if args.force:
+        payload["force"] = True
+
+    config_str = f"{c(args.gpu, BOLD)} TP={args.tp or '?'} PP={args.pp or '?'}" if args.gpu else f"{DIM}same config as current{RESET}"
+    print(f"\n  Adding {c(str(args.count), BOLD)} replica(s): {config_str}")
+
+    resp = api("post", f"/job/{job_id}/scale", json=payload, timeout=30)
+    if resp.status_code != 200:
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        if data.get("status") == "confirm":
+            print(f"\n  {YELLOW}Warning:{RESET} {data.get('message', 'Config may not be feasible')}")
+            print(f"  Use {BOLD}--force{RESET} to proceed anyway.\n")
+            sys.exit(1)
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        sys.exit(1)
+
+    data = resp.json()
+    print(f"\n  {GREEN}Scale initiated!{RESET}")
+    print(f"  New replicas: {', '.join(data.get('new_replicas', []))}")
+    print(f"  Version: v{data.get('version', '?')}")
+    print(f"\n  {DIM}New replicas will start pulling chunks from the same queue.{RESET}\n")
+
+
+def cmd_kill(args):
+    """Kill specific replicas of a running job."""
+    print(LOGO)
+    header("KILL REPLICAS")
+    job_id = args.job_id
+
+    # Show current replicas
+    rep_resp = api("get", f"/job/{job_id}/replicas", timeout=10)
+    if rep_resp.status_code == 200:
+        replicas = rep_resp.json().get("replicas", [])
+        print(f"\n  Current replicas ({len(replicas)}):")
+        for r in replicas:
+            rid = r.get("replica_id", "?")
+            phase = r.get("phase", "?")
+            color = GREEN if phase == "running" else YELLOW if phase == "launching" else RED
+            print(f"    {rid}: {c(phase, color)}")
+    else:
+        print(f"\n  {RED}Job {job_id} not found{RESET}\n")
+        sys.exit(1)
+
+    targets = args.replica
+    print(f"\n  Killing: {', '.join(c(r, RED) for r in targets)}")
+
+    resp = api("post", f"/job/{job_id}/kill", json={"replica_ids": targets}, timeout=30)
+    if resp.status_code != 200:
+        print(f"\n  {RED}Error:{RESET} {resp.text}\n")
+        sys.exit(1)
+
+    data = resp.json()
+    killed = data.get("killed", [])
+    skipped = data.get("skipped", [])
+    reclaimed = data.get("reclaimed", 0)
+    print(f"\n  {GREEN}Done!{RESET}")
+    if killed:
+        print(f"  Killed: {', '.join(killed)}")
+    if skipped:
+        print(f"  Skipped (already terminal): {', '.join(skipped)}")
+    print(f"  Chunks reclaimed: {reclaimed}")
+    print(f"\n  {DIM}Inflight chunks returned to pending queue. Clusters tearing down.{RESET}\n")
+
+
 def cmd_destroy(args):
     """Tear down Orca clusters, Redis state, and S3 uploads."""
     import subprocess as _sp
@@ -2082,6 +2188,21 @@ Examples:
     p_stream = subparsers.add_parser("stream", help="Stream live SSE metrics for a running job")
     p_stream.add_argument("job_id", help="Job ID to stream")
 
+    # add
+    p_add = subparsers.add_parser("add", help="Add replicas to a running job")
+    p_add.add_argument("job_id", help="Job ID to add replicas to")
+    p_add.add_argument("count", type=int, help="Number of replicas to add")
+    p_add.add_argument("--gpu", help="GPU type (default: inherit from job)")
+    p_add.add_argument("--tp", type=int, help="Tensor parallelism (default: inherit)")
+    p_add.add_argument("--pp", type=int, help="Pipeline parallelism (default: inherit)")
+    p_add.add_argument("--on-demand", action="store_true", help="Use on-demand instances")
+    p_add.add_argument("--force", action="store_true", help="Skip feasibility check")
+
+    # kill
+    p_kill = subparsers.add_parser("kill", help="Kill specific replicas of a job")
+    p_kill.add_argument("job_id", help="Job ID")
+    p_kill.add_argument("--replica", action="append", required=True, help="Replica ID to kill (repeatable)")
+
     # swap
     p_swap = subparsers.add_parser("swap", help="Hot-swap replicas to new GPU config mid-job")
     p_swap.add_argument("job_id", help="Job ID to swap replicas for")
@@ -2123,6 +2244,8 @@ Examples:
         "timeseries": cmd_timeseries,
         "stream": cmd_stream,
         "destroy": cmd_destroy,
+        "add": cmd_add,
+        "kill": cmd_kill,
         "swap": cmd_swap,
         "web": cmd_web,
     }

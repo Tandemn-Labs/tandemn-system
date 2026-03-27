@@ -84,7 +84,7 @@ class ReplicaWatchdog:
             states = self._cm.get_replica_states(job_id)
             for replica_id, state in states.items():
                 phase = state.get("phase", "")
-                if phase in ("launching", "provisioned", "completed", "swapped_out"):
+                if phase in ("launching", "provisioned", "completed", "swapped_out", "killed"):
                     continue  # not expected to heartbeat yet (or already done)
 
                 # Failed replicas: force-reclaim their chunks (monitor thread set phase

@@ -100,16 +100,29 @@ Options for `deploy` and `plan`:
 --on-demand             Use on-demand instances instead of spot
 ```
 
+### Scale and Kill Replicas
+
+Add or remove replicas from a running job:
+
+```
+./orca add <job_id> 2                        # Add 2 replicas (inherit GPU config)
+./orca add <job_id> 3 --gpu L40S --tp 4      # Add 3 L40S replicas (heterogeneous fleet)
+./orca kill <job_id> --replica <rid>          # Kill a specific replica
+./orca kill <job_id> --replica r0 --replica r1  # Kill multiple replicas
+```
+
+New replicas join the same Redis chunk queue. Killed replicas' inflight chunks are reclaimed and returned to pending.
+
 ### Hot-Swap Replicas
 
-Change GPU type, TP/PP, or replica count mid-job without losing progress:
+Replace all replicas with a new GPU config mid-job (atomic: waits for readiness before killing old):
 
 ```
 ./orca swap <job_id> --gpu A100 --tp 4 --replicas 2
 ./orca swap <job_id> --gpu L40S --tp 1 --ready-threshold 2 --on-demand
 ```
 
-New replicas join the same Redis chunk queue. Old replicas are killed after the new ones start processing.
+Swap composes `add` + `kill` — new replicas launch first, old ones are torn down after the new ones start inferring.
 
 ### Monitoring
 

@@ -639,6 +639,20 @@ async def _launch_chunked_replica(
             if not persist:
                 sky_down_with_retry(replica_id)
 
+            # Check if ALL replicas are terminal — if so, mark the job failed
+            # (prevents orphaned jobs stuck in "launching" when setup fails)
+            jt = get_job_tracker()
+            rec = jt.get(parent_job_id)
+            if rec and rec.status in ("launching", "loading_model"):
+                states = cm.get_replica_states(parent_job_id)
+                terminal = {"completed", "failed", "dead", "killed", "swapped_out"}
+                if states and all(s.get("phase") in terminal for s in states.values()):
+                    any_success = any(s.get("phase") == "completed" for s in states.values())
+                    if not any_success:
+                        jt.update_status(parent_job_id, "failed")
+                        if job_logger:
+                            job_logger.warning("[Chunked] All replicas failed — marking job as failed")
+
     t = threading.Thread(
         target=monitor_replica, args=(job_id_sky,),
         daemon=False, name=f"orca-replica-{replica_id[:12]}",
