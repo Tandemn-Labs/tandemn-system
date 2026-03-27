@@ -452,6 +452,7 @@ class MetricsCollector:
         self._jobs: dict[str, _JobCollector] = {}
         self._replicas: dict[str, _JobCollector] = {}  # "job_id:replica_id" → collector
         self._excluded_replicas: set[str] = set()  # replicas excluded from aggregation
+        self._excluded_cumulative: dict[str, dict[str, float]] = {}  # saved cumulative counters
         self._lock = threading.Lock()
 
     def start_collecting(self, job_id: str, endpoint_url: str | None = None) -> None:
@@ -494,12 +495,18 @@ class MetricsCollector:
     def exclude_replica(self, job_id: str, replica_id: str) -> None:
         """Exclude a replica from aggregation without removing its collector.
 
-        The sidecar may keep sending data (stored for post-mortem) but the
-        replica will be skipped by get_aggregated().
+        Saves cumulative counters (request_success_total, etc.) so they remain
+        in the aggregated sum even after the replica is excluded.
         """
         key = f"{job_id}:{replica_id}"
+        # Snapshot cumulative counters before excluding
+        snap = self.get_replica_latest(job_id, replica_id)
+        if snap:
+            self._excluded_cumulative[key] = {
+                f: getattr(snap, f, 0) or 0 for f in _SUM_FIELDS
+            }
         self._excluded_replicas.add(key)
-        logger.info("[MetricsCollector] Excluded replica %s from aggregation", key)
+        logger.info("[MetricsCollector] Excluded replica %s from aggregation (saved cumulative counters)", key)
 
     def get_latest(self, job_id: str) -> MetricsSnapshot | None:
         with self._lock:
@@ -527,7 +534,14 @@ class MetricsCollector:
                  if (s := self.get_replica_latest(job_id, rid)) is not None]
         if not snaps:
             return self.get_latest(job_id)
-        return _merge_snapshots(job_id, snaps)
+        merged = _merge_snapshots(job_id, snaps)
+        # Add back cumulative counters from excluded replicas
+        prefix = f"{job_id}:"
+        for key, saved in self._excluded_cumulative.items():
+            if key.startswith(prefix):
+                for f, val in saved.items():
+                    setattr(merged, f, (getattr(merged, f, 0) or 0) + val)
+        return merged
 
     def get_recent(self, job_id: str, n: int = 60) -> list[dict]:
         with self._lock:

@@ -15,6 +15,7 @@ outputs/
 
 # Audit/planning docs (local only)
 AUDIT.md
+RCA_replica_completion.md
 docs/throughput-measurement.md
 
 # Editor
