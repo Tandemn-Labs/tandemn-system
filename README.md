@@ -114,6 +114,7 @@ New replicas join the same Redis chunk queue. Old replicas are killed after the 
 ### Monitoring
 
 ```
+./orca web                        Open real-time web dashboard in browser
 ./orca progress [job_id]          Live progress bar with throughput and queue depth
 ./orca status                     List all jobs
 ./orca metrics <job_id> [-w]      Latest vLLM metrics snapshot (--watch for 2s refresh)
@@ -123,6 +124,16 @@ New replicas join the same Redis chunk queue. Old replicas are killed after the 
 ./orca logs [cluster]             Stream logs from a SkyPilot cluster
 ./orca clusters                   Show active clusters
 ```
+
+The web dashboard (`orca web`) shows a real-time single-page UI with:
+- **Workload panel** — model, prompts, status, chunk progress
+- **Chain visualization** — SVG replica nodes with phase colors and animated data flow
+- **Cost bar** — accrued cost, projected total, ETA, throughput (from SkyPilot pricing)
+- **Quota sidebar** — live AWS GPU quota utilization per region/family (auto-discovered on startup)
+- **Event log** — synthetic events for job status changes, chunk milestones, replica phase transitions
+- **Charts** (toggle) — throughput, KV cache, scheduler, GPU utilization, latency, completions with linked crosshairs
+
+The dashboard uses SSE for real-time updates, with automatic polling fallback for environments that buffer SSE (e.g., Cloudflare tunnels). Panels are resizable via tmux-style drag splitters.
 
 ### Operations
 

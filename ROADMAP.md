@@ -25,6 +25,25 @@ What's coming next for Orca.
 - Per-replica metrics with `--replica` and `--compare` flags
 - Full metrics port from server runner to chunked runner (build_metrics, histograms, cost)
 
+### Web Dashboard (`orca web`)
+- Real-time single-page dashboard with SSE streaming and polling fallback
+- Workload panel, chain visualization (SVG replica nodes), cost bar, event log
+- 6 chart types with linked crosshairs: throughput, KV cache, scheduler, GPU util, latency, completions
+- Tmux-style resizable panels, auto-select active job, per-job switching
+- Cumulative counter preservation when replicas complete (no chart regressions)
+
+### AWS Quota Auto-Discovery
+- Background thread fetches live GPU quotas from AWS Service Quotas API on startup
+- Quota sidebar shows utilization bars per region/family (G on-demand, G spot, P on-demand, P spot)
+- Refreshes existing CSV or bootstraps from scratch on fresh install
+
+### Replica Graceful Completion
+- Runner signals `replica_complete` after 3x idle check (20s) to prevent false positives
+- Server excludes completed replicas from metric aggregation (no zero-dilution)
+- Cumulative counters (completions, preemptions) preserved across exclusion
+- Cluster auto-teardown via `sky down` within 1 minute of completion
+- Watchdog backup path also preserves counters via `exclude_replica`
+
 ---
 
 ## Next Up
@@ -104,4 +123,4 @@ What's coming next for Orca.
 
 - **Job queue.** Today each `orca deploy` launches immediately. Add a server-side job queue with priority scheduling, so multiple users can submit jobs and the control plane sequences them based on quota availability and priority.
 - **Cluster reuse.** Instead of launching a fresh cluster per job, reuse warm clusters for back-to-back jobs with the same model. Skip the 5-10 minute provisioning and model loading time.
-- **Replica self-teardown after chunk completion.** When a replica finishes all its chunks from the Redis queue, it should shut itself down within 1 minute instead of sitting idle. SkyPilot's `autodown` doesn't fire because the sky job stays "active" after the runner exits. Fix: runner should call `sky down` on itself or signal the control plane to tear it down immediately.
+- ~~**Replica self-teardown after chunk completion.**~~ Shipped — see "Replica Graceful Completion" above.
