@@ -320,11 +320,87 @@ const verticalLinePlugin = {
 };
 Chart.register(verticalLinePlugin);
 
-class ChartMgr{constructor(){this.c={}}
-  getOrCreate(jid,def,cid){if(!this.c[jid])this.c[jid]={};if(this.c[jid][def.key])return this.c[jid][def.key];const cv=document.getElementById(cid);if(!cv)return null;const o=mOpts(def.opts);o.plugins=o.plugins||{};o.plugins.legend=o.plugins.legend||{};o.plugins.legend.labels={color:'#e6edf3',font:{size:9}};o.plugins.legend.position='top';o.plugins.title={display:true,text:def.label,color:'#8b949e',font:{size:10}};o.hover={mode:'index',intersect:false};const ds=def.datasets.map(d=>{const s={label:d.label,borderColor:d.borderColor,backgroundColor:d.backgroundColor||'transparent',borderWidth:1.5,borderDash:d.borderDash||[],tension:0.3,pointRadius:0,pointHoverRadius:4,fill:d.fill||false,data:[]};if(d.yAxisID)s.yAxisID=d.yAxisID;return s});const ch=new Chart(cv.getContext('2d'),{type:def.type||'line',data:{labels:[],datasets:ds},options:o});this.c[jid][def.key]=ch;return ch}
-  update(jid,ts){if(!ts||!ts.length)return;const t0=ts[0].timestamp;const lbls=ts.map(p=>Math.round(p.timestamp-t0));for(const def of CDEFS){const ch=this.getOrCreate(jid,def,'chart-'+def.key+'-'+sid(jid));if(!ch)continue;ch.data.labels=lbls;for(let i=0;i<def.datasets.length;i++){const dd=def.datasets[i],sc=dd.scale||1;ch.data.datasets[i].data=ts.map(p=>{const v=p[dd.field];return v!=null?v*sc:null})}ch.update('none')}}
-  cleanup(ids){for(const j in this.c){if(!ids.has(j)){for(const k in this.c[j])this.c[j][k].destroy();delete this.c[j]}}}}
-const chartMgr = new ChartMgr();
+class ChartManager {
+  constructor() {
+    this.charts = {};  // { jobId: { chartKey: Chart } }
+  }
+
+  getOrCreate(jobId, chartDef, canvasId) {
+    if (!this.charts[jobId]) this.charts[jobId] = {};
+    if (this.charts[jobId][chartDef.key]) return this.charts[jobId][chartDef.key];
+
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return null;
+
+    // Build chart options: merge defaults with chart-specific overrides
+    const options = mOpts(chartDef.opts);
+    options.plugins = options.plugins || {};
+    options.plugins.legend = options.plugins.legend || {};
+    options.plugins.legend.labels = { color: '#e6edf3', font: { size: 9 } };
+    options.plugins.legend.position = 'top';
+    options.plugins.title = { display: true, text: chartDef.label, color: '#8b949e', font: { size: 10 } };
+    options.hover = { mode: 'index', intersect: false };
+
+    // Build dataset configs from chart definition
+    const datasets = chartDef.datasets.map(function(dsDef) {
+      const ds = {
+        label: dsDef.label,
+        borderColor: dsDef.borderColor,
+        backgroundColor: dsDef.backgroundColor || 'transparent',
+        borderWidth: 1.5,
+        borderDash: dsDef.borderDash || [],
+        tension: 0.3,
+        pointRadius: 0,
+        pointHoverRadius: 4,
+        fill: dsDef.fill || false,
+        data: []
+      };
+      if (dsDef.yAxisID) ds.yAxisID = dsDef.yAxisID;
+      return ds;
+    });
+
+    const chart = new Chart(canvas.getContext('2d'), {
+      type: chartDef.type || 'line',
+      data: { labels: [], datasets: datasets },
+      options: options
+    });
+    this.charts[jobId][chartDef.key] = chart;
+    return chart;
+  }
+
+  update(jobId, timeseries) {
+    if (!timeseries || !timeseries.length) return;
+    const t0 = timeseries[0].timestamp;
+    const labels = timeseries.map(function(p) { return Math.round(p.timestamp - t0); });
+
+    for (const chartDef of CDEFS) {
+      const chart = this.getOrCreate(jobId, chartDef, 'chart-' + chartDef.key + '-' + sid(jobId));
+      if (!chart) continue;
+      chart.data.labels = labels;
+      for (let i = 0; i < chartDef.datasets.length; i++) {
+        const dsDef = chartDef.datasets[i];
+        const scale = dsDef.scale || 1;
+        chart.data.datasets[i].data = timeseries.map(function(p) {
+          const val = p[dsDef.field];
+          return val != null ? val * scale : null;
+        });
+      }
+      chart.update('none');
+    }
+  }
+
+  cleanup(activeJobIds) {
+    for (const jobId in this.charts) {
+      if (!activeJobIds.has(jobId)) {
+        for (const key in this.charts[jobId]) {
+          this.charts[jobId][key].destroy();
+        }
+        delete this.charts[jobId];
+      }
+    }
+  }
+}
+const chartMgr = new ChartManager();
 
 /* ---- Build structure ---- */
 function buildStructure() {

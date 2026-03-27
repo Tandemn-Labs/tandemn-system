@@ -147,7 +147,7 @@ class ReplicaWatchdog:
                 replica_id, f"{last_hb:.1f}" if last_hb else "never",
             )
             self._cm.set_replica_state(job_id, replica_id, phase="completed")
-            self._mc.stop_replica_collecting(job_id, replica_id)
+            self._mc.exclude_replica(job_id, replica_id)
             # Trigger cluster teardown
             from orca_server.job_manager import sky_down_with_retry
             sky_down_with_retry(replica_id)

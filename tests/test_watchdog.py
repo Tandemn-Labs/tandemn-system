@@ -50,6 +50,10 @@ class FakeMetricsCollector:
     def stop_replica_collecting(self, job_id: str, replica_id: str):
         self._replicas.pop(f"{job_id}:{replica_id}", None)
 
+    def exclude_replica(self, job_id: str, replica_id: str):
+        """Mimics MetricsCollector.exclude_replica — keeps data but marks excluded."""
+        pass  # no-op for tests; watchdog just needs this to exist
+
 
 class FakeJobRecord:
     def __init__(self, status="running", is_chunked=True):
