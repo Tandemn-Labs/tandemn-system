@@ -22,8 +22,10 @@ class MagicOutput(BaseModel):
 
     @property
     def num_nodes(self) -> int:
-        """Total SkyPilot nodes needed. Uses solver's num_instances if available,
-        otherwise falls back to pp_size * replicas (1 PP stage per node)."""
+        """SkyPilot nodes needed per replica.
+        TP stays intra-node, PP crosses node boundaries.
+        Uses solver's num_instances when available (accounts for multi-PP-per-node
+        on fixed-size instances like p4d.24xlarge where gpus > tp_degree)."""
         if self.num_instances is not None:
-            return self.num_instances  # solver already computed total nodes
-        return self.pp_size * self.replicas
+            return self.num_instances
+        return self.pp_size

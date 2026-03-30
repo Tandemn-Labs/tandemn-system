@@ -489,7 +489,7 @@ async def launch_chunked_replicas(
         replica_config = config.model_copy(update={
             "decision_id": replica_id,
             "replicas": 1,
-            "num_instances": config.pp_size,
+            "num_instances": config.num_nodes,  # solver handles fixed-size (p4d) vs variable-size (g6e)
         })
         job_logger.info(f"[Chunked] Launching replica {i}/{num_replicas}: {replica_id}")
         try:
@@ -517,7 +517,7 @@ async def launch_chunked_replicas(
     # Track parent job (individual replicas register themselves on launch)
     cm.register(config.decision_id, config.decision_id,
                 instance_type=config.instance_type,
-                num_instances=num_replicas * config.pp_size)
+                num_instances=num_replicas * config.num_nodes)
     return True
 
 
