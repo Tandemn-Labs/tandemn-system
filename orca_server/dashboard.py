@@ -629,23 +629,26 @@ function render(data) {
   // Event log
   const la = document.getElementById('log-area');
   if (la && data.events && data.events.length) {
-    // Merge new events
+    // Merge new events, track which are new
     const existing = new Set(eventBuffer.map(e => e.ts + e.message));
+    const newEvents = [];
     data.events.forEach(ev => {
       const key = ev.ts + ev.message;
-      if (!existing.has(key)) { eventBuffer.push(ev); existing.add(key); }
+      if (!existing.has(key)) { eventBuffer.push(ev); existing.add(key); newEvents.push(ev); }
     });
-    while (eventBuffer.length > MAX_EVENTS) eventBuffer.shift();
-    // Render
-    la.innerHTML = '';
-    eventBuffer.forEach(ev => {
+    while (eventBuffer.length > MAX_EVENTS) {
+      eventBuffer.shift();
+      if (la.firstChild) la.removeChild(la.firstChild);
+    }
+    // Only append new events (no full re-render)
+    newEvents.forEach(ev => {
       const d = document.createElement('div');
       d.className = 'll ' + (ev.level || 'dim');
       const t = new Date(ev.ts * 1000).toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
       d.textContent = '[' + t + '] ' + ev.message;
       la.appendChild(d);
     });
-    la.scrollTop = la.scrollHeight;
+    if (newEvents.length) la.scrollTop = la.scrollHeight;
   }
 
   // Charts
