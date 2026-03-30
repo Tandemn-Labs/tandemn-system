@@ -116,13 +116,29 @@ body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--tex
 .wl-row{display:flex}.wl-k{color:var(--text-muted);min-width:80px;flex-shrink:0}.wl-v{color:var(--text)}
 .wl-v.hi{font-weight:600}
 
-.chain-col{flex:1;display:flex;flex-direction:column;min-width:0}
-.chain-inner{padding:10px 14px 6px;flex:1;display:flex;flex-direction:column;justify-content:center}
+.chain-col{flex:1;display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.chain-inner{padding:10px 14px 6px;flex:1;display:flex;flex-direction:column;min-height:0}
 .chain-meta{font-size:10px;margin-bottom:5px;display:flex;align-items:center;gap:8px}
 .chain-pct{font-weight:bold;min-width:32px}
 .chain-eta{color:var(--text-muted);font-size:9px;margin-left:auto}
 .prog-outer{height:3px;background:var(--bar-bg);border-radius:2px;margin-bottom:7px;overflow:hidden}
 .prog-fill{height:3px;border-radius:2px;transition:width .5s,background .4s}
+
+/* Replica config header */
+.rep-config{display:flex;align-items:center;gap:10px;font-size:10px;margin-bottom:6px;flex-shrink:0}
+.rep-config-tag{padding:2px 7px;border-radius:3px;background:var(--bar-bg);color:var(--text-dim);font-size:9px;letter-spacing:.03em}
+.rep-config-tag .hi{color:var(--text);font-weight:500}
+
+/* Replica table */
+.rep-table{flex:1;overflow-y:auto;min-height:0}
+.rep-tbl{width:100%;border-collapse:collapse;font-size:10px}
+.rep-tbl th{text-align:left;color:var(--text-muted);font-size:8px;font-weight:400;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px 4px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--card)}
+.rep-tbl td{padding:4px 8px;border-bottom:1px solid var(--bar-bg);white-space:nowrap;color:var(--text-dim);font-variant-numeric:tabular-nums}
+.rep-tbl tr:last-child td{border-bottom:none}
+.rep-tbl tr:hover td{background:var(--card-hover)}
+.rep-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px;vertical-align:middle}
+.rep-phase{font-size:9px}
+.rep-empty{color:var(--text-muted);font-size:10px;padding:14px 0;text-align:center}
 
 /* Cost bar */
 .cost-bar{display:flex;border-top:1px solid var(--bar-bg);flex-shrink:0}
@@ -177,8 +193,8 @@ body{font-family:'JetBrains Mono',monospace;background:var(--bg);color:var(--tex
 .chart-wrap{background:var(--bg);border-radius:6px;padding:0.5rem;height:180px}
 .chart-wrap canvas{width:100%!important;height:100%!important}
 
-/* Chain SVG packets */
-@keyframes pkt{0%{offset-distance:0%}100%{offset-distance:100%}}
+/* Replica uptime pulse for active replicas */
+@keyframes rep-pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
 /* Badge */
 .badge{display:inline-block;padding:2px 6px;border-radius:3px;font-size:.6rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
@@ -415,7 +431,8 @@ function buildStructure() {
     + '<div class="chain-col"><div class="sec-hdr">chain</div>'
     + '<div class="chain-inner"><div class="chain-meta"><span id="chain-label" style="color:var(--text-muted)">initializing...</span><span class="chain-pct" id="chain-pct">0%</span><span class="chain-eta" id="chain-eta"></span></div>'
     + '<div class="prog-outer"><div class="prog-fill" id="prog-fill"></div></div>'
-    + '<svg id="chain-svg" width="100%" height="66" style="display:block"></svg></div>'
+    + '<div class="rep-config" id="rep-config"></div>'
+    + '<div class="rep-table" id="rep-table"></div></div>'
     + '<div class="cost-bar" id="cost-bar"><div class="cost-cell"><span class="cost-lbl">cost accrued</span><span class="cost-val" id="c-accrued">\u2014</span><span class="cost-sub" id="c-accrued-sub"></span><div class="cost-meter"><div class="cost-meter-fill" id="c-meter" style="width:0%"></div></div></div>'
     + '<div class="cost-cell"><span class="cost-lbl">projected total</span><span class="cost-val" id="c-proj">\u2014</span><span class="cost-sub" id="c-proj-sub">at current rate</span></div>'
     + '<div class="cost-cell"><span class="cost-lbl">time to complete</span><span class="cost-val" id="c-ttc">\u2014</span><span class="cost-sub" id="c-ttc-sub">projected</span></div>'
@@ -500,8 +517,10 @@ function render(data) {
     if (eta) eta.textContent = '';
     const pf = document.getElementById('prog-fill');
     if (pf) pf.style.width = '0%';
-    const svg = document.getElementById('chain-svg');
-    if (svg) svg.innerHTML = '';
+    const rcfg = document.getElementById('rep-config');
+    if (rcfg) rcfg.innerHTML = '';
+    const rt = document.getElementById('rep-table');
+    if (rt) rt.innerHTML = '';
     chartMgr.cleanup(new Set());
     // Still render quota + job buttons below
   }
@@ -553,8 +572,8 @@ function render(data) {
   const eta = document.getElementById('chain-eta');
   if (eta) { eta.textContent = cost && cost.eta_sec ? 'eta ~' + fmtTime(cost.eta_sec) : job.status === 'succeeded' ? 'done' : ''; }
 
-  // Chain SVG
-  renderChainSVG(reps, isActive);
+  // Replica table
+  renderReplicaTable(allReps, isActive, job);
 
   // Cost bar
   if (cost) {
@@ -686,38 +705,45 @@ function render(data) {
   chartMgr.cleanup(curIds);
 }
 
-function renderChainSVG(reps, isActive) {
-  const svg = document.getElementById('chain-svg');
-  if (!svg) return;
-  const W = svg.parentElement.clientWidth || 400, H = 66;
-  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
-  const n = reps.length;
-  if (!n) { svg.innerHTML = '<text x="' + W/2 + '" y="33" text-anchor="middle" fill="#6e7681" font-size="10" font-family="JetBrains Mono">No replicas</text>'; return; }
-  const bw = 80, bh = 34, gap = 40, gy = H/2 - bh/2;
-  const totalW = n * bw + (n-1) * gap;
-  const sx = Math.max(8, (W - totalW) / 2);
-  let html = '<defs><marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path d="M1 1L7 4L1 7" fill="none" stroke="var(--cyan)" stroke-width="1.4" stroke-linecap="round"/></marker></defs>';
-  for (let i = 0; i < n; i++) {
-    const r = reps[i];
-    const x = sx + i * (bw + gap);
-    const phaseColors = {running:'var(--cyan)',generating:'var(--cyan)',model_ready:'var(--blue)',loading_model:'var(--blue)',launching:'var(--yellow)',failed:'var(--red)',dead:'var(--red)'};
+function renderReplicaTable(reps, isActive, _repJob) {
+  const wrap = document.getElementById('rep-table');
+  if (!wrap) return;
+  if (!reps.length) { wrap.innerHTML = '<div class="rep-empty">No replicas</div>'; return; }
+  const phaseColors = {running:'var(--cyan)',generating:'var(--cyan)',completed:'var(--green)',model_ready:'var(--blue)',loading_model:'var(--blue)',provisioned:'var(--blue)',launching:'var(--yellow)',failed:'var(--red)',dead:'var(--red)'};
+  const now = Date.now() / 1000;
+  const tp = _repJob ? (_repJob.tp || '\u2014') : '\u2014';
+  const pp = _repJob ? (_repJob.pp || '\u2014') : '\u2014';
+  const jInst = _repJob ? (_repJob.instance_type || '') : '';
+  let h = '<table class="rep-tbl"><thead><tr><th>Phase</th><th>Replica</th><th>Cloud</th><th>Region</th><th>Instance</th><th>GPU</th><th>Market</th><th>TP</th><th>PP</th><th>Reqs</th><th>tok/s</th><th>Uptime</th></tr></thead><tbody>';
+  reps.forEach(r => {
     const col = phaseColors[r.phase] || 'var(--text-muted)';
     const on = ACTIVE.has(r.phase);
-    // Connector line
-    if (i < n - 1) {
-      const ly = gy + bh/2;
-      html += '<line x1="' + (x+bw) + '" y1="' + ly + '" x2="' + (x+bw+gap) + '" y2="' + ly + '" stroke="' + (on?'var(--cyan)':'#30363d') + '" stroke-width="1" marker-end="url(#arr)"/>';
-      // Animated packet
-      if (isActive && on) {
-        html += '<circle r="3" fill="var(--cyan)" opacity="0.7"><animateMotion dur="2s" repeatCount="indefinite" path="M' + (x+bw) + ',' + ly + ' L' + (x+bw+gap) + ',' + ly + '"/></circle>';
-      }
-    }
-    // Node box
-    html += '<rect x="' + x + '" y="' + gy + '" width="' + bw + '" height="' + bh + '" rx="3" fill="var(--card)" stroke="' + col + '" stroke-width="' + (on?'1.5':'0.5') + '"/>';
-    html += '<text x="' + (x+bw/2) + '" y="' + (gy+12) + '" text-anchor="middle" fill="' + (on?'var(--text)':'#444c56') + '" font-size="9" font-family="JetBrains Mono">' + esc(gpuName(r.instance_type)) + '</text>';
-    html += '<text x="' + (x+bw/2) + '" y="' + (gy+24) + '" text-anchor="middle" fill="' + col + '" font-size="8" font-family="JetBrains Mono">' + esc((r.region||'').slice(-6)) + '</text>';
-  }
-  svg.innerHTML = html;
+    const pulse = on ? ' style="animation:rep-pulse 2s infinite"' : '';
+    const uptime = r.running_since ? fmtTime(now - r.running_since) : '\u2014';
+    const rid = (r.replica_id || '').slice(-8);
+    const mkt = r.market === 'on-demand' ? 'on-dem' : (r.market || '\u2014');
+    const inst = r.instance_type || jInst || '\u2014';
+    const gpu = inst ? gpuName(inst) : '\u2014';
+    const cloud = r.cloud || 'aws';
+    const reqs = r.request_success_total != null ? fmt(Math.round(r.request_success_total)) : '\u2014';
+    const toks = r.throughput_toks != null ? fmt(Math.round(r.throughput_toks)) : '\u2014';
+    h += '<tr>'
+      + '<td><span class="rep-dot" style="background:' + col + '"' + pulse + '></span><span class="rep-phase" style="color:' + col + '">' + esc(r.phase) + '</span></td>'
+      + '<td style="color:var(--text)">' + esc(rid) + '</td>'
+      + '<td>' + esc(cloud) + '</td>'
+      + '<td>' + esc(r.region || '\u2014') + '</td>'
+      + '<td>' + esc(inst) + '</td>'
+      + '<td style="color:var(--cyan)">' + esc(gpu) + '</td>'
+      + '<td>' + esc(mkt) + '</td>'
+      + '<td style="color:var(--magenta)">' + tp + '</td>'
+      + '<td style="color:var(--magenta)">' + pp + '</td>'
+      + '<td style="color:var(--green)">' + reqs + '</td>'
+      + '<td style="color:var(--green)">' + toks + '</td>'
+      + '<td style="color:' + (on ? 'var(--text)' : 'var(--text-muted)') + '">' + uptime + '</td>'
+      + '</tr>';
+  });
+  h += '</tbody></table>';
+  wrap.innerHTML = h;
 }
 
 let lastData = {}, pollTimer = null, usePolling = false, sseGotData = false;
@@ -879,7 +905,7 @@ def _build_dashboard_payload(app_state) -> dict:
                     if states:
                         replicas = []
                         for rid, rstate in states.items():
-                            replicas.append({
+                            rep_info = {
                                 "replica_id": rid,
                                 "phase": rstate.get("phase", "unknown"),
                                 "region": rstate.get("region", ""),
@@ -887,7 +913,14 @@ def _build_dashboard_payload(app_state) -> dict:
                                 "instance_type": rstate.get("instance_type", ""),
                                 "has_metrics": rstate.get("has_metrics", False),
                                 "running_since": rstate.get("running_since"),
-                            })
+                            }
+                            # Per-replica metrics
+                            if mc is not None:
+                                rsnap = mc.get_replica_latest(job_id, rid)
+                                if rsnap:
+                                    rep_info["request_success_total"] = rsnap.request_success_total
+                                    rep_info["throughput_toks"] = getattr(rsnap, "avg_generation_throughput_toks_per_s", None)
+                            replicas.append(rep_info)
                         if replicas:
                             payload["replicas"][job_id] = replicas
                 except Exception:
