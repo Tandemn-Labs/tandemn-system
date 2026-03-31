@@ -38,7 +38,7 @@ def test_quota_code_g_on_demand():
 
 
 def test_quota_code_p_spot():
-    assert get_quota_code("p", True) == "L-417A185B"
+    assert get_quota_code("p", True) == "L-7212CCBC"
 
 
 # --- RegionCandidate.to_skypilot_resources ---

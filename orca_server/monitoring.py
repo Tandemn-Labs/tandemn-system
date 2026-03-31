@@ -451,6 +451,8 @@ class MetricsCollector:
     def __init__(self):
         self._jobs: dict[str, _JobCollector] = {}
         self._replicas: dict[str, _JobCollector] = {}  # "job_id:replica_id" → collector
+        self._excluded_replicas: set[str] = set()  # replicas excluded from aggregation
+        self._excluded_cumulative: dict[str, dict[str, float]] = {}  # saved cumulative counters
         self._lock = threading.Lock()
 
     def start_collecting(self, job_id: str, endpoint_url: str | None = None) -> None:
@@ -481,6 +483,31 @@ class MetricsCollector:
         for rc in replica_collectors:
             rc.stop()
 
+    def stop_replica_collecting(self, job_id: str, replica_id: str) -> None:
+        """Remove a single replica from aggregation (e.g. after graceful completion)."""
+        key = f"{job_id}:{replica_id}"
+        with self._lock:
+            rc = self._replicas.pop(key, None)
+        if rc:
+            rc.stop()
+            logger.info("[MetricsCollector] Stopped replica collector %s", key)
+
+    def exclude_replica(self, job_id: str, replica_id: str) -> None:
+        """Exclude a replica from aggregation without removing its collector.
+
+        Saves cumulative counters (request_success_total, etc.) so they remain
+        in the aggregated sum even after the replica is excluded.
+        """
+        key = f"{job_id}:{replica_id}"
+        # Snapshot cumulative counters before excluding
+        snap = self.get_replica_latest(job_id, replica_id)
+        if snap:
+            self._excluded_cumulative[key] = {
+                f: getattr(snap, f, 0) or 0 for f in _SUM_FIELDS
+            }
+        self._excluded_replicas.add(key)
+        logger.info("[MetricsCollector] Excluded replica %s from aggregation (saved cumulative counters)", key)
+
     def get_latest(self, job_id: str) -> MetricsSnapshot | None:
         with self._lock:
             jc = self._jobs.get(job_id)
@@ -495,7 +522,8 @@ class MetricsCollector:
     def list_replica_ids(self, job_id: str) -> list[str]:
         prefix = f"{job_id}:"
         with self._lock:
-            return [k[len(prefix):] for k in self._replicas if k.startswith(prefix)]
+            return [k[len(prefix):] for k in self._replicas
+                    if k.startswith(prefix) and k not in self._excluded_replicas]
 
     def get_aggregated(self, job_id: str) -> MetricsSnapshot | None:
         """Return a merged view across all replicas, or fall back to get_latest."""
@@ -506,7 +534,14 @@ class MetricsCollector:
                  if (s := self.get_replica_latest(job_id, rid)) is not None]
         if not snaps:
             return self.get_latest(job_id)
-        return _merge_snapshots(job_id, snaps)
+        merged = _merge_snapshots(job_id, snaps)
+        # Add back cumulative counters from excluded replicas
+        prefix = f"{job_id}:"
+        for key, saved in self._excluded_cumulative.items():
+            if key.startswith(prefix):
+                for f, val in saved.items():
+                    setattr(merged, f, (getattr(merged, f, 0) or 0) + val)
+        return merged
 
     def get_recent(self, job_id: str, n: int = 60) -> list[dict]:
         with self._lock:

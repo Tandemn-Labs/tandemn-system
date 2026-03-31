@@ -124,6 +124,15 @@ async def lifespan(app: FastAPI):
     # Initialize quota tracker (replays persisted reservations from SQLite)
     app.state.quota_tracker = VPCQuotaTracker()
 
+    # Refresh AWS quotas in background (non-blocking)
+    import threading
+    from quota.region_selector import refresh_quotas_from_aws
+    threading.Thread(
+        target=refresh_quotas_from_aws,
+        kwargs={"quota_tracker": app.state.quota_tracker},
+        daemon=True,
+    ).start()
+
     from orca_server.monitoring import get_metrics_collector
     from orca_server.metrics_db import get_metrics_db
     app.state.metrics_collector = get_metrics_collector()
@@ -600,6 +609,22 @@ async def update_job_phase(
         raise HTTPException(status_code=401, detail="Unauthorized")
     body = await request.json()
     phase = body.get("phase")
+    replica_id = body.get("replica_id")
+
+    if phase == "replica_complete" and replica_id:
+        # Replica finished its chunks; clean up metrics + schedule teardown
+        cm = app.state.cluster_manager
+        cm.set_replica_state(job_id, replica_id, phase="completed")
+        app.state.metrics_collector.exclude_replica(job_id, replica_id)
+        try:
+            app.state.quota_tracker.release_cluster(replica_id)
+        except Exception:
+            pass
+        import threading
+        threading.Thread(target=sky_down_with_retry, args=(replica_id,), daemon=True).start()
+        logger.info("[Phase] Replica %s completed, metrics stopped, teardown scheduled", replica_id)
+        return {"ok": True}
+
     if phase:
         get_job_tracker().update_status(job_id, phase)
         if phase == "generating":
@@ -896,6 +921,297 @@ async def get_replica_summaries_endpoint(job_id: str):
     return {"job_id": job_id, "count": len(summaries), "summaries": summaries}
 
 
+# ---------------------------------------------------------------------------
+# Scale / Kill / Swap primitives
+# ---------------------------------------------------------------------------
+
+TERMINAL_PHASES = {"dead", "completed", "failed", "swapped_out", "killed"}
+
+
+def _infer_job_config(job_id: str) -> dict:
+    """Infer GPU/TP/PP/instance_type from an existing job's active replicas.
+
+    Returns dict with keys: instance_type, gpu_type, tp_size, pp_size, model_name.
+    Raises HTTPException if no config can be inferred.
+    """
+    from orca_server.config import INSTANCE_TO_GPU
+
+    cm = app.state.cluster_manager
+    jt = get_job_tracker()
+    rec = jt.get(job_id)
+
+    # Try active replicas first
+    states = cm.get_replica_states(job_id)
+    for rid, info in states.items():
+        if info.get("phase") in TERMINAL_PHASES:
+            continue
+        inst = info.get("instance_type")
+        if not inst:
+            cluster_info = cm.active_clusters.get(rid, {})
+            inst = cluster_info.get("instance_type")
+        if inst:
+            gpu = INSTANCE_TO_GPU.get(inst, inst)
+            return {
+                "instance_type": inst,
+                "gpu_type": gpu,
+                "tp_size": info.get("tp_size", 1),
+                "pp_size": info.get("pp_size", 1),
+                "model_name": "",
+            }
+
+    # Fallback to JobRecord spec
+    if rec and hasattr(rec, "state") and hasattr(rec.state, "spec"):
+        spec = rec.state.spec
+        state = rec.state
+        inst_types = getattr(state, "instance_types", None)
+        inst = inst_types if isinstance(inst_types, str) else (inst_types[0] if inst_types else None)
+        if inst:
+            gpu = INSTANCE_TO_GPU.get(inst, getattr(state, "gpu_base", inst))
+            return {
+                "instance_type": inst,
+                "gpu_type": gpu,
+                "tp_size": getattr(state, "tp", 1) or 1,
+                "pp_size": getattr(state, "pp", 1) or 1,
+                "model_name": getattr(spec, "model_name", ""),
+            }
+
+    raise HTTPException(400, "Cannot infer GPU config from job — specify --gpu explicitly")
+
+
+def _do_scale(job_id: str, count: int, gpu_type: str, tp_size: int, pp_size: int,
+              on_demand: bool = False, instance_type: str = None) -> dict:
+    """Launch N new replicas for an existing chunked job. Returns replica names + version.
+
+    This is a fire-and-forget operation — replicas launch in background threads
+    and join the existing Redis chunk queue.
+    """
+    cm = app.state.cluster_manager
+    jt = get_job_tracker()
+    rec = jt.get(job_id)
+    chunk_mgr = get_chunk_manager()
+
+    # Resolve instance type if not provided
+    if not instance_type:
+        instance_type, _ = resolve_gpu_type_to_instance(gpu_type, tp_size)
+
+    # Generate versioned replica names
+    version = cm.next_swap_version(job_id)
+    new_replicas = [f"{job_id}-v{version}-r{i}" for i in range(count)]
+
+    # Pre-register
+    for rid in new_replicas:
+        cm.set_replica_state(job_id, rid, phase="launching")
+        cm.register_for_job(job_id, rid)
+
+    # Build config
+    new_config = MagicOutput(
+        decision_id=job_id,
+        engine="vllm",
+        instance_type=instance_type,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        replicas=count,
+        num_instances=pp_size,
+    )
+
+    # Build BatchedRequest from job metadata
+    meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
+    s3_base = meta.get("s3_output_base", "s3://tandemn-orca/scale")
+    spec = rec.state.spec if rec and hasattr(rec, "state") and hasattr(rec.state, "spec") else None
+    original_request = BatchedRequest(
+        user_id="scale",
+        model_name=(spec.model_name if spec else meta.get("model_name", "unknown")),
+        input_file=f"{s3_base}/scale_input.jsonl",
+        output_file="output.jsonl",
+        description="scale",
+        task_type="batch",
+        task_priority="normal",
+        engine="vllm",
+        slo_mode="cost_first",
+        placement="user_specified",
+        num_lines=int(meta.get("total_chunks", 1)) * 100,
+        avg_input_tokens=(spec.avg_input_tokens if spec else 2000),
+        avg_output_tokens=(spec.avg_output_tokens if spec else 1024),
+    )
+
+    job_dirname = getattr(rec, "_job_dirname", None) or f"scale-{job_id}"
+
+    def _launch_thread(replica_id):
+        import asyncio as _aio
+        replica_config = new_config.model_copy(update={
+            "decision_id": replica_id,
+            "replicas": 1,
+            "num_instances": pp_size,
+        })
+        try:
+            loop = _aio.new_event_loop()
+            loop.run_until_complete(_launch_chunked_replica(
+                original_request, replica_config, replica_id,
+                parent_job_id=job_id,
+                job_dirname=job_dirname,
+                persist=False,
+            ))
+            loop.close()
+        except Exception as e:
+            logger.error("[Scale] Failed to launch replica %s: %s", replica_id, e)
+            cm.set_replica_state(job_id, replica_id, phase="failed")
+
+    for rid in new_replicas:
+        t = threading.Thread(target=_launch_thread, args=(rid,), daemon=False,
+                             name=f"orca-scale-{rid[:16]}")
+        t.start()
+
+    logger.info("[Scale] Launched %d new replicas for %s: %s", count, job_id, new_replicas)
+    return {"new_replicas": new_replicas, "version": version}
+
+
+def _do_kill(job_id: str, replica_ids: list[str], phase: str = "killed") -> dict:
+    """Kill specific replicas: reclaim chunks, exclude metrics, tear down clusters.
+
+    Returns {"killed": [...], "skipped": [...], "reclaimed": N}.
+    """
+    cm = app.state.cluster_manager
+    mc = app.state.metrics_collector
+    chunk_mgr = get_chunk_manager()
+
+    # Filter out replicas already in terminal state
+    states = cm.get_replica_states(job_id)
+    to_kill = []
+    skipped = []
+    for rid in replica_ids:
+        info = states.get(rid, {})
+        if info.get("phase") in TERMINAL_PHASES:
+            skipped.append(rid)
+        else:
+            to_kill.append(rid)
+
+    if not to_kill:
+        return {"killed": [], "skipped": skipped, "reclaimed": 0}
+
+    # Force-reclaim inflight chunks back to pending queue
+    result = chunk_mgr.force_reclaim(job_id, to_kill)
+    logger.info("[Kill] Reclaimed chunks from %s: %s", to_kill, result)
+
+    # Exclude from metrics, update phase, release quota, tear down
+    for rid in to_kill:
+        mc.exclude_replica(job_id, rid)
+        cm.set_replica_state(job_id, rid, phase=phase)
+        try:
+            app.state.quota_tracker.release_cluster(rid)
+        except Exception:
+            pass
+        threading.Thread(
+            target=sky_down_with_retry, args=(rid,),
+            daemon=True, name=f"kill-down-{rid[:12]}",
+        ).start()
+
+    logger.info("[Kill] Killed replicas for %s: %s (phase=%s)", job_id, to_kill, phase)
+    return {"killed": to_kill, "skipped": skipped, "reclaimed": result.get("reclaimed", 0)}
+
+
+# ---------------------------------------------------------------------------
+# Scale endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/job/{job_id}/scale")
+async def scale_replicas(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Add replicas to a running chunked job."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    jt = get_job_tracker()
+    rec = jt.get(job_id)
+    chunk_mgr = get_chunk_manager()
+    progress = chunk_mgr.get_progress(job_id)
+    if rec is None and progress is None:
+        raise HTTPException(404, "Job not found")
+    if progress is None:
+        raise HTTPException(400, "Not a chunked job — scale requires chunked deployment")
+    if rec and rec.status in ("succeeded", "failed", "cancelled"):
+        raise HTTPException(409, f"Job status '{rec.status}' cannot be scaled")
+
+    body = await request.json()
+    count = body.get("count")
+    if not count or count < 1:
+        raise HTTPException(400, "count is required and must be >= 1")
+
+    gpu_type = body.get("gpu_type")
+    tp_size = body.get("tp_size")
+    pp_size = body.get("pp_size")
+    on_demand = body.get("on_demand", False)
+    force = body.get("force", False)
+
+    # Infer config from existing job if not specified
+    if not gpu_type:
+        inferred = _infer_job_config(job_id)
+        gpu_type = inferred["gpu_type"]
+        tp_size = tp_size or inferred["tp_size"]
+        pp_size = pp_size or inferred["pp_size"]
+    tp_size = tp_size or 1
+    pp_size = pp_size or 1
+
+    # Resolve + validate
+    try:
+        instance_type, gpu_count = resolve_gpu_type_to_instance(gpu_type, tp_size)
+    except Exception as e:
+        raise HTTPException(400, f"Cannot resolve GPU config: {e}")
+
+    if not force:
+        model_name = ""
+        if rec and hasattr(rec, "state") and hasattr(rec.state, "spec"):
+            model_name = getattr(rec.state.spec, "model_name", "")
+        feasibility = check_user_specified_feasibility(
+            gpu_type=gpu_type, tp_size=tp_size, pp_size=pp_size,
+            model_name=model_name,
+        )
+        if not feasibility.get("feasible", True):
+            return {"status": "confirm",
+                    "message": feasibility.get("reason", "Config may not be feasible"),
+                    "detail": feasibility}
+
+    result = _do_scale(job_id, count, gpu_type, tp_size, pp_size,
+                       on_demand=on_demand, instance_type=instance_type)
+    return {"status": "scaling", **result}
+
+
+# ---------------------------------------------------------------------------
+# Kill endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/job/{job_id}/kill")
+async def kill_replicas(
+    job_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(None),
+):
+    """Kill specific replicas of a job — reclaim chunks, exclude metrics, tear down."""
+    if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    jt = get_job_tracker()
+    rec = jt.get(job_id)
+    cm = app.state.cluster_manager
+    states = cm.get_replica_states(job_id)
+    if rec is None and not states:
+        raise HTTPException(404, "Job not found")
+
+    body = await request.json()
+    replica_ids = body.get("replica_ids", [])
+    if not replica_ids:
+        raise HTTPException(400, "replica_ids is required")
+
+    result = _do_kill(job_id, replica_ids)
+    return {"status": "killing", **result}
+
+
+# ---------------------------------------------------------------------------
+# Swap endpoint (refactored: composes scale + monitor → kill)
+# ---------------------------------------------------------------------------
+
 @app.post("/job/{job_id}/swap")
 async def swap_replicas(
     job_id: str,
@@ -904,16 +1220,14 @@ async def swap_replicas(
 ):
     """Hot-swap replicas to a new GPU/TP/PP config mid-job.
 
-    Launches new replicas with the new config (same Redis queue), waits for
-    first metrics ingest from K new replicas, then force-reclaims old replicas'
-    inflight chunks and tears them down.
+    Composes scale (launch new replicas) + monitor (wait for readiness) + kill
+    (tear down old replicas). Old replicas keep running until new ones are ready.
     """
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     jt = get_job_tracker()
     rec = jt.get(job_id)
-    # Check if chunked: either flag is set, or Redis has a chunk queue for this job
     chunk_mgr = get_chunk_manager()
     progress = chunk_mgr.get_progress(job_id)
     if rec is None and progress is None:
@@ -957,96 +1271,30 @@ async def swap_replicas(
     # Snapshot old replicas
     old_states = cm.get_replica_states(job_id)
     old_replicas = [rid for rid, info in old_states.items()
-                    if info.get("phase") not in ("dead", "completed", "failed", "swapped_out")]
+                    if info.get("phase") not in TERMINAL_PHASES]
 
-    # Default replicas count = same as current active
     if num_replicas is None:
         num_replicas = len(old_replicas) or 1
-
     ready_threshold = min(ready_threshold, num_replicas)
-
-    # Generate versioned replica names
-    version = cm.next_swap_version(job_id)
-    new_replicas = [f"{job_id}-v{version}-r{i}" for i in range(num_replicas)]
 
     # Mark swap in progress
     with cm.lock:
         cm._swap_in_progress[job_id] = True
 
-    # Pre-register new replicas
-    for rid in new_replicas:
-        cm.set_replica_state(job_id, rid, phase="launching")
-        cm.register_for_job(job_id, rid)
+    # Scale up new replicas
+    scale_result = _do_scale(job_id, num_replicas, gpu_type, tp_size, pp_size,
+                             on_demand=on_demand, instance_type=instance_type)
 
-    # Build new config for launching
-    new_config = MagicOutput(
-        decision_id=job_id,
-        engine="vllm",
-        instance_type=instance_type,
-        tp_size=tp_size,
-        pp_size=pp_size,
-        replicas=num_replicas,
-        num_instances=pp_size,
-    )
-
-    # Build a BatchedRequest for the new replicas. Always construct from available info
-    # (rec.state.spec is a JobSpec not BatchedRequest, so we build one either way)
-    meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
-    s3_base = meta.get("s3_output_base", "s3://tandemn-orca/swap")
-    spec = rec.state.spec if rec and hasattr(rec, "state") and hasattr(rec.state, "spec") else None
-    original_request = BatchedRequest(
-        user_id="swap",
-        model_name=(spec.model_name if spec else meta.get("model_name", "unknown")),
-        input_file=f"{s3_base}/swap_input.jsonl",
-        output_file="output.jsonl",
-        description="swap",
-        task_type="batch",
-        task_priority="normal",
-        engine="vllm",
-        slo_mode="cost_first",
-        placement="user_specified",
-        num_lines=int(meta.get("total_chunks", 1)) * 100,
-        avg_input_tokens=(spec.avg_input_tokens if spec else body.get("avg_input_tokens", 2000)),
-        avg_output_tokens=(spec.avg_output_tokens if spec else body.get("avg_output_tokens", 1024)),
-    )
-
-    # Launch new replicas in background threads
-    job_dirname = getattr(rec, "_job_dirname", None) or f"swap-{job_id}"
-
-    def _launch_swap_replica(replica_id):
-        import asyncio as _aio
-        replica_config = new_config.model_copy(update={
-            "decision_id": replica_id,
-            "replicas": 1,
-            "num_instances": pp_size,
-        })
-        try:
-            loop = _aio.new_event_loop()
-            loop.run_until_complete(_launch_chunked_replica(
-                original_request, replica_config, replica_id,
-                parent_job_id=job_id,
-                job_dirname=job_dirname,
-                persist=False,
-            ))
-            loop.close()
-        except Exception as e:
-            logger.error(f"[Swap] Failed to launch new replica {replica_id}: {e}")
-            cm.set_replica_state(job_id, replica_id, phase="failed")
-
-    for rid in new_replicas:
-        t = threading.Thread(target=_launch_swap_replica, args=(rid,), daemon=False,
-                             name=f"orca-swap-{rid[:16]}")
-        t.start()
-
-    # Start swap monitor
-    asyncio.create_task(_swap_monitor(job_id, old_replicas, list(new_replicas), ready_threshold))
+    # Start monitor that kills old replicas when new ones are ready
+    asyncio.create_task(_swap_monitor(job_id, old_replicas,
+                                      scale_result["new_replicas"], ready_threshold))
 
     return {
         "status": "swapping",
         "old_replicas": old_replicas,
-        "new_replicas": new_replicas,
+        "new_replicas": scale_result["new_replicas"],
         "ready_threshold": ready_threshold,
-        "version": version,
+        "version": scale_result["version"],
     }
 
 
@@ -1066,14 +1314,12 @@ async def _swap_monitor(job_id: str, old_replicas: list[str],
     while len(ready_set) < ready_threshold and time.time() < deadline:
         await asyncio.sleep(5)
 
-        # Check if job is already done
         jt = get_job_tracker()
         rec = jt.get(job_id)
         if rec and rec.status in ("succeeded", "failed", "cancelled"):
             logger.info("[Swap] Job %s ended during swap, aborting monitor", job_id)
             break
 
-        # Check which new replicas have sent heartbeats
         for rid in new_replicas:
             if rid in ready_set:
                 continue
@@ -1089,19 +1335,7 @@ async def _swap_monitor(job_id: str, old_replicas: list[str],
 
     if len(ready_set) >= ready_threshold:
         logger.info("[Swap] Threshold met for %s, killing old replicas: %s", job_id, old_replicas)
-
-        # Force-reclaim old replicas' inflight chunks
-        chunk_mgr = get_chunk_manager()
-        result = chunk_mgr.force_reclaim(job_id, old_replicas)
-        logger.info("[Swap] Reclaimed from old replicas: %s", result)
-
-        # Tear down old clusters in background
-        for rid in old_replicas:
-            cm.set_replica_state(job_id, rid, phase="swapped_out")
-            threading.Thread(
-                target=sky_down_with_retry, args=(rid,),
-                daemon=True, name=f"swap-down-{rid[:12]}",
-            ).start()
+        _do_kill(job_id, old_replicas, phase="swapped_out")
     else:
         logger.warning(
             "[Swap] Timeout for %s: only %d/%d new replicas ready. Old replicas kept alive.",

@@ -106,6 +106,40 @@ class VPCQuotaTracker:
             })
         return pd.DataFrame(rows)
 
+    def full_quota_summary(self) -> pd.DataFrame:
+        """Get all quotas across all regions/markets/families (including unused)."""
+        rows = []
+        seen = set()
+        quota_cols = [c for c in self.quota_df.columns if "_on_demand" in c or "_spot" in c]
+        for col in quota_cols:
+            # Parse region and market from column name like "us-east-1_on_demand"
+            if col.endswith("_on_demand"):
+                region = col[:-10]  # strip "_on_demand"
+                market = "on_demand"
+            elif col.endswith("_spot"):
+                region = col[:-5]   # strip "_spot"
+                market = "spot"
+            else:
+                continue
+            for family in self.quota_df["Family_Type"].unique():
+                key = (region, market, family)
+                if key in seen:
+                    continue
+                seen.add(key)
+                baseline = self.get_baseline_quota(region, market, family)
+                if baseline <= 0:
+                    continue
+                used = self.get_used_vcpu(region, market, family)
+                rows.append({
+                    "Region": region,
+                    "Market": market,
+                    "Family": family,
+                    "Baseline": int(baseline),
+                    "Used": int(used),
+                    "Available": int(baseline - used),
+                })
+        return pd.DataFrame(rows)
+
     # ---- SQLite-backed reservation persistence ----
 
     def _init_db(self):

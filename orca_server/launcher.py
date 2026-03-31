@@ -36,6 +36,15 @@ from quota.region_selector import get_cached_quotas, get_instance_family, get_or
 from orca_server.job_templates import get_vllm_config_template, replace_run_vllm, replace_run_vllm_online
 from utils.utils import split_uri, update_template, update_yaml_file
 
+# EFA-capable instance families (NVSwitch/NVLink, multi-NIC).
+# network_tier=best enables EFA, DLAMI, NCCL auto-config on AWS.
+EFA_PREFIXES = ('p3.', 'p3dn.', 'p4d.', 'p4de.', 'p5.', 'p5e.')
+
+
+def _needs_efa(instance_type: str) -> bool:
+    """Check if instance type supports EFA high-performance networking."""
+    return any(instance_type.startswith(p) for p in EFA_PREFIXES)
+
 
 async def sp_launch_vllm_batch_with_fallback(
     request: BatchedRequest,
@@ -139,18 +148,20 @@ async def sp_launch_vllm_batch(
     )
 
     # Build resources with any_of for fallback regions
+    use_efa = _needs_efa(config.instance_type)
     if ordered_regions:
         any_of_resources = []
         for candidate in ordered_regions[:5]:
-            any_of_resources.append(
-                {
-                    "region": candidate.region,
-                    "instance_type": config.instance_type,
-                    "use_spot": candidate.use_spot,
-                    "disk_size": "300GB",
-                    "ports": VLLM_PORT,
-                }
-            )
+            res = {
+                "region": candidate.region,
+                "instance_type": config.instance_type,
+                "use_spot": candidate.use_spot,
+                "disk_size": "300GB",
+                "ports": VLLM_PORT,
+            }
+            if use_efa:
+                res["network_tier"] = "best"
+            any_of_resources.append(res)
         job_logger.info(
             f"[RegionSelector] Trying regions: {[(c.region, 'spot' if c.use_spot else 'on-demand') for c in ordered_regions[:5]]}"
         )
@@ -162,6 +173,8 @@ async def sp_launch_vllm_batch(
             "disk_size": "300GB",
             "ports": VLLM_PORT,
         }
+        if use_efa:
+            resources_config["network_tier"] = "best"
 
     # For per-config templates, substitute all placeholders
     if "vllm_configs" in template_path:
@@ -489,7 +502,7 @@ async def launch_chunked_replicas(
         replica_config = config.model_copy(update={
             "decision_id": replica_id,
             "replicas": 1,
-            "num_instances": config.pp_size,
+            "num_instances": config.num_nodes,  # solver handles fixed-size (p4d) vs variable-size (g6e)
         })
         job_logger.info(f"[Chunked] Launching replica {i}/{num_replicas}: {replica_id}")
         try:
@@ -517,7 +530,7 @@ async def launch_chunked_replicas(
     # Track parent job (individual replicas register themselves on launch)
     cm.register(config.decision_id, config.decision_id,
                 instance_type=config.instance_type,
-                num_instances=num_replicas * config.pp_size)
+                num_instances=num_replicas * config.num_nodes)
     return True
 
 
@@ -547,16 +560,20 @@ async def _launch_chunked_replica(
         prefer_spot=getattr(request, "prefer_spot", True),
     )
 
+    use_efa = _needs_efa(config.instance_type)
     if ordered_regions:
         any_of_resources = []
         for candidate in ordered_regions[:5]:
-            any_of_resources.append({
+            res = {
                 "region": candidate.region,
                 "instance_type": config.instance_type,
                 "use_spot": candidate.use_spot,
                 "disk_size": "300GB",
                 "ports": VLLM_PORT,
-            })
+            }
+            if use_efa:
+                res["network_tier"] = "best"
+            any_of_resources.append(res)
         resources_config = {"any_of": any_of_resources}
     else:
         resources_config = {
@@ -565,6 +582,8 @@ async def _launch_chunked_replica(
             "disk_size": "300GB",
             "ports": VLLM_PORT,
         }
+        if use_efa:
+            resources_config["network_tier"] = "best"
 
     # Build YAML using the chunked runner template
     replace_run_dict = replace_run_vllm(request, config, job_dirname, logger=job_logger)
@@ -628,9 +647,28 @@ async def _launch_chunked_replica(
                 job_logger.info(f"[Chunked] Replica {replica_id} completed")
             cm.set_replica_state(parent_job_id, replica_id, phase="completed")
         except Exception as e:
-            if job_logger:
-                job_logger.error(f"[Chunked] Replica {replica_id} error: {e}")
-            cm.set_replica_state(parent_job_id, replica_id, phase="failed")
+            # sky.tail_logs raises when the log stream is cancelled by another
+            # process (e.g. assembly, SkyPilot internal).  This is NOT a replica
+            # failure — the vLLM process may still be running or already done.
+            current = cm.get_replica_states(parent_job_id).get(replica_id, {})
+            cur_phase = current.get("phase", "")
+            err_str = str(e)
+            is_log_cancel = "cancelled" in err_str.lower() or "cancel" in err_str.lower()
+            jt_tmp = get_job_tracker()
+            rec_tmp = jt_tmp.get(parent_job_id)
+            job_done = rec_tmp and rec_tmp.status in ("succeeded", "failed")
+
+            if cur_phase == "completed":
+                if job_logger:
+                    job_logger.info(f"[Chunked] Replica {replica_id} log stream ended (already completed)")
+            elif is_log_cancel or job_done:
+                # Log cancellation or job already finished — not a real failure
+                if job_logger:
+                    job_logger.info(f"[Chunked] Replica {replica_id} log stream cancelled (job {'done' if job_done else 'active'}): {e}")
+            else:
+                if job_logger:
+                    job_logger.error(f"[Chunked] Replica {replica_id} error: {e}")
+                cm.set_replica_state(parent_job_id, replica_id, phase="failed")
         finally:
             if quota_tracker is not None:
                 quota_tracker.release_cluster(replica_id)
@@ -638,6 +676,20 @@ async def _launch_chunked_replica(
             cm.unregister_thread(replica_id)
             if not persist:
                 sky_down_with_retry(replica_id)
+
+            # Check if ALL replicas are terminal — if so, mark the job failed
+            # (prevents orphaned jobs stuck in "launching" when setup fails)
+            jt = get_job_tracker()
+            rec = jt.get(parent_job_id)
+            if rec and rec.status in ("launching", "loading_model"):
+                states = cm.get_replica_states(parent_job_id)
+                terminal = {"completed", "failed", "dead", "killed", "swapped_out"}
+                if states and all(s.get("phase") in terminal for s in states.values()):
+                    any_success = any(s.get("phase") == "completed" for s in states.values())
+                    if not any_success:
+                        jt.update_status(parent_job_id, "failed")
+                        if job_logger:
+                            job_logger.warning("[Chunked] All replicas failed — marking job as failed")
 
     t = threading.Thread(
         target=monitor_replica, args=(job_id_sky,),

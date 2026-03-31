@@ -84,7 +84,7 @@ class ReplicaWatchdog:
             states = self._cm.get_replica_states(job_id)
             for replica_id, state in states.items():
                 phase = state.get("phase", "")
-                if phase in ("launching", "provisioned", "completed", "swapped_out"):
+                if phase in ("launching", "provisioned", "completed", "swapped_out", "killed"):
                     continue  # not expected to heartbeat yet (or already done)
 
                 # Failed replicas: force-reclaim their chunks (monitor thread set phase
@@ -119,10 +119,39 @@ class ReplicaWatchdog:
                 return None
             return rc.buffer[-1].timestamp
 
+    def _is_graceful_completion(self, job_id: str, replica_id: str) -> bool:
+        """Check if a replica finished its work gracefully (not a failure)."""
+        state = self._cm.get_replica_states(job_id).get(replica_id, {})
+        if state.get("phase") not in ("running",):
+            return False
+        # Check if it actually processed requests
+        snap = self._mc.get_replica_latest(job_id, replica_id)
+        if snap is None or snap.request_success_total <= 0:
+            return False
+        # Job must still be active (not already terminal)
+        rec = self._jt.get(job_id)
+        if rec and rec.status in ("succeeded", "failed", "cancelled"):
+            return False
+        return True
+
     def _handle_dead_replica(self, job_id: str, replica_id: str, last_hb: float | None) -> None:
         """Force-reclaim chunks and optionally schedule recovery."""
         if replica_id in self._dead_replicas:
             return  # already processed
+
+        # Check for graceful completion before treating as dead
+        if self._is_graceful_completion(job_id, replica_id):
+            self._dead_replicas[replica_id] = time.time()
+            logger.info(
+                "[Watchdog] Replica %s completed gracefully (last heartbeat: %s)",
+                replica_id, f"{last_hb:.1f}" if last_hb else "never",
+            )
+            self._cm.set_replica_state(job_id, replica_id, phase="completed")
+            self._mc.exclude_replica(job_id, replica_id)
+            # Trigger cluster teardown
+            from orca_server.job_manager import sky_down_with_retry
+            sky_down_with_retry(replica_id)
+            return
 
         self._dead_replicas[replica_id] = time.time()
         logger.warning(

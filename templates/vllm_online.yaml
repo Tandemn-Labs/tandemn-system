@@ -28,7 +28,8 @@ setup: |
   # Pre-install Ray to work around SkyPilot bug (ray[default]==added parse error)
   uv pip install "ray[default]>=2.48.0"
 
-  # Install vLLM (uses transformers 5.x which removed all_special_tokens_extended)
+  # Install vLLM (transformers > 5.0.0 breaks vLLM 0.10.0 dataclass configs)
+  uv pip install "transformers==4.57.6"
   uv pip install "vllm==0.10.0"
 
   # Fix vLLM DisabledTqdm bug: duplicate 'disable' kwarg with newer huggingface_hub

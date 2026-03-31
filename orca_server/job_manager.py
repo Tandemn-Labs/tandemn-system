@@ -284,7 +284,7 @@ class JobTracker:
                 else 2048,
                 slo_hours=req.slo_deadline_hours or 4,
                 region="us-east-1",
-                market="spot",
+                market="spot" if getattr(req, "prefer_spot", True) else "on_demand",
             ),
             submitted_at=time.time(),
         )

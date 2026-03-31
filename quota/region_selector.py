@@ -36,10 +36,10 @@ AWS_REGIONS = [
 # Instance family to quota code mapping
 # G and VT instances share one quota, P instances have their own
 QUOTA_CODES = {
-    "g": "L-DB2E81BA",  # Running On-Demand G and VT instances
-    "g_spot": "L-3819A6DF",  # Running Spot G and VT instances
-    "p": "L-417A185B",  # Running On-Demand P instances
-    "p_spot": "L-417A185B",  # Running Spot P instances (same code, different quota)
+    "g": "L-DB2E81BA",       # Running On-Demand G and VT instances
+    "g_spot": "L-3819A6DF",  # All G and VT Spot Instance Requests
+    "p": "L-417A185B",       # Running On-Demand P instances (all P families share this)
+    "p_spot": "L-7212CCBC",  # All P Spot Instance Requests
 }
 
 
@@ -311,6 +311,137 @@ def print_quota_summary():
         )
 
     print()
+
+
+# ---------------------------------------------------------------------------
+# Automatic quota discovery from AWS Service Quotas API
+# ---------------------------------------------------------------------------
+
+# All AWS regions to scan (superset of AWS_REGIONS used for launch)
+ALL_AWS_REGIONS = [
+    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+    "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-north-1",
+    "ap-south-1", "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+    "ap-southeast-1", "ap-southeast-2",
+    "ca-central-1", "sa-east-1",
+]
+
+# Family-level quota codes (source: https://spenserpothier.github.io/aws-quota-code-list/)
+FAMILY_QUOTA_CODES_MAP = {
+    "G":         {"on_demand": "L-DB2E81BA", "spot": "L-3819A6DF"},
+    "P4_P3_P2":  {"on_demand": "L-417A185B", "spot": "L-7212CCBC"},
+    "P5":        {"on_demand": "L-417A185B", "spot": "L-7212CCBC"},  # same as P4/P3/P2
+}
+
+GPU_VRAM_GB = {
+    "H100": 80, "A100": 80, "V100": 32, "L40S": 48,
+    "L4": 24, "A10G": 24, "T4": 16, "M60": 8, "Radeon Pro V520": 8,
+}
+
+
+def _boto3_get_quota(quota_code: str, region: str) -> int:
+    """Fetch a single quota value via boto3."""
+    try:
+        from sky.adaptors import aws as aws_adaptor
+        client = aws_adaptor.client("service-quotas", region_name=region)
+        resp = client.get_service_quota(ServiceCode="ec2", QuotaCode=quota_code)
+        return int(resp["Quota"]["Value"])
+    except Exception:
+        # Fallback to CLI
+        return query_quota(region, quota_code)
+
+
+def _fetch_family_region(family_type: str, region: str):
+    """Fetch on-demand + spot quota for one (family, region) pair."""
+    codes = FAMILY_QUOTA_CODES_MAP.get(family_type, FAMILY_QUOTA_CODES_MAP["G"])
+    on_demand = _boto3_get_quota(codes["on_demand"], region)
+    spot = _boto3_get_quota(codes["spot"], region)
+    return (family_type, region, on_demand, spot)
+
+
+def refresh_quotas_from_aws(
+    csv_path: str = "quota/aws_gpu_quota_by_region.csv",
+    quota_tracker=None,
+):
+    """Query AWS Service Quotas API and write/overwrite the quota CSV.
+
+    Path A: CSV exists; keep hardware specs, overwrite quota columns.
+    Path B: No CSV (fresh install); build specs from config.py AWS_INSTANCES.
+    """
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
+    import pandas as pd
+
+    logger.info("[QuotaRefresh] Starting AWS quota discovery...")
+
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        logger.info("[QuotaRefresh] Updating existing CSV (%d instance types)", len(df))
+    else:
+        from orca_server.config import AWS_INSTANCES
+        rows = []
+        for inst, (gpu_name, gpu_count, vcpus) in sorted(AWS_INSTANCES.items()):
+            family_raw = inst.split(".")[0]
+            family_display = family_raw[0].upper() + family_raw[1:]
+            if family_raw.startswith("g"):
+                family_type = "G"
+            elif family_raw.startswith("p5"):
+                family_type = "P5"
+            else:
+                family_type = "P4_P3_P2"
+            vram = GPU_VRAM_GB.get(gpu_name, 0)
+            gpu_type_str = f"{gpu_count}x {gpu_name}" if gpu_count > 1 else f"1x {gpu_name}"
+            rows.append({
+                "Family": family_display,
+                "Instance_Type": inst,
+                "vCPU": vcpus,
+                "GPU_Type": gpu_type_str,
+                "VRAM_per_GPU": float(vram),
+                "Total_VRAM": float(vram * gpu_count),
+                "Family_Type": family_type,
+            })
+        df = pd.DataFrame(rows)
+        logger.info("[QuotaRefresh] Fresh CSV from %d instances in AWS_INSTANCES", len(df))
+
+    # Parallel fetch across all (family_type, region) combos
+    family_types = sorted(df["Family_Type"].unique())
+    tasks = [(ft, region) for ft in family_types for region in ALL_AWS_REGIONS]
+    quotas = {}
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(_fetch_family_region, ft, r): (ft, r) for ft, r in tasks}
+        for future in as_completed(futures):
+            try:
+                ft, region, on_demand, spot = future.result()
+                quotas[(ft, region)] = {"on_demand": on_demand, "spot": spot}
+            except Exception as e:
+                ft, r = futures[future]
+                logger.warning("[QuotaRefresh] Failed %s/%s: %s", ft, r, e)
+                quotas[(ft, r)] = {"on_demand": 0, "spot": 0}
+
+    logger.info("[QuotaRefresh] Fetched quotas for %d (family, region) pairs", len(quotas))
+
+    # Build quota columns
+    for region in ALL_AWS_REGIONS:
+        for market in ("on_demand", "spot"):
+            col = f"{region}_{market}"
+            df[col] = df["Family_Type"].map(
+                lambda ft, r=region, m=market: quotas.get((ft, r), {}).get(m, 0)
+            )
+
+    # Ensure column order: spec cols first, then quota cols sorted
+    spec_cols = ["Family", "Instance_Type", "vCPU", "GPU_Type", "VRAM_per_GPU", "Total_VRAM", "Family_Type"]
+    quota_col_list = sorted([c for c in df.columns if c not in spec_cols])
+    df = df[spec_cols + quota_col_list]
+
+    Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(csv_path, index=False)
+    logger.info("[QuotaRefresh] Wrote %d rows to %s", len(df), csv_path)
+
+    if quota_tracker is not None:
+        quota_tracker.reload_quota()
+        logger.info("[QuotaRefresh] Reloaded quota tracker")
 
 
 if __name__ == "__main__":
