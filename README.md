@@ -302,17 +302,183 @@ The control plane exposes a REST API at `http://localhost:26336`:
 | `GET /job/{id}/replicas` | Per-replica state (phase, region, metrics) |
 | `GET /job/{id}/replicas/{rid}/metrics` | Metrics for a specific replica |
 | `GET /job/{id}/replicas/summaries` | Per-replica completion summaries |
+| `POST /job/{id}/scale` | Add replicas to a running job |
+| `POST /job/{id}/kill` | Kill specific replicas |
 | `POST /job/{id}/swap` | Hot-swap replicas to new GPU config |
 | **Chunks** | |
 | `GET /job/{id}/chunks/progress` | Chunk-level progress (pending/inflight/completed/failed) |
 | `POST /job/{id}/chunks/pull` | Pull next chunk (replica-facing) |
 | `POST /job/{id}/chunks/complete` | Mark chunk completed |
 | `POST /job/{id}/chunks/renew` | Renew chunk lease |
+| **Dashboard** | |
+| `GET /dashboard` | Web dashboard (HTML) |
+| `GET /dashboard/poll` | Dashboard data (JSON, polling fallback) |
+| `GET /dashboard/stream` | Dashboard data (SSE, real-time) |
 | **Analytics** | |
 | `GET /analytics/runs` | List completed runs |
 | `GET /analytics/runs/{id}` | Full run report |
 | `GET /analytics/runs/{id}/timeseries` | Scheduler timeseries |
 | `GET /quota/status` | Quota usage across regions |
+
+### Monitoring Endpoint Details
+
+<details>
+<summary><strong>GET /job/{id}/metrics</strong> — Aggregated metrics snapshot</summary>
+
+**Response:**
+```json
+{
+  "job_id": "mo-qwen7b-a1b2",
+  "timestamp": 1711612800.0,
+  "avg_generation_throughput_toks_per_s": 1450.5,
+  "avg_prompt_throughput_toks_per_s": 320.0,
+  "gpu_cache_usage_perc": 0.42,
+  "num_requests_running": 64,
+  "num_requests_waiting": 0,
+  "num_requests_swapped": 0,
+  "request_success_total": 3500,
+  "num_preemptions_total": 0,
+  "generation_tokens_total": 2800000,
+  "prompt_tokens_total": 350000,
+  "gpu_sm_util_pct": 95.2,
+  "gpu_mem_bw_util_pct": 61.0,
+  "ttft_ms_p50": 45.0,
+  "ttft_ms_p95": 120.0,
+  "tpot_ms_p50": 8.5,
+  "tpot_ms_p95": 15.0
+}
+```
+</details>
+
+<details>
+<summary><strong>GET /job/{id}/replicas</strong> — Per-replica state</summary>
+
+**Response:**
+```json
+{
+  "replicas": [
+    {
+      "replica_id": "mo-qwen7b-a1b2-r0",
+      "phase": "running",
+      "region": "us-east-2",
+      "market": "spot",
+      "instance_type": "g5.xlarge",
+      "has_metrics": true
+    }
+  ]
+}
+```
+Phases: `launching` → `running` → `completed` | `failed` | `killed` | `swapped_out`
+</details>
+
+<details>
+<summary><strong>GET /job/{id}/chunks/progress</strong> — Chunk-level progress</summary>
+
+**Response:**
+```json
+{
+  "total": 10,
+  "pending": 3,
+  "inflight": 2,
+  "completed": 5,
+  "failed": 0,
+  "all_done": false
+}
+```
+</details>
+
+<details>
+<summary><strong>POST /job/{id}/scale</strong> — Add replicas to a running job</summary>
+
+**Request:**
+```json
+{
+  "count": 2,
+  "gpu_type": "L40S",
+  "tp_size": 4,
+  "pp_size": 1,
+  "on_demand": false,
+  "force": false
+}
+```
+`gpu_type`, `tp_size`, `pp_size` optional — inherited from existing job if omitted.
+
+**Response:**
+```json
+{
+  "status": "scaling",
+  "new_replicas": ["mo-qwen7b-a1b2-v2-r0", "mo-qwen7b-a1b2-v2-r1"],
+  "version": 2
+}
+```
+</details>
+
+<details>
+<summary><strong>POST /job/{id}/kill</strong> — Kill specific replicas</summary>
+
+**Request:**
+```json
+{
+  "replica_ids": ["mo-qwen7b-a1b2-r0"]
+}
+```
+
+**Response:**
+```json
+{
+  "status": "killing",
+  "killed": ["mo-qwen7b-a1b2-r0"],
+  "skipped": [],
+  "reclaimed": 3
+}
+```
+Inflight chunks reclaimed to pending queue. Clusters tear down in background.
+</details>
+
+<details>
+<summary><strong>POST /job/{id}/swap</strong> — Hot-swap replicas</summary>
+
+**Request:**
+```json
+{
+  "gpu_type": "H100",
+  "tp_size": 4,
+  "num_replicas": 2,
+  "ready_threshold": 1,
+  "force": false
+}
+```
+
+**Response:**
+```json
+{
+  "status": "swapping",
+  "old_replicas": ["mo-qwen7b-a1b2-r0"],
+  "new_replicas": ["mo-qwen7b-a1b2-v2-r0", "mo-qwen7b-a1b2-v2-r1"],
+  "ready_threshold": 1,
+  "version": 2
+}
+```
+New replicas launch first. Old replicas killed after `ready_threshold` new ones start inferring.
+</details>
+
+<details>
+<summary><strong>GET /dashboard/poll</strong> — Full dashboard payload</summary>
+
+**Response:**
+```json
+{
+  "jobs": [{ "job_id": "...", "status": "...", "model_name": "...", "progress": 0.5, ... }],
+  "metrics": { "job_id": { "avg_generation_throughput_toks_per_s": 1450.5, ... } },
+  "chunks": { "job_id": { "total": 10, "completed": 5, "inflight": 2, ... } },
+  "replicas": { "job_id": [{ "replica_id": "...", "phase": "running", "region": "us-east-2", ... }] },
+  "cost": { "job_id": { "accrued_usd": 0.15, "projected_total_usd": 0.43, "eta_sec": 2482 } },
+  "events": [{ "ts": 1711612800.0, "level": "info", "message": "..." }],
+  "timeseries": { "job_id": [{ "timestamp": ..., "avg_generation_throughput_toks_per_s": ... }] },
+  "quota": [{ "Region": "us-east-2", "Family": "G", "Market": "spot", "Used": 4, "Baseline": 128 }]
+}
+```
+</details>
 
 ---
 
