@@ -74,6 +74,7 @@ Create a `.env` file in the project root:
 S3_UPLOAD_BUCKET=your-s3-bucket       # Must exist in your AWS account
 HF_TOKEN=hf_your_token_here           # Required for gated models
 ORCA_API_KEY=your-secret-key          # Recommended; see Security section
+KOI_SERVICE_URL=http://localhost:8090 # Optional: Koi placement engine
 ```
 
 </details>
@@ -111,6 +112,8 @@ The **automatic placement solver** — which selects GPU type, TP/PP configurati
 | Llama 3 70B Instruct | 70B | A100 |
 
 For models not listed, use `./orca plan` to see solver recommendations, or override manually with `--gpu` and `--tp`.
+
+**Koi integration.** When `KOI_SERVICE_URL` is set, `orca plan` and `orca deploy` call the [Koi](https://github.com/Tandemn-Labs/koi) LLM-powered placement engine in parallel with the roofline solver. Both recommendations are shown side by side. For deploy, a prompt lets you choose between them (`--skip-dangerously` auto-picks Koi). Falls back to roofline silently if Koi is unreachable.
 
 ---
 
@@ -589,6 +592,41 @@ New replicas launch first. Old replicas are killed after `ready_threshold` new r
   "quota": [{ "Region": "us-east-2", "Family": "G", "Market": "spot", "Used": 4, "Baseline": 128 }]
 }
 ```
+</details>
+
+<details>
+<summary><strong>GET /resources</strong> — Instance catalog + quota pools for Koi</summary>
+
+**Response:**
+```json
+{
+  "vpc_id": "orca-cluster",
+  "snapshot_time": "2026-03-31T20:02:40.791092",
+  "instances": [
+    {
+      "instance_type": "g6e.12xlarge",
+      "gpu_type": "L40S",
+      "gpus_per_instance": 4,
+      "vcpus": 48,
+      "quota_family": "G",
+      "gpu_memory_gb": 48.0,
+      "interconnect": "PCIe",
+      "cost_per_instance_hour_usd": 10.4926
+    }
+  ],
+  "quotas": [
+    {
+      "family": "G",
+      "region": "us-east-1",
+      "market": "on_demand",
+      "baseline_vcpus": 192,
+      "used_vcpus": 0
+    }
+  ]
+}
+```
+- **instances**: Multi-GPU instance types with GPU specs and SkyPilot pricing. Filtered to Koi-supported GPUs (H100, A100, L40S, L4, A10G).
+- **quotas**: Raw per-(family, region, market) vCPU limits from AWS. Koi's Oracle joins instances to quotas via `quota_family` to compute how many instances of each type can be launched.
 </details>
 
 ---
