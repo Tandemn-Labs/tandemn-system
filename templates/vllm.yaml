@@ -20,9 +20,6 @@ envs:
   CUDA_LAUNCH_BLOCKING: "0"  # Keep async (1 for debugging only)
 
 file_mounts:
-  /data:
-    mode: MOUNT
-    source: s3://tandemn_orca/test
   ~/batch_runner.py: ./templates/vllm_batch_runner_server.py
   ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py
 

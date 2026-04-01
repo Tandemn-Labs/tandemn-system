@@ -13,7 +13,7 @@ Orca handles all of that. Give it a model name, a JSONL file, and a deadline. Th
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
-- AWS credentials configured (`aws configure` or `~/.aws/credentials`)
+- AWS credentials configured (`aws configure` or `~/.aws/credentials`) — **currently supports AWS only**
 - Redis (for multi-replica chunked jobs): `docker run -d -p 6379:6379 redis`
 
 ---
@@ -38,7 +38,7 @@ Create a `.env` file in the project root:
 
 ```bash
 # .env
-S3_UPLOAD_BUCKET=tandemn-orca         # S3 bucket for uploads and outputs
+S3_UPLOAD_BUCKET=your-s3-bucket       # S3 bucket for uploads and outputs (must exist, your AWS account)
 HF_TOKEN=hf_your_token_here          # for gated models (Llama, Gemma, etc.)
 ```
 

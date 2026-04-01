@@ -228,7 +228,7 @@ async def lifespan(app: FastAPI):
             req = BatchedRequest(
                 user_id="watchdog-recovery",
                 model_name=model_name,
-                input_file=meta.get("s3_output_base", f"s3://tandemn-orca/{job_id}") + "/recovery.jsonl",
+                input_file=meta.get("s3_output_base", f"s3://{S3_UPLOAD_BUCKET}/{job_id}") + "/recovery.jsonl",
                 output_file="output.jsonl",
                 description="watchdog-recovery",
                 task_type="batch",
@@ -1016,7 +1016,7 @@ def _do_scale(job_id: str, count: int, gpu_type: str, tp_size: int, pp_size: int
 
     # Build BatchedRequest from job metadata
     meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
-    s3_base = meta.get("s3_output_base", "s3://tandemn-orca/scale")
+    s3_base = meta.get("s3_output_base", f"s3://{S3_UPLOAD_BUCKET}/scale")
     spec = rec.state.spec if rec and hasattr(rec, "state") and hasattr(rec.state, "spec") else None
     original_request = BatchedRequest(
         user_id="scale",

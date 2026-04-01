@@ -15,9 +15,6 @@ envs:
   VLLM_LOG_STATS_INTERVAL: "1"
 
 file_mounts:
-  /data:
-    mode: MOUNT
-    source: s3://tandemn_orca/test
   ~/batch_runner.py: ./templates/vllm_batch_runner.py
   ~/vllm_compat_patch.py: ./templates/vllm_compat_patch.py
 
