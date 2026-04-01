@@ -379,68 +379,84 @@ def _get_instance_price(instance_type: str, region: str) -> float:
         _pricing_cache[key] = 0.0
         return 0.0
 
-# GPU types Koi actually supports (matches Koi's GPU_SPECS)
+# GPU types Koi supports (matches Koi's GPU_SPECS)
 _KOI_GPU_TYPES = {"H100", "A100", "L40S", "L4", "A10G"}
+
+# Multi-GPU instances useful for LLM inference (mirrors roofline_magic filter)
+_KOI_INSTANCE_PREFIXES = (
+    "p5.", "p4d.", "p4de.",
+    "g6e.12xlarge", "g6e.24xlarge", "g6e.48xlarge",
+    "g5.12xlarge", "g5.24xlarge", "g5.48xlarge",
+    "g6.12xlarge", "g6.24xlarge", "g6.48xlarge",
+)
 
 
 @app.get("/resources")
 async def resources():
-    """Assemble a ResourceMap from quota + pricing for Koi integration."""
+    """Raw instance catalog + quota pools for Koi.
+
+    Returns two lists:
+      instances — one entry per relevant instance type with GPU specs and pricing
+      quotas   — per (family, region, market) vCPU limits from AWS
+
+    Koi's Oracle joins these: for a candidate (instance_type, TP, PP, DP),
+    it looks up the instance's quota_family, finds the best region, and checks
+    whether required_vcpus <= available_vcpus.
+    """
     tracker = get_quota_tracker()
     quota_df = tracker.quota_df
     summary = tracker.full_quota_summary()
 
-    resource_list = []
+    # ── Instance catalog ──────────────────────────────────────────────
+    # Price lookup uses us-east-1 as reference (Koi picks region from quotas)
+    instances = []
     for inst_type, (gpu_name, gpu_count, vcpus) in AWS_INSTANCES.items():
         if gpu_name not in _KOI_GPU_TYPES:
+            continue
+        if not inst_type.startswith(_KOI_INSTANCE_PREFIXES):
             continue
         gpu_mem = GPU_MEMORY_GB.get(gpu_name)
         if gpu_mem is None:
             continue
 
-        # Look up family type for this instance
+        # Look up family from quota CSV
         inst_row = quota_df[quota_df["Instance_Type"] == inst_type]
         if inst_row.empty:
             continue
         family_type = inst_row["Family_Type"].iloc[0]
 
-        interconnect = "NVLink" if inst_type.startswith("p") else "PCIe"
+        price = _get_instance_price(inst_type, "us-east-1")
 
-        # Find regions with available quota for this family
-        family_rows = summary[summary["Family"] == family_type]
-        for _, qrow in family_rows.iterrows():
-            if qrow["Market"] != "on_demand":
-                continue
-            baseline_vcpu = int(qrow["Baseline"])
-            if baseline_vcpu <= 0:
-                continue
-            region = qrow["Region"]
-            total_instances = baseline_vcpu // vcpus
-            used_vcpu = int(qrow["Used"])
-            allocated_instances = used_vcpu // vcpus
-            total_gpus = total_instances * gpu_count
-            if total_gpus <= 0:
-                continue
+        instances.append({
+            "instance_type": inst_type,
+            "gpu_type": gpu_name,
+            "gpus_per_instance": gpu_count,
+            "vcpus": vcpus,
+            "quota_family": family_type,
+            "gpu_memory_gb": float(gpu_mem),
+            "interconnect": "NVLink" if inst_type.startswith("p") else "PCIe",
+            "cost_per_instance_hour_usd": round(price, 4),
+        })
 
-            price = _get_instance_price(inst_type, region)
-
-            resource_list.append({
-                "gpu_type": gpu_name,
-                "instance_type": inst_type,
-                "gpus_per_instance": gpu_count,
-                "total_gpus": total_gpus,
-                "allocated_gpus": allocated_instances * gpu_count,
-                "cost_per_instance_hour_usd": round(price, 4),
-                "gpu_memory_gb": float(gpu_mem),
-                "region": region,
-                "interconnect": interconnect,
-            })
+    # ── Quota pools ───────────────────────────────────────────────────
+    quotas = []
+    for _, row in summary.iterrows():
+        baseline = int(row["Baseline"])
+        if baseline <= 0:
+            continue
+        quotas.append({
+            "family": row["Family"],
+            "region": row["Region"],
+            "market": row["Market"],
+            "baseline_vcpus": baseline,
+            "used_vcpus": int(row["Used"]),
+        })
 
     return {
         "vpc_id": "orca-cluster",
-        "region": "us-east-1",
         "snapshot_time": datetime.now().isoformat(),
-        "resources": resource_list,
+        "instances": instances,
+        "quotas": quotas,
     }
 
 
