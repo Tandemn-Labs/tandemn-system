@@ -148,8 +148,9 @@ async def lifespan(app: FastAPI):
         app.state.redis_available = True
     except Exception as _e:
         logger.warning(
-            f"[Redis] Unavailable at {REDIS_URL}: {_e} — "
-            "chunked multi-replica jobs will fail. Single-cluster jobs unaffected."
+            f"[Redis] ⚠ Unavailable at {REDIS_URL}: {_e} — "
+            "all batch jobs will fail (chunked mode is the default path). "
+            "Start Redis: docker run -d -p 6379:6379 redis"
         )
         app.state.redis_available = False
 
