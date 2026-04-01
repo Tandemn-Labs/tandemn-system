@@ -296,45 +296,54 @@ class TestBackwardCompatibility:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Pricing loader (server-side unit test)
+# Pricing + GPU filtering (server-side unit tests)
 # ──────────────────────────────────────────────────────────────────────────────
 
-class TestPricingLoader:
-    def test_load_pricing_returns_dict(self):
-        """_load_pricing loads AWS instance prices."""
-        from server import _load_pricing, _PRICING_CACHE
-        # Reset cache
-        import server
-        server._PRICING_CACHE = None
-        pricing = _load_pricing()
-        assert isinstance(pricing, dict)
+class TestResourceFiltering:
+    def test_skypilot_pricing_returns_positive(self):
+        """SkyPilot catalog returns a positive price for known instances."""
+        from server import _get_instance_price
+        price = _get_instance_price("g6e.12xlarge", "us-east-1")
+        assert price > 0
 
-    def test_load_pricing_has_known_instances(self):
-        """Pricing includes known AWS instances."""
-        from server import _load_pricing
-        import server
-        server._PRICING_CACHE = None
-        pricing = _load_pricing()
-        # At least some instances should be present
-        if pricing:  # CSV may not exist in CI
-            known = {"p5.48xlarge", "p4d.24xlarge", "g6e.12xlarge", "g6e.48xlarge"}
-            found = known & set(pricing.keys())
-            assert len(found) > 0, f"Expected some of {known} in pricing"
+    def test_skypilot_pricing_cached(self):
+        """Second call uses cache."""
+        from server import _get_instance_price, _pricing_cache
+        _pricing_cache.pop("g5.12xlarge:us-east-1", None)
+        p1 = _get_instance_price("g5.12xlarge", "us-east-1")
+        p2 = _get_instance_price("g5.12xlarge", "us-east-1")
+        assert p1 == p2
 
-    def test_load_pricing_values_positive(self):
-        """All prices should be positive."""
-        from server import _load_pricing
-        import server
-        server._PRICING_CACHE = None
-        pricing = _load_pricing()
-        for inst, price in pricing.items():
-            assert price > 0, f"Price for {inst} should be positive, got {price}"
+    def test_no_v100_in_koi_gpu_types(self):
+        """V100 is excluded from Koi-supported GPUs."""
+        from server import _KOI_GPU_TYPES
+        assert "V100" not in _KOI_GPU_TYPES
 
-    def test_load_pricing_cached(self):
-        """Second call returns cached result."""
-        from server import _load_pricing
-        import server
-        server._PRICING_CACHE = None
-        p1 = _load_pricing()
-        p2 = _load_pricing()
-        assert p1 is p2  # same object = cached
+    def test_koi_gpu_types_coverage(self):
+        """Koi GPU types includes the main inference GPUs."""
+        from server import _KOI_GPU_TYPES
+        assert {"H100", "A100", "L40S", "A10G", "L4"} == _KOI_GPU_TYPES
+
+
+@pytest.mark.asyncio
+async def test_resources_no_v100(client):
+    """V100 instances must not appear in /resources."""
+    data = (await client.get("/resources")).json()
+    for r in data["resources"]:
+        assert r["gpu_type"] != "V100", f"V100 should be filtered out: {r}"
+
+
+@pytest.mark.asyncio
+async def test_resources_no_zero_gpu_entries(client):
+    """Entries with total_gpus=0 must not appear."""
+    data = (await client.get("/resources")).json()
+    for r in data["resources"]:
+        assert r["total_gpus"] > 0, f"total_gpus=0 should be filtered: {r}"
+
+
+@pytest.mark.asyncio
+async def test_resources_prices_from_skypilot(client):
+    """Prices should come from SkyPilot catalog (non-zero for known instances)."""
+    data = (await client.get("/resources")).json()
+    priced = [r for r in data["resources"] if r["cost_per_instance_hour_usd"] > 0]
+    assert len(priced) > 0, "At least some resources should have SkyPilot pricing"

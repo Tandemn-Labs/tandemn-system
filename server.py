@@ -358,46 +358,45 @@ async def quota_status():
     }
 
 
-# ---- Pricing cache (parsed once from cloud_instances_specs.csv) ----
-_PRICING_CACHE: dict | None = None
+# ---- Pricing via SkyPilot catalog (always up-to-date) ----
+import sky.catalog as _sky_catalog
 
-def _load_pricing() -> dict:
-    """Load instance pricing from CSV. Returns {instance_name: price_per_hour}."""
-    global _PRICING_CACHE
-    if _PRICING_CACHE is not None:
-        return _PRICING_CACHE
-    import csv, re as _re
-    _PRICING_CACHE = {}
-    csv_path = Path("LLM_placement_solver/config/cloud_instances_specs.csv")
-    if not csv_path.exists():
-        return _PRICING_CACHE
-    with open(csv_path) as f:
-        for row in csv.DictReader(f):
-            if row.get("Cloud Provider") != "AWS":
-                continue
-            name = row.get("Instance Name", "").strip()
-            raw_price = row.get("Price per Hour USD", "").strip()
-            # Parse "$6.85" or "$140-160 (estimated)" → take first number
-            m = _re.search(r"\$?([\d.]+)", raw_price)
-            if name and m:
-                _PRICING_CACHE[name] = float(m.group(1))
-    return _PRICING_CACHE
+_pricing_cache: dict[str, float] = {}
+
+def _get_instance_price(instance_type: str, region: str) -> float:
+    """Get on-demand hourly price from SkyPilot's AWS catalog. Cached."""
+    key = f"{instance_type}:{region}"
+    if key in _pricing_cache:
+        return _pricing_cache[key]
+    try:
+        cost = _sky_catalog.get_hourly_cost(
+            instance_type=instance_type, use_spot=False,
+            region=region, zone=None, clouds="aws",
+        )
+        _pricing_cache[key] = cost
+        return cost
+    except Exception:
+        _pricing_cache[key] = 0.0
+        return 0.0
+
+# GPU types Koi actually supports (matches Koi's GPU_SPECS)
+_KOI_GPU_TYPES = {"H100", "A100", "L40S", "L4", "A10G"}
 
 
 @app.get("/resources")
 async def resources():
     """Assemble a ResourceMap from quota + pricing for Koi integration."""
     tracker = get_quota_tracker()
-    pricing = _load_pricing()
     quota_df = tracker.quota_df
     summary = tracker.full_quota_summary()
 
     resource_list = []
     for inst_type, (gpu_name, gpu_count, vcpus) in AWS_INSTANCES.items():
+        if gpu_name not in _KOI_GPU_TYPES:
+            continue
         gpu_mem = GPU_MEMORY_GB.get(gpu_name)
         if gpu_mem is None:
             continue
-        price = pricing.get(inst_type, 0.0)
 
         # Look up family type for this instance
         inst_row = quota_df[quota_df["Instance_Type"] == inst_type]
@@ -412,7 +411,6 @@ async def resources():
         for _, qrow in family_rows.iterrows():
             if qrow["Market"] != "on_demand":
                 continue
-            avail_vcpu = int(qrow["Available"])
             baseline_vcpu = int(qrow["Baseline"])
             if baseline_vcpu <= 0:
                 continue
@@ -420,14 +418,19 @@ async def resources():
             total_instances = baseline_vcpu // vcpus
             used_vcpu = int(qrow["Used"])
             allocated_instances = used_vcpu // vcpus
+            total_gpus = total_instances * gpu_count
+            if total_gpus <= 0:
+                continue
+
+            price = _get_instance_price(inst_type, region)
 
             resource_list.append({
                 "gpu_type": gpu_name,
                 "instance_type": inst_type,
                 "gpus_per_instance": gpu_count,
-                "total_gpus": total_instances * gpu_count,
+                "total_gpus": total_gpus,
                 "allocated_gpus": allocated_instances * gpu_count,
-                "cost_per_instance_hour_usd": price,
+                "cost_per_instance_hour_usd": round(price, 4),
                 "gpu_memory_gb": float(gpu_mem),
                 "region": region,
                 "interconnect": interconnect,
