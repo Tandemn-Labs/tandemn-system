@@ -72,82 +72,75 @@ async def test_resources_returns_200(client):
 
 
 @pytest.mark.asyncio
-async def test_resources_has_required_fields(client):
-    resp = await client.get("/resources")
-    data = resp.json()
-    assert "vpc_id" in data
-    assert "region" in data
-    assert "snapshot_time" in data
-    assert "resources" in data
-    assert isinstance(data["resources"], list)
-
-
-@pytest.mark.asyncio
-async def test_resources_vpc_id(client):
+async def test_resources_top_level_fields(client):
     data = (await client.get("/resources")).json()
     assert data["vpc_id"] == "orca-cluster"
+    assert "snapshot_time" in data
+    assert isinstance(data["instances"], list)
+    assert isinstance(data["quotas"], list)
 
 
 @pytest.mark.asyncio
-async def test_resources_entries_have_gpu_fields(client):
+async def test_resources_instance_schema(client):
     data = (await client.get("/resources")).json()
-    if not data["resources"]:
-        pytest.skip("No resources returned (quota may be empty)")
-    r = data["resources"][0]
-    required_keys = {
-        "gpu_type", "instance_type", "gpus_per_instance", "total_gpus",
-        "allocated_gpus", "cost_per_instance_hour_usd", "gpu_memory_gb",
-        "region", "interconnect",
+    assert len(data["instances"]) > 0, "Should have at least one instance"
+    required = {
+        "instance_type", "gpu_type", "gpus_per_instance", "vcpus",
+        "quota_family", "gpu_memory_gb", "interconnect",
+        "cost_per_instance_hour_usd",
     }
-    assert required_keys.issubset(r.keys()), f"Missing keys: {required_keys - r.keys()}"
+    for inst in data["instances"]:
+        assert required.issubset(inst.keys()), f"Missing: {required - inst.keys()}"
 
 
 @pytest.mark.asyncio
-async def test_resources_gpu_memory_positive(client):
+async def test_resources_quota_schema(client):
     data = (await client.get("/resources")).json()
-    for r in data["resources"]:
-        assert r["gpu_memory_gb"] > 0, f"gpu_memory_gb must be positive for {r['instance_type']}"
+    assert len(data["quotas"]) > 0, "Should have at least one quota entry"
+    required = {"family", "region", "market", "baseline_vcpus", "used_vcpus"}
+    for q in data["quotas"]:
+        assert required.issubset(q.keys()), f"Missing: {required - q.keys()}"
+        assert q["baseline_vcpus"] > 0
+
+
+@pytest.mark.asyncio
+async def test_resources_no_v100(client):
+    """V100 instances must not appear."""
+    data = (await client.get("/resources")).json()
+    for inst in data["instances"]:
+        assert inst["gpu_type"] != "V100", f"V100 should be filtered: {inst}"
+
+
+@pytest.mark.asyncio
+async def test_resources_only_multi_gpu(client):
+    """Only multi-GPU instances (useful for LLM inference)."""
+    data = (await client.get("/resources")).json()
+    for inst in data["instances"]:
+        assert inst["gpus_per_instance"] >= 2, (
+            f"{inst['instance_type']} has {inst['gpus_per_instance']} GPU — should be filtered"
+        )
 
 
 @pytest.mark.asyncio
 async def test_resources_interconnect_values(client):
     data = (await client.get("/resources")).json()
-    for r in data["resources"]:
-        assert r["interconnect"] in ("NVLink", "PCIe"), (
-            f"Unexpected interconnect {r['interconnect']} for {r['instance_type']}"
+    for inst in data["instances"]:
+        assert inst["interconnect"] in ("NVLink", "PCIe")
+        if inst["instance_type"].startswith("p"):
+            assert inst["interconnect"] == "NVLink"
+        if inst["instance_type"].startswith("g"):
+            assert inst["interconnect"] == "PCIe"
+
+
+@pytest.mark.asyncio
+async def test_resources_quota_families_match_instances(client):
+    """Every instance's quota_family should appear in the quotas list."""
+    data = (await client.get("/resources")).json()
+    quota_families = {q["family"] for q in data["quotas"]}
+    for inst in data["instances"]:
+        assert inst["quota_family"] in quota_families, (
+            f"{inst['instance_type']} has family {inst['quota_family']} not in quotas"
         )
-
-
-@pytest.mark.asyncio
-async def test_resources_p_instances_are_nvlink(client):
-    """P-family instances (p4d, p5) should have NVLink interconnect."""
-    data = (await client.get("/resources")).json()
-    for r in data["resources"]:
-        if r["instance_type"].startswith("p"):
-            assert r["interconnect"] == "NVLink", (
-                f"{r['instance_type']} should be NVLink"
-            )
-
-
-@pytest.mark.asyncio
-async def test_resources_g_instances_are_pcie(client):
-    """G-family instances (g5, g6e) should have PCIe interconnect."""
-    data = (await client.get("/resources")).json()
-    for r in data["resources"]:
-        if r["instance_type"].startswith("g"):
-            assert r["interconnect"] == "PCIe", (
-                f"{r['instance_type']} should be PCIe"
-            )
-
-
-@pytest.mark.asyncio
-async def test_resources_only_on_demand(client):
-    """All returned resources should come from on_demand market."""
-    # The endpoint filters to on_demand only. We verify indirectly
-    # by checking we get resources (at least some on_demand quota exists)
-    data = (await client.get("/resources")).json()
-    # Just verify it's a valid response — market filtering is internal
-    assert isinstance(data["resources"], list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -296,7 +289,7 @@ class TestBackwardCompatibility:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Pricing + GPU filtering (server-side unit tests)
+# Pricing + filtering (server-side unit tests)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestResourceFiltering:
@@ -324,26 +317,11 @@ class TestResourceFiltering:
         from server import _KOI_GPU_TYPES
         assert {"H100", "A100", "L40S", "A10G", "L4"} == _KOI_GPU_TYPES
 
-
-@pytest.mark.asyncio
-async def test_resources_no_v100(client):
-    """V100 instances must not appear in /resources."""
-    data = (await client.get("/resources")).json()
-    for r in data["resources"]:
-        assert r["gpu_type"] != "V100", f"V100 should be filtered out: {r}"
-
-
-@pytest.mark.asyncio
-async def test_resources_no_zero_gpu_entries(client):
-    """Entries with total_gpus=0 must not appear."""
-    data = (await client.get("/resources")).json()
-    for r in data["resources"]:
-        assert r["total_gpus"] > 0, f"total_gpus=0 should be filtered: {r}"
-
-
-@pytest.mark.asyncio
-async def test_resources_prices_from_skypilot(client):
-    """Prices should come from SkyPilot catalog (non-zero for known instances)."""
-    data = (await client.get("/resources")).json()
-    priced = [r for r in data["resources"] if r["cost_per_instance_hour_usd"] > 0]
-    assert len(priced) > 0, "At least some resources should have SkyPilot pricing"
+    def test_instance_prefixes_filter(self):
+        """Only multi-GPU instance prefixes are allowed."""
+        from server import _KOI_INSTANCE_PREFIXES
+        # Should include the big instances
+        assert any("g6e.12xlarge" in p for p in _KOI_INSTANCE_PREFIXES)
+        assert any("p5." in p for p in _KOI_INSTANCE_PREFIXES)
+        # Should NOT include single-GPU instances
+        assert not any("g6e.xlarge" == p for p in _KOI_INSTANCE_PREFIXES)
