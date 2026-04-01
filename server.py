@@ -115,8 +115,21 @@ async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup logic
-    # Solvers are now created per-request in submit_batch()
+    # ── Validate critical env vars ──
+    from orca_server.config import ORCA_SERVER_URL, HF_TOKEN
+    if not ORCA_SERVER_URL or ORCA_SERVER_URL == "placeholder":
+        logger.error(
+            "[Startup] ⚠ ORCA_SERVER_URL is not set! Replicas will not be able to "
+            "call back to the control plane. Set it in .env or pass --url/--tunnel. "
+            "Jobs WILL fail silently without this."
+        )
+    else:
+        logger.info(f"[Startup] ORCA_SERVER_URL = {ORCA_SERVER_URL}")
+    if not HF_TOKEN:
+        logger.warning(
+            "[Startup] HF_TOKEN not set — gated models (Llama, Gemma) will fail to download. "
+            "Set HF_TOKEN in .env if you need gated models."
+        )
 
     # Initialize cluster manager
     app.state.cluster_manager = get_cluster_manager()
