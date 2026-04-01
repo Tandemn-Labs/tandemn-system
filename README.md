@@ -18,29 +18,52 @@ Orca handles all of that. Give it a model name, a JSONL file, and a deadline. Th
 
 ---
 
-## Installation
+## Quick Start
 
 ```bash
 git clone --recurse-submodules https://github.com/Tandemn-Labs/Tandemn-orca.git
 cd Tandemn-orca
+bash setup.sh
+```
 
-# Create venv and install dependencies
-uv venv .venv
+The setup script installs dependencies, checks AWS/Redis, and creates your `.env`. Or do it manually:
+
+<details>
+<summary>Manual installation</summary>
+
+```bash
+uv venv .venv --python 3.12 --seed
 source .venv/bin/activate
 uv pip install -r requirements.txt
-uv pip install -r requirements-dev.txt  # for tests
-
-# Configure SkyPilot for AWS
 sky check
 ```
 
-Create a `.env` file in the project root:
-
+Create a `.env` file:
 ```bash
-# .env
-S3_UPLOAD_BUCKET=your-s3-bucket       # S3 bucket for uploads and outputs (must exist, your AWS account)
+S3_UPLOAD_BUCKET=your-s3-bucket       # must exist in your AWS account
 HF_TOKEN=hf_your_token_here          # for gated models (Llama, Gemma, etc.)
 ```
+</details>
+
+## Supported Models
+
+Orca works with **any HuggingFace model that vLLM supports**. You can deploy any model by specifying `--gpu` and `--tp` manually:
+
+```bash
+./orca deploy <any-hf-model> input.jsonl --gpu A10G --tp 1
+```
+
+The **automatic placement solver** (picks GPU/TP/PP for you based on your SLO) has profiling data for:
+
+| Model | Parameters | Profiled GPUs |
+|-------|-----------|---------------|
+| Llama 3.3 70B (FP8) | 70B | H100 |
+| Llama 3.1 8B (FP8) | 8B | H100 |
+| DeepSeek-R1-Distill-Llama-70B | 70B | L40S, A100 |
+| Llama 2 70B | 70B | A100 |
+| Llama 3 70B Instruct | 70B | A100 |
+
+For models not in this list, use `--gpu` and `--tp` to specify your config, or use `./orca plan` to see what the solver recommends.
 
 ---
 
