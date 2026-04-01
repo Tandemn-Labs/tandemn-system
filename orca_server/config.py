@@ -40,6 +40,9 @@ CHUNK_SIZE_BYTES = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024
 ORCA_SERVER_URL = os.getenv("ORCA_SERVER_URL", "")
 ORCA_API_KEY    = os.getenv("ORCA_API_KEY", "")
 
+# Koi placement service (optional — when set, CLI offers Koi alongside roofline)
+KOI_SERVICE_URL = os.getenv("KOI_SERVICE_URL", "")
+
 # Redis (for chunked distributed batch)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DEFAULT_CHUNK_SIZE_LINES = int(os.getenv("CHUNK_SIZE_LINES", "1000"))

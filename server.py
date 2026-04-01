@@ -18,6 +18,7 @@ from fastapi.responses import Response, StreamingResponse
 logger = logging.getLogger(__name__)
 
 from orca_server.config import (
+    AWS_INSTANCES,
     CHUNK_RECLAIM_INTERVAL,
     CHUNK_SIZE_BYTES,
     INSTANCE_TO_GPU,
@@ -53,6 +54,7 @@ from quota.region_selector import (
 )
 from storage.storage_factory import get_storage_backend
 from orca_server.job_templates import real_magic
+from placement.roofline.gpu_specs import GPU_MEMORY_GB
 from quota.tracker import VPCQuotaTracker
 
 
@@ -353,6 +355,89 @@ async def quota_status():
         "status": "success",
         "quota_usage": summary.to_dict(orient="records"),
         "active_reservations": reservations,
+    }
+
+
+# ---- Pricing cache (parsed once from cloud_instances_specs.csv) ----
+_PRICING_CACHE: dict | None = None
+
+def _load_pricing() -> dict:
+    """Load instance pricing from CSV. Returns {instance_name: price_per_hour}."""
+    global _PRICING_CACHE
+    if _PRICING_CACHE is not None:
+        return _PRICING_CACHE
+    import csv, re as _re
+    _PRICING_CACHE = {}
+    csv_path = Path("LLM_placement_solver/config/cloud_instances_specs.csv")
+    if not csv_path.exists():
+        return _PRICING_CACHE
+    with open(csv_path) as f:
+        for row in csv.DictReader(f):
+            if row.get("Cloud Provider") != "AWS":
+                continue
+            name = row.get("Instance Name", "").strip()
+            raw_price = row.get("Price per Hour USD", "").strip()
+            # Parse "$6.85" or "$140-160 (estimated)" → take first number
+            m = _re.search(r"\$?([\d.]+)", raw_price)
+            if name and m:
+                _PRICING_CACHE[name] = float(m.group(1))
+    return _PRICING_CACHE
+
+
+@app.get("/resources")
+async def resources():
+    """Assemble a ResourceMap from quota + pricing for Koi integration."""
+    tracker = get_quota_tracker()
+    pricing = _load_pricing()
+    quota_df = tracker.quota_df
+    summary = tracker.full_quota_summary()
+
+    resource_list = []
+    for inst_type, (gpu_name, gpu_count, vcpus) in AWS_INSTANCES.items():
+        gpu_mem = GPU_MEMORY_GB.get(gpu_name)
+        if gpu_mem is None:
+            continue
+        price = pricing.get(inst_type, 0.0)
+
+        # Look up family type for this instance
+        inst_row = quota_df[quota_df["Instance_Type"] == inst_type]
+        if inst_row.empty:
+            continue
+        family_type = inst_row["Family_Type"].iloc[0]
+
+        interconnect = "NVLink" if inst_type.startswith("p") else "PCIe"
+
+        # Find regions with available quota for this family
+        family_rows = summary[summary["Family"] == family_type]
+        for _, qrow in family_rows.iterrows():
+            if qrow["Market"] != "on_demand":
+                continue
+            avail_vcpu = int(qrow["Available"])
+            baseline_vcpu = int(qrow["Baseline"])
+            if baseline_vcpu <= 0:
+                continue
+            region = qrow["Region"]
+            total_instances = baseline_vcpu // vcpus
+            used_vcpu = int(qrow["Used"])
+            allocated_instances = used_vcpu // vcpus
+
+            resource_list.append({
+                "gpu_type": gpu_name,
+                "instance_type": inst_type,
+                "gpus_per_instance": gpu_count,
+                "total_gpus": total_instances * gpu_count,
+                "allocated_gpus": allocated_instances * gpu_count,
+                "cost_per_instance_hour_usd": price,
+                "gpu_memory_gb": float(gpu_mem),
+                "region": region,
+                "interconnect": interconnect,
+            })
+
+    return {
+        "vpc_id": "orca-cluster",
+        "region": "us-east-1",
+        "snapshot_time": datetime.now().isoformat(),
+        "resources": resource_list,
     }
 
 
