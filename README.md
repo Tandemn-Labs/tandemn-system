@@ -1,8 +1,8 @@
-# Tandemn Orca
+# Tandemn System
 
 **Automated batch inference orchestration for large language models on AWS spot infrastructure.**
 
-Orca is a self-hosted system that takes a model name, a JSONL workload, and a deadline — and handles everything else. A placement solver selects the optimal GPU type, tensor and pipeline parallelism configuration, and AWS region based on your SLO. Jobs launch on spot instances via SkyPilot, with chunked multi-replica execution, real-time observability, and output delivered to your S3 bucket. Your data never leaves your infrastructure.
+System (codename Orca) is a self-hosted system that takes a model name, a JSONL workload, and a deadline — and handles everything else. A placement solver selects the optimal GPU type, tensor and pipeline parallelism configuration, and AWS region based on your SLO. Jobs launch on spot instances via SkyPilot, with chunked multi-replica execution, real-time observability, and output delivered to your S3 bucket. Your data never leaves your infrastructure.
 
 > **Deployment model:** Orca is fully open-source and self-hosted. You run it on your own AWS account. There is no managed tier or external data plane.
 
@@ -293,34 +293,43 @@ ORCA_SERVER_URL=https://your-tunnel.trycloudflare.com
 ## Architecture
 
 ```
-         ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
+$ ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
 
-                              +---------------------+
-                              |   Control Plane      |
-                              |   (server.py)        |
-                              +---------------------+
-                              |  1. Parse input      |
-                              |  2. Roofline solver  |
-                              |  3. Quota check      |
-                              |  4. Chunk + Redis    |
-                              |  5. SkyPilot launch  |
-                              +----------+----------+
-                                         |
-                    +--------------------+--------------------+
-                    |                    |                    |
-                    v                    v                    v
-             +----------+        +----------+        +----------+
-             | Replica 0|        | Replica 1|  ...   | Replica N|
-             | vLLM V1  |        | vLLM V1  |        | vLLM V1  |
-             +----+-----+        +----+-----+        +----+-----+
-                  |                    |                    |
-                  +------+  Redis  +--+--------------------+
-                         |  Queue  |
-                         +---------+
-                  pull → process → upload → complete
-                              |
-                              v
-                   S3 (per-chunk outputs → assembled output.jsonl + metrics.csv)
+                                 ┌──────────────────────────────────────┐
+                                 │             Control Plane            │
+                                 │              server.py               │
+                                 ├──────────────────────────────────────┤
+                                 │ 1. Parse deployment request          │
+                                 │ 2. Run roofline solver               │
+                                 │ 3. Validate quota / capacity         │
+                                 │ 4. Chunk input + enqueue in Redis    │
+                                 │ 5. Launch replicas via SkyPilot      │
+                                 └──────────────────┬───────────────────┘
+                                                    │
+                    ┌───────────────────────────────┼───────────────────────────────┐
+                    │                               │                               │
+                    ▼                               ▼                               ▼
+          ┌──────────────────┐            ┌──────────────────┐            ┌──────────────────┐
+          │    Replica 0     │            │    Replica 1     │            │    Replica N     │
+          │     vLLM V1      │    ...     │     vLLM V1      │    ...     │     vLLM V1      │
+          └────────┬─────────┘            └────────┬─────────┘            └────────┬─────────┘
+                   │                               │                               │
+                   └───────────────┬───────────────┴───────────────┬───────────────┘
+                                   │                               │
+                                   ▼                               │
+                         ┌──────────────────────┐                  │
+                         │      Redis Queue     │◄─────────────────┘
+                         │   chunk coordination │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                    pull chunk → run inference → upload result → mark complete
+                                    │
+                                    ▼
+                ┌────────────────────────────────────────────────────────────┐
+                │                          S3                                │
+                │   per-chunk outputs → assembled output.jsonl + metrics.csv │
+                └────────────────────────────────────────────────────────────┘
 ```
 
 **Placement solver.** Uses a roofline model to estimate throughput and memory requirements across GPU types and TP/PP configurations. Selects the cheapest option that completes within your SLO, with automatic fallback to alternative regions and instance types if the primary launch fails.
