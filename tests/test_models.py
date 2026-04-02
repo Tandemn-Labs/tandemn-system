@@ -92,7 +92,7 @@ def test_magic_output_num_nodes_fallback():
         pp_size=2,
         replicas=3,
     )
-    assert mo.num_nodes == 6  # 2 * 3
+    assert mo.num_nodes == 2  # pp_size per replica, not total across replicas
 
 
 def test_magic_output_num_nodes_single():
