@@ -62,46 +62,46 @@ RECOVERY_COOLDOWN_SEC      = int(os.getenv("RECOVERY_COOLDOWN_SEC", "300"))
 # Single source of truth — every other mapping is derived from this dict.
 # GPU counts confirmed from quota/aws_gpu_quota_by_region.csv.
 #
-#   {instance_type: (gpu_name, gpu_count, vcpus)}
+#   {instance_type: (gpu_name, gpu_count, vcpus, vram_per_gpu_gb)}
 # --------------------------------------------------------------------------- #
 AWS_INSTANCES = {
-    # P5 instances (H100)
-    "p5.48xlarge": ("H100", 8, 192),
+    # P5 instances (H100 80GB)
+    "p5.48xlarge": ("H100", 8, 192, 80),
     # P4 instances (A100)
-    "p4d.24xlarge": ("A100", 8, 96),
-    "p4de.24xlarge": ("A100", 8, 96),
+    "p4d.24xlarge": ("A100", 8, 96, 40),     # A100 40GB HBM2e
+    "p4de.24xlarge": ("A100", 8, 96, 80),    # A100 80GB HBM2e
     # P3 instances (V100)
-    "p3.2xlarge": ("V100", 1, 8),
-    "p3.8xlarge": ("V100", 4, 32),
-    "p3.16xlarge": ("V100", 8, 64),
-    "p3dn.24xlarge": ("V100", 8, 96),
-    # G6e instances (L40S)
-    "g6e.xlarge": ("L40S", 1, 4),
-    "g6e.2xlarge": ("L40S", 1, 8),
-    "g6e.4xlarge": ("L40S", 1, 16),
-    "g6e.8xlarge": ("L40S", 1, 32),
-    "g6e.12xlarge": ("L40S", 4, 48),
-    "g6e.16xlarge": ("L40S", 1, 64),
-    "g6e.24xlarge": ("L40S", 4, 96),
-    "g6e.48xlarge": ("L40S", 8, 192),
-    # G6 instances (L4)
-    "g6.xlarge": ("L4", 1, 4),
-    "g6.2xlarge": ("L4", 1, 8),
-    "g6.4xlarge": ("L4", 1, 16),
-    "g6.8xlarge": ("L4", 1, 32),
-    "g6.12xlarge": ("L4", 4, 48),
-    "g6.16xlarge": ("L4", 1, 64),
-    "g6.24xlarge": ("L4", 4, 96),
-    "g6.48xlarge": ("L4", 8, 192),
-    # G5 instances (A10G)
-    "g5.xlarge": ("A10G", 1, 4),
-    "g5.2xlarge": ("A10G", 1, 8),
-    "g5.4xlarge": ("A10G", 1, 16),
-    "g5.8xlarge": ("A10G", 1, 32),
-    "g5.12xlarge": ("A10G", 4, 48),
-    "g5.16xlarge": ("A10G", 1, 64),
-    "g5.24xlarge": ("A10G", 4, 96),
-    "g5.48xlarge": ("A10G", 8, 192),
+    "p3.2xlarge": ("V100", 1, 8, 16),        # V100 16GB
+    "p3.8xlarge": ("V100", 4, 32, 16),
+    "p3.16xlarge": ("V100", 8, 64, 32),      # V100 32GB
+    "p3dn.24xlarge": ("V100", 8, 96, 32),
+    # G6e instances (L40S 48GB)
+    "g6e.xlarge": ("L40S", 1, 4, 48),
+    "g6e.2xlarge": ("L40S", 1, 8, 48),
+    "g6e.4xlarge": ("L40S", 1, 16, 48),
+    "g6e.8xlarge": ("L40S", 1, 32, 48),
+    "g6e.12xlarge": ("L40S", 4, 48, 48),
+    "g6e.16xlarge": ("L40S", 1, 64, 48),
+    "g6e.24xlarge": ("L40S", 4, 96, 48),
+    "g6e.48xlarge": ("L40S", 8, 192, 48),
+    # G6 instances (L4 24GB)
+    "g6.xlarge": ("L4", 1, 4, 24),
+    "g6.2xlarge": ("L4", 1, 8, 24),
+    "g6.4xlarge": ("L4", 1, 16, 24),
+    "g6.8xlarge": ("L4", 1, 32, 24),
+    "g6.12xlarge": ("L4", 4, 48, 24),
+    "g6.16xlarge": ("L4", 1, 64, 24),
+    "g6.24xlarge": ("L4", 4, 96, 24),
+    "g6.48xlarge": ("L4", 8, 192, 24),
+    # G5 instances (A10G 24GB)
+    "g5.xlarge": ("A10G", 1, 4, 24),
+    "g5.2xlarge": ("A10G", 1, 8, 24),
+    "g5.4xlarge": ("A10G", 1, 16, 24),
+    "g5.8xlarge": ("A10G", 1, 32, 24),
+    "g5.12xlarge": ("A10G", 4, 48, 24),
+    "g5.16xlarge": ("A10G", 1, 64, 24),
+    "g5.24xlarge": ("A10G", 4, 96, 24),
+    "g5.48xlarge": ("A10G", 8, 192, 24),
 }
 
 # --------------------------------------------------------------------------- #
@@ -109,14 +109,17 @@ AWS_INSTANCES = {
 # --------------------------------------------------------------------------- #
 
 # instance_type -> gpu_name
-INSTANCE_TO_GPU = {inst: gpu for inst, (gpu, _, _) in AWS_INSTANCES.items()}
+INSTANCE_TO_GPU = {inst: gpu for inst, (gpu, *_) in AWS_INSTANCES.items()}
 
 # instance_type -> vcpus
-INSTANCE_VCPUS = {inst: vcpus for inst, (_, _, vcpus) in AWS_INSTANCES.items()}
+INSTANCE_VCPUS = {inst: vals[2] for inst, vals in AWS_INSTANCES.items()}
+
+# instance_type -> vram_per_gpu_gb
+INSTANCE_VRAM = {inst: vals[3] for inst, vals in AWS_INSTANCES.items()}
 
 # instance_type -> (gpu_name, gpu_count)  [used by roofline solver]
 AWS_INSTANCE_TO_GPU = {
-    inst: (gpu, count) for inst, (gpu, count, _) in AWS_INSTANCES.items()
+    inst: (gpu, count) for inst, (gpu, count, *_) in AWS_INSTANCES.items()
 }
 
 # GPUs with compute capability < 8.0 — vLLM V1 engine is not supported

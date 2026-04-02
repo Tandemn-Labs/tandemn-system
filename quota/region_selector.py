@@ -381,7 +381,7 @@ def refresh_quotas_from_aws(
     else:
         from orca_server.config import AWS_INSTANCES
         rows = []
-        for inst, (gpu_name, gpu_count, vcpus) in sorted(AWS_INSTANCES.items()):
+        for inst, (gpu_name, gpu_count, vcpus, vram) in sorted(AWS_INSTANCES.items()):
             family_raw = inst.split(".")[0]
             family_display = family_raw[0].upper() + family_raw[1:]
             if family_raw.startswith("g"):
@@ -390,7 +390,6 @@ def refresh_quotas_from_aws(
                 family_type = "P5"
             else:
                 family_type = "P4_P3_P2"
-            vram = GPU_VRAM_GB.get(gpu_name, 0)
             gpu_type_str = f"{gpu_count}x {gpu_name}" if gpu_count > 1 else f"1x {gpu_name}"
             rows.append({
                 "Family": family_display,

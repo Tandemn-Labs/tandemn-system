@@ -54,7 +54,6 @@ from quota.region_selector import (
 )
 from storage.storage_factory import get_storage_backend
 from orca_server.job_templates import real_magic
-from placement.roofline.gpu_specs import GPU_MEMORY_GB
 from quota.tracker import VPCQuotaTracker
 
 
@@ -230,7 +229,7 @@ async def lifespan(app: FastAPI):
 
             # Determine TP from instance GPU count
             from orca_server.config import AWS_INSTANCES
-            gpu_name, gpu_count, _ = AWS_INSTANCES.get(orig_instance, ("A10G", 1, 4))
+            gpu_name, gpu_count, *_ = AWS_INSTANCES.get(orig_instance, ("A10G", 1, 4, 24))
 
             config = MagicOutput(
                 decision_id=job_id,
@@ -410,13 +409,10 @@ async def resources():
     # ── Instance catalog ──────────────────────────────────────────────
     # Price lookup uses us-east-1 as reference (Koi picks region from quotas)
     instances = []
-    for inst_type, (gpu_name, gpu_count, vcpus) in AWS_INSTANCES.items():
+    for inst_type, (gpu_name, gpu_count, vcpus, vram) in AWS_INSTANCES.items():
         if gpu_name not in _KOI_GPU_TYPES:
             continue
         if not inst_type.startswith(_KOI_INSTANCE_PREFIXES):
-            continue
-        gpu_mem = GPU_MEMORY_GB.get(gpu_name)
-        if gpu_mem is None:
             continue
 
         # Look up family from quota CSV
@@ -433,7 +429,7 @@ async def resources():
             "gpus_per_instance": gpu_count,
             "vcpus": vcpus,
             "quota_family": family_type,
-            "gpu_memory_gb": float(gpu_mem),
+            "gpu_memory_gb": float(vram),
             "interconnect": "NVLink" if inst_type.startswith("p") else "PCIe",
             "cost_per_instance_hour_usd": round(price, 4),
         })
