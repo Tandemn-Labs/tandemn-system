@@ -858,6 +858,8 @@ async def _assemble_output(job_id: str):
         )
 
     combined_path = f"/tmp/assembly_{job_id}.jsonl"
+    assembly_failures = []
+    expected_chunks = len(ordered_ids) - len(failed_ids)
     try:
         with open(combined_path, "w") as combined:
             for cid in ordered_ids:
@@ -870,6 +872,7 @@ async def _assemble_output(job_id: str):
                     await storage_backend.download_file(s3_out, local_tmp, user="system")
                 except Exception as dl_err:
                     job_logger.error(f"[Assembly] Failed to download {s3_out}: {dl_err}")
+                    assembly_failures.append(cid)
                     continue
                 with open(local_tmp) as cf:
                     for line in cf:
@@ -975,7 +978,15 @@ async def _assemble_output(job_id: str):
         except Exception as te:
             job_logger.warning(f"[Assembly] Timeseries export failed for {job_id}: {te}")
 
-        get_job_tracker().update_status(job_id, "succeeded")
+        if assembly_failures:
+            downloaded = expected_chunks - len(assembly_failures)
+            job_logger.error(
+                f"[Assembly] {len(assembly_failures)}/{expected_chunks} chunks failed to download: "
+                f"{assembly_failures}. Partial output uploaded ({downloaded} chunks)."
+            )
+            get_job_tracker().update_status(job_id, "failed")
+        else:
+            get_job_tracker().update_status(job_id, "succeeded")
         get_job_tracker().update_progress(job_id, 1.0)
         cm.cleanup_job(job_id)
 
@@ -988,10 +999,13 @@ async def _assemble_output(job_id: str):
                 if key.startswith(f"{job_id}:") or key.startswith(job_id):
                     del _replica_log_locks[key]
 
-        job_logger.info(f"[Assembly] Job {job_id} completed successfully")
+        if assembly_failures:
+            job_logger.info(f"[Assembly] Job {job_id} completed with {len(assembly_failures)} missing chunks (partial output available)")
+        else:
+            job_logger.info(f"[Assembly] Job {job_id} completed successfully")
 
-        # Rename directory with success-/partial- prefix (after all writes are done)
-        status_prefix = "partial" if failed_ids else "success"
+        # Rename directory with success-/partial-/failed- prefix (after all writes are done)
+        status_prefix = "failed" if assembly_failures else ("partial" if failed_ids else "success")
         prefixed_dirname = prefix_job_dirname(job_dirname, status_prefix)
         target_dir = Path(f"outputs/{prefixed_dirname}")
         target_dir.parent.mkdir(parents=True, exist_ok=True)
