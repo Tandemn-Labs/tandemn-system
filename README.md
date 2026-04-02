@@ -2,9 +2,9 @@
 
 **Automated batch inference orchestration for large language models on AWS spot infrastructure.**
 
-Tandemn System (currently exposed in this repository as `orca`) is a self-hosted batch inference orchestration system that takes a model name, a JSONL workload, and a deadline — and handles everything else. A placement solver selects the optimal GPU type, tensor and pipeline parallelism configuration, and AWS region based on your SLO. Jobs launch on spot instances via SkyPilot, with chunked multi-replica execution, real-time observability, and output delivered to your S3 bucket. Your data never leaves your infrastructure.
+Tandemn System (currently referenced in this repository as `orca`) is a self-hosted batch inference orchestration system that takes a model name, a JSONL workload, and a deadline — and handles everything else. A placement solver selects the optimal GPU type, tensor and pipeline parallelism configuration, and AWS region based on your SLO. Jobs launch on spot instances via SkyPilot, with chunked multi-replica execution, real-time observability, and output delivered to your S3 bucket. Your data never leaves your infrastructure.
 
-> **Naming note:** The product is called **Tandemn System**, while parts of this repository, CLI, and internal code still use the legacy codename **Orca**. In this README, **Tandemn System** refers to the platform, and **`orca`** refers to the current CLI / implementation.
+> **Naming note:** The product is called **Tandemn System**, while parts of this repository, CLI, and internal code use the codename **Orca**. In this README, **Tandemn System** refers to the platform, and **`orca`** refers to the current CLI / implementation.
 
 > **Deployment model:** Tandemn System is fully open-source and self-hosted. You run it on your own AWS account. There is no managed tier or external data plane.
 
