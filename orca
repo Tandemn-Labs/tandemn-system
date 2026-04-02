@@ -287,7 +287,7 @@ def fetch_resources():
     return None
 
 
-def call_koi(job_params, resource_map, timeout=30):
+def call_koi(job_params, resource_map, timeout=300):
     """POST to Koi /decide endpoint. Returns response JSON or None on failure."""
     if not KOI_SERVICE_URL:
         return None
@@ -595,7 +595,7 @@ def cmd_deploy(args):
         plan_payload["input_file"] = "s3://plan-dry-run/placeholder"
         roofline_resp = api_with_spinner("post", "/test/placement",
                                          message="Solving placement...", json=plan_payload)
-        kt.join(timeout=60)
+        kt.join(timeout=300)
         koi_data = koi_result[0]
 
         if koi_data is None and KOI_SERVICE_URL:
@@ -881,7 +881,7 @@ def cmd_plan(args):
         resp = api_with_spinner("post", "/test/placement",
                                 message="Solving placement...", json=payload)
 
-        kt.join(timeout=60)
+        kt.join(timeout=300)
         koi_data = koi_result[0]
         elapsed = time.time() - t0
 
