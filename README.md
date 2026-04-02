@@ -2,9 +2,11 @@
 
 **Automated batch inference orchestration for large language models on AWS spot infrastructure.**
 
-System (codename Orca) is a self-hosted system that takes a model name, a JSONL workload, and a deadline — and handles everything else. A placement solver selects the optimal GPU type, tensor and pipeline parallelism configuration, and AWS region based on your SLO. Jobs launch on spot instances via SkyPilot, with chunked multi-replica execution, real-time observability, and output delivered to your S3 bucket. Your data never leaves your infrastructure.
+Tandemn System (currently exposed in this repository as `orca`) is a self-hosted batch inference orchestration system that takes a model name, a JSONL workload, and a deadline — and handles everything else. A placement solver selects the optimal GPU type, tensor and pipeline parallelism configuration, and AWS region based on your SLO. Jobs launch on spot instances via SkyPilot, with chunked multi-replica execution, real-time observability, and output delivered to your S3 bucket. Your data never leaves your infrastructure.
 
-> **Deployment model:** Orca is fully open-source and self-hosted. You run it on your own AWS account. There is no managed tier or external data plane.
+> **Naming note:** The product is called **Tandemn System**, while parts of this repository, CLI, and internal code still use the legacy codename **Orca**. In this README, **Tandemn System** refers to the platform, and **`orca`** refers to the current CLI / implementation.
+
+> **Deployment model:** Tandemn System is fully open-source and self-hosted. You run it on your own AWS account. There is no managed tier or external data plane.
 
 ---
 
@@ -12,6 +14,7 @@ System (codename Orca) is a self-hosted system that takes a model name, a JSONL 
 
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
+- [Naming](#naming)
 - [Supported Models](#supported-models)
 - [Supported Hardware](#supported-hardware)
 - [Quick Start](#quick-start)
@@ -77,9 +80,21 @@ ORCA_API_KEY=your-secret-key          # Recommended; see Security section
 
 ---
 
+## Naming
+
+This repository currently uses the legacy name `orca` in parts of the codebase, CLI, environment variables, and examples.
+
+- **Product name:** Tandemn System
+- **Current CLI:** `orca`
+- **Repo internals / env vars:** may still reference `orca`
+
+Over time, repository naming may be updated for consistency, but current commands and interfaces remain unchanged.
+
+---
+
 ## Supported Models
 
-Orca supports **any HuggingFace model compatible with vLLM**. Specify `--gpu` and `--tp` manually to run any model:
+Tandemn System supports **any HuggingFace model compatible with vLLM**. Specify `--gpu` and `--tp` manually to run any model:
 
 ```bash
 ./orca deploy <any-hf-model> input.jsonl --gpu A10G --tp 1
@@ -116,7 +131,7 @@ The solver searches across all GPU types and parallelism configurations (TP 1–
 
 ### Step 1 — Start the control plane
 
-Orca's control plane must be reachable by EC2 replicas. The `--tunnel` flag opens a free Cloudflare tunnel automatically (no account required):
+The Tandemn System control plane must be reachable by EC2 replicas. The `--tunnel` flag opens a free Cloudflare tunnel automatically (no account required):
 
 ```bash
 python server.py --tunnel
@@ -130,7 +145,7 @@ This starts the server at `http://localhost:26336` and prints a public tunnel UR
 ./orca deploy Qwen/Qwen2.5-7B-Instruct examples/workloads/demo_batch.jsonl --slo 4
 ```
 
-Orca parses the input file, runs the placement solver, and launches on the cheapest viable spot configuration. No GPU selection required.
+Tandemn System parses the input file, runs the placement solver, and launches on the cheapest viable spot configuration. No GPU selection required.
 
 ### Step 3 — Monitor progress
 
@@ -151,7 +166,7 @@ Orca parses the input file, runs the placement solver, and launches on the cheap
 
 ### Deployment
 
-```
+```bash
 ./orca deploy <model> <input>     Run a batch job (solver picks GPU automatically)
 ./orca plan   <model> <input>     Show placement plan without launching
 ```
@@ -177,8 +192,8 @@ Orca parses the input file, runs the placement solver, and launches on the cheap
 Add or remove replicas from a running job:
 
 ```bash
-./orca add <job_id> 2                          # Add 2 replicas (inherit GPU config)
-./orca add <job_id> 3 --gpu L40S --tp 4        # Add 3 L40S replicas (heterogeneous fleet)
+./orca add <job_id> 2                           # Add 2 replicas (inherit GPU config)
+./orca add <job_id> 3 --gpu L40S --tp 4         # Add 3 L40S replicas (heterogeneous fleet)
 ./orca kill <job_id> --replica <rid>            # Kill a specific replica
 ./orca kill <job_id> --replica r0 --replica r1  # Kill multiple replicas
 ```
@@ -231,7 +246,7 @@ The dashboard uses SSE for real-time updates with automatic polling fallback for
 
 ```bash
 ./orca destroy <job_id>     # Tear down clusters and Redis state for a job
-./orca destroy --all        # Tear down ALL Orca clusters
+./orca destroy --all        # Tear down ALL `orca` clusters
 ```
 
 Clusters are destroyed by default after job completion. Use `--persist` to keep them alive.
@@ -251,7 +266,7 @@ Clusters are destroyed by default after job completion. Use `--persist` to keep 
 
 ## Security
 
-Orca's control plane accepts connections from EC2 replicas over the network. In local development with a Cloudflare tunnel, this means your endpoint is publicly reachable. **We strongly recommend setting an API key in all environments.**
+The Tandemn System control plane accepts connections from EC2 replicas over the network. In local development with a Cloudflare tunnel, this means your endpoint is publicly reachable. **We strongly recommend setting an API key in all environments.**
 
 ### API Key Authentication
 
@@ -292,7 +307,7 @@ ORCA_SERVER_URL=https://your-tunnel.trycloudflare.com
 
 ## Architecture
 
-```
+```bash
 $ ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
 
                                  ┌──────────────────────────────────────┐
@@ -338,9 +353,9 @@ $ ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
 
 **Hot-swap.** `orca swap` launches replacement replicas with a different GPU/TP/PP configuration on the same Redis queue. Old replicas are torn down only after the new replicas begin processing. Zero chunks are lost.
 
-**Quota tracking.** Real-time GPU quota usage is tracked across AWS regions. Orca will not attempt to launch where you have insufficient capacity.
+**Quota tracking.** Real-time GPU quota usage is tracked across AWS regions. Tandemn System will not attempt to launch where you have insufficient capacity.
 
-**Observability.** Each replica's sidecar pushes Prometheus snapshots, GPU utilization, and per-token counters to the control plane every 5 seconds. Orca computes throughput from a 10-second rolling window, extracts histogram quantiles (TTFT, TPOT, E2E, queue/prefill/decode/inference latency), and tracks KV cache utilization and scheduler state. All metrics are persisted to SQLite for post-run analysis.
+**Observability.** Each replica's sidecar pushes Prometheus snapshots, GPU utilization, and per-token counters to the control plane every 5 seconds. Tandemn System computes throughput from a 10-second rolling window, extracts histogram quantiles (TTFT, TPOT, E2E, queue/prefill/decode/inference latency), and tracks KV cache utilization and scheduler state. All metrics are persisted to SQLite for post-run analysis.
 
 ---
 
@@ -586,9 +601,9 @@ See [ROADMAP.md](ROADMAP.md) for planned features and known limitations.
 
 ## Contact & Support
 
-Orca is developed and maintained by [Tandemn Labs](https://tandemn.com).
+Tandemn System is developed and maintained by [Tandemn Labs](https://tandemn.com).
 
-For bugs and feature requests, open an issue on [GitHub](https://github.com/Tandemn-Labs/Tandemn-orca/issues). For enterprise inquiries or support agreements, contact us directly by email at admin@tandemn.com
+For bugs and feature requests, open an issue on [GitHub](https://github.com/Tandemn-Labs/Tandemn-orca/issues). For enterprise inquiries or support agreements, contact us directly at admin@tandemn.com.
 
 ---
 
