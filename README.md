@@ -588,11 +588,7 @@ See [ROADMAP.md](ROADMAP.md) for planned features and known limitations.
 
 Orca is developed and maintained by [Tandemn Labs](https://tandemn.com).
 
-| | |
-|---|---|
-| **Tandemn Team** | admin@tandemn.com |
-
-For bugs and feature requests, open an issue on [GitHub](https://github.com/Tandemn-Labs/Tandemn-orca/issues). For enterprise inquiries or support agreements, contact us directly by email.
+For bugs and feature requests, open an issue on [GitHub](https://github.com/Tandemn-Labs/Tandemn-orca/issues). For enterprise inquiries or support agreements, contact us directly by email at admin@tandemn.com
 
 ---
 
