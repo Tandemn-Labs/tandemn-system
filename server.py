@@ -376,7 +376,7 @@ def _get_instance_price(instance_type: str, region: str) -> float:
         return cost
     except Exception as e:
         logger.warning(f"[Resources] Price lookup failed for {instance_type} in {region}: {e}")
-        return 0.0
+        return None
 
 # GPU types Koi supports (matches Koi's GPU_SPECS)
 _KOI_GPU_TYPES = {"H100", "A100", "L40S", "L4", "A10G"}
@@ -420,7 +420,10 @@ async def resources():
                 continue
             family_type = inst_row["Family_Type"].iloc[0]
 
+            # us-east-1 used as reference region; Koi picks actual region from quotas
             price = _get_instance_price(inst_type, "us-east-1")
+            if price is None:
+                continue
 
             instances.append({
                 "instance_type": inst_type,

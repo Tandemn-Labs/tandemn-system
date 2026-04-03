@@ -594,9 +594,16 @@ def cmd_deploy(args):
                          "s3_model_path", "hf_token")
         }
         plan_payload["input_file"] = "s3://plan-dry-run/placeholder"
-        roofline_resp = api_with_spinner("post", "/test/placement",
-                                         message="Solving placement...", json=plan_payload)
-        kt.join(timeout=300)
+        import threading as _thr2
+        _stop = _thr2.Event()
+        _spin = _thr2.Thread(target=spinner, args=("Solving placement (Koi + roofline)...", _stop), daemon=True)
+        _spin.start()
+        try:
+            roofline_resp = api("post", "/test/placement", json=plan_payload)
+        finally:
+            kt.join(timeout=300)
+            _stop.set()
+            _spin.join(timeout=2)
         koi_data = koi_result[0]
 
         if koi_data is None and KOI_SERVICE_URL:
@@ -669,9 +676,25 @@ def cmd_deploy(args):
                 print(f"\n  {DIM}Aborted.{RESET}")
                 sys.exit(0)
         elif koi_data and not roofline_configs:
-            # Koi only — auto-launch with Koi
+            # Koi only (roofline failed) — show recommendation, require confirmation
             rec = koi_data.get("recommendation", {})
             eng = rec.get("engine_config", {})
+            print()
+            print(box(_koi_summary_lines(koi_data), title="[KOI RECOMMENDATION]"))
+            print()
+            step(f"{YELLOW}Note:{RESET} Roofline solver unavailable — only Koi recommendation available.")
+
+            if getattr(args, 'skip_dangerously', False):
+                confirmed = True
+                step("--skip-dangerously: auto-confirming Koi recommendation")
+            else:
+                ans = input(f"  {BOLD}Launch with Koi recommendation? [y/N]:{RESET} ").strip().lower()
+                confirmed = ans == "y"
+
+            if not confirmed:
+                print(f"\n  {DIM}Aborted.{RESET}")
+                sys.exit(0)
+
             payload["placement_solver"] = "user_specified"
             payload["gpu_type"] = rec.get("gpu_type")
             payload["tp_size"] = rec.get("tp")
