@@ -282,8 +282,8 @@ def fetch_resources():
             return resp.json()
     except (requests.ConnectionError, requests.Timeout):
         pass
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"{YELLOW}Warning:{RESET} Unexpected error fetching resources from Orca: {e}", file=sys.stderr)
     return None
 
 
@@ -302,7 +302,8 @@ def call_koi(job_params, resource_map, timeout=300):
         return None
     except (requests.ConnectionError, requests.Timeout):
         return None
-    except Exception:
+    except Exception as e:
+        print(f"{YELLOW}Warning:{RESET} Unexpected error calling Koi: {e}", file=sys.stderr)
         return None
 
 

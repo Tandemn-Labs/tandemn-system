@@ -374,8 +374,8 @@ def _get_instance_price(instance_type: str, region: str) -> float:
         )
         _pricing_cache[key] = cost
         return cost
-    except Exception:
-        _pricing_cache[key] = 0.0
+    except Exception as e:
+        logger.warning(f"[Resources] Price lookup failed for {instance_type} in {region}: {e}")
         return 0.0
 
 # GPU types Koi supports (matches Koi's GPU_SPECS)
@@ -403,50 +403,51 @@ async def resources():
     whether required_vcpus <= available_vcpus.
     """
     tracker = get_quota_tracker()
-    quota_df = tracker.quota_df
-    summary = tracker.full_quota_summary()
 
-    # ── Instance catalog ──────────────────────────────────────────────
-    # Price lookup uses us-east-1 as reference (Koi picks region from quotas)
-    instances = []
-    for inst_type, (gpu_name, gpu_count, vcpus, vram) in AWS_INSTANCES.items():
-        if gpu_name not in _KOI_GPU_TYPES:
-            continue
-        if not inst_type.startswith(_KOI_INSTANCE_PREFIXES):
-            continue
+    def _build_catalog():
+        quota_df = tracker.quota_df
+        summary = tracker.full_quota_summary()
 
-        # Look up family from quota CSV
-        inst_row = quota_df[quota_df["Instance_Type"] == inst_type]
-        if inst_row.empty:
-            continue
-        family_type = inst_row["Family_Type"].iloc[0]
+        instances = []
+        for inst_type, (gpu_name, gpu_count, vcpus, vram) in AWS_INSTANCES.items():
+            if gpu_name not in _KOI_GPU_TYPES:
+                continue
+            if not inst_type.startswith(_KOI_INSTANCE_PREFIXES):
+                continue
 
-        price = _get_instance_price(inst_type, "us-east-1")
+            inst_row = quota_df[quota_df["Instance_Type"] == inst_type]
+            if inst_row.empty:
+                continue
+            family_type = inst_row["Family_Type"].iloc[0]
 
-        instances.append({
-            "instance_type": inst_type,
-            "gpu_type": gpu_name,
-            "gpus_per_instance": gpu_count,
-            "vcpus": vcpus,
-            "quota_family": family_type,
-            "gpu_memory_gb": float(vram),
-            "interconnect": "NVLink" if inst_type.startswith("p") else "PCIe",
-            "cost_per_instance_hour_usd": round(price, 4),
-        })
+            price = _get_instance_price(inst_type, "us-east-1")
 
-    # ── Quota pools ───────────────────────────────────────────────────
-    quotas = []
-    for _, row in summary.iterrows():
-        baseline = int(row["Baseline"])
-        if baseline <= 0:
-            continue
-        quotas.append({
-            "family": row["Family"],
-            "region": row["Region"],
-            "market": row["Market"],
-            "baseline_vcpus": baseline,
-            "used_vcpus": int(row["Used"]),
-        })
+            instances.append({
+                "instance_type": inst_type,
+                "gpu_type": gpu_name,
+                "gpus_per_instance": gpu_count,
+                "vcpus": vcpus,
+                "quota_family": family_type,
+                "gpu_memory_gb": float(vram),
+                "interconnect": "NVLink" if inst_type.startswith("p") else "PCIe",
+                "cost_per_instance_hour_usd": round(price, 4),
+            })
+
+        quotas = []
+        for _, row in summary.iterrows():
+            baseline = int(row["Baseline"])
+            if baseline <= 0:
+                continue
+            quotas.append({
+                "family": row["Family"],
+                "region": row["Region"],
+                "market": row["Market"],
+                "baseline_vcpus": baseline,
+                "used_vcpus": int(row["Used"]),
+            })
+        return instances, quotas
+
+    instances, quotas = await asyncio.to_thread(_build_catalog)
 
     return {
         "vpc_id": "orca-cluster",
