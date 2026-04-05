@@ -37,7 +37,8 @@ class ModelArchFeatures:
     is_moe: bool
     num_experts: int               # 0 for dense
     num_experts_active: int        # 0 for dense
-    params_billion: float
+    params_billion: float          # total params (ALL experts) — used for VRAM
+    active_params_billion: float   # active params per token — used for throughput scaling
     vocab_size: int
     max_position_embeddings: int
     source: str                    # "registry" | "perfdb" | "hf_hub" | "estimate"
@@ -86,6 +87,7 @@ def _from_registry(model_name: str) -> Optional[ModelArchFeatures]:
         num_experts=0,
         num_experts_active=0,
         params_billion=params,
+        active_params_billion=params,  # registry has no MoE expert info, assume dense
         vocab_size=arch.vocab_size,
         max_position_embeddings=arch.max_position_embeddings,
         source="registry",
@@ -191,6 +193,18 @@ def _features_from_hf_config(cfg: dict, source: str) -> ModelArchFeatures:
     embed_p = vocab_size * hidden_size * 2
     params_b = (embed_p + num_layers * layer_p) / 1e9
 
+    # Active params per token (for throughput scaling)
+    if is_moe and num_experts > 0 and num_experts_active > 0:
+        moe_intermediate = cfg.get("moe_intermediate_size", intermediate)
+        active_ffn = 3 * hidden_size * moe_intermediate * num_experts_active
+        shared_intermediate = cfg.get("shared_expert_intermediate_size", 0)
+        if shared_intermediate:
+            active_ffn += 3 * hidden_size * shared_intermediate
+        active_layer_p = qo + kv + active_ffn
+        active_params_b = (embed_p + num_layers * active_layer_p) / 1e9
+    else:
+        active_params_b = params_b
+
     return ModelArchFeatures(
         architecture_class=arch_class,
         num_layers=num_layers,
@@ -203,6 +217,7 @@ def _features_from_hf_config(cfg: dict, source: str) -> ModelArchFeatures:
         num_experts=num_experts,
         num_experts_active=num_experts_active,
         params_billion=round(params_b, 2),
+        active_params_billion=round(active_params_b, 2),
         vocab_size=vocab_size,
         max_position_embeddings=max_pos,
         source=source,
@@ -235,6 +250,7 @@ def _from_estimate(model_name: str) -> Optional[ModelArchFeatures]:
         num_experts=0,
         num_experts_active=0,
         params_billion=round(size_b, 2),
+        active_params_billion=round(size_b, 2),  # dense estimate
         vocab_size=tmpl.vocab_size,
         max_position_embeddings=tmpl.max_position_embeddings,
         source="estimate",
@@ -268,6 +284,7 @@ def fetch_arch_features(model_name: str) -> ModelArchFeatures:
         num_experts=0,
         num_experts_active=0,
         params_billion=7.0,
+        active_params_billion=7.0,
         vocab_size=tmpl.vocab_size,
         max_position_embeddings=tmpl.max_position_embeddings,
         source="estimate",
