@@ -58,6 +58,17 @@ bash setup.sh
 
 `setup.sh` installs Python dependencies, verifies AWS and Redis connectivity, and creates your `.env` file.
 
+### Performance Database
+
+The LLM placement advisor requires a performance database (~590MB) not included in the repo:
+
+```bash
+curl -L https://github.com/Tandemn-Labs/LLM_placement_solver/releases/download/aiconfigurator-v1/data.csv \
+  -o LLM_placement_solver/llm_advisor/data/aiconfigurator/data.csv
+```
+
+This dataset contains 103K profiled vLLM runs across A100, H100, H200, B200, GB200, and L40S GPUs. Without it, `orca plan` falls back to the roofline solver only.
+
 <details>
 <summary>Manual installation</summary>
 
