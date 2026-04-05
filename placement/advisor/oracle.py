@@ -149,6 +149,52 @@ def _scale_tps_for_io(base_tps: float, base_input: float, base_output: float,
     return base_tps * scale
 
 
+def _ref_active_params(record: dict) -> float:
+    """Estimate active params per token for a reference record from the CSV.
+
+    For dense models, active == total. For MoE, computes from model_config_json:
+    active = embedding + attention + active_experts × per_expert_FFN + shared_expert_FFN.
+    """
+    total = _safe_float(record.get("params_billion"))
+    if total <= 0:
+        return total
+    is_moe = _safe_float(record.get("is_moe"))
+    if not is_moe:
+        return total
+    active_experts = _safe_float(record.get("num_experts_active"))
+    if active_experts <= 0:
+        return total
+    # Parse config for precise computation
+    import json
+    cfg_str = record.get("model_config_json", "")
+    if not cfg_str:
+        return total
+    try:
+        cfg = json.loads(cfg_str)
+    except (json.JSONDecodeError, ValueError):
+        return total
+    total_experts = cfg.get("num_experts", cfg.get("num_local_experts", 0))
+    if total_experts <= 0 or active_experts >= total_experts:
+        return total
+    hidden = cfg.get("hidden_size", 4096)
+    n_heads = cfg.get("num_attention_heads", 32)
+    n_kv = cfg.get("num_key_value_heads", n_heads)
+    n_layers = cfg.get("num_hidden_layers", 32)
+    vocab = cfg.get("vocab_size", 32000)
+    moe_intermediate = cfg.get("moe_intermediate_size", cfg.get("intermediate_size", hidden * 4))
+    shared_intermediate = cfg.get("shared_expert_intermediate_size", 0)
+    # Compute active params from architecture
+    d_head = hidden / max(n_heads, 1)
+    kv_dim = n_kv * d_head
+    attn_per_layer = 2 * hidden * hidden + 2 * hidden * kv_dim  # QO + KV projections
+    ffn_per_expert = 3 * hidden * moe_intermediate  # gate + up + down
+    active_ffn = ffn_per_expert * active_experts
+    shared_ffn = 3 * hidden * shared_intermediate if shared_intermediate else 0
+    embed = vocab * hidden * 2  # input + output embeddings
+    active_total = (embed + n_layers * (attn_per_layer + active_ffn + shared_ffn)) / 1e9
+    return active_total
+
+
 def _predict_from_records(
     records: List[dict],
     arch: ModelArchFeatures,
@@ -206,15 +252,14 @@ def _predict_from_records(
     if t2_records:
         best = _pick_closest(t2_records)
         base_tps = _safe_float(best.get("tokens_per_sec_total"))
-        ref_params = _safe_float(best.get("params_billion"), arch.active_params_billion)
-        # Throughput scales with active params (compute per token), not total VRAM params
-        param_scale = ref_params / max(arch.active_params_billion, 0.1)
+        ref_active = _ref_active_params(best)
+        param_scale = ref_active / max(arch.active_params_billion, 0.1)
         param_scale = max(0.3, min(3.0, param_scale))
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps * param_scale, base_in, base_out, avg_input, avg_output)
         desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"(T2: {arch.architecture_class}, {ref_params:.0f}B→{arch.active_params_billion:.0f}B active)")
+                f"(T2: {arch.architecture_class}, {ref_active:.0f}B→{arch.active_params_billion:.0f}B active)")
         return tps, 0.65, "T2_arch_class", desc
 
     # T3: same gpu+tp+pp, different arch — scale by active params ratio
@@ -222,14 +267,14 @@ def _predict_from_records(
     if t3_records:
         best = _pick_closest(t3_records)
         base_tps = _safe_float(best.get("tokens_per_sec_total"))
-        ref_params = _safe_float(best.get("params_billion"), arch.active_params_billion)
-        param_scale = ref_params / max(arch.active_params_billion, 0.1)
+        ref_active = _ref_active_params(best)
+        param_scale = ref_active / max(arch.active_params_billion, 0.1)
         param_scale = max(0.2, min(5.0, param_scale))
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps * param_scale, base_in, base_out, avg_input, avg_output)
         desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"(T3: cross-arch, {ref_params:.0f}B→{arch.active_params_billion:.0f}B active)")
+                f"(T3: cross-arch, {ref_active:.0f}B→{arch.active_params_billion:.0f}B active)")
         return tps, 0.50, "T3_gpu_scaling", desc
 
     return None, 0.0, "none", ""
