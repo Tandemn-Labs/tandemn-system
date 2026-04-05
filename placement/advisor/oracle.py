@@ -123,10 +123,11 @@ def _is_feasible(
     if arch.num_layers % pp != 0:
         return False, f"PP={pp} doesn't divide num_layers={arch.num_layers}"
 
-    # VRAM: model shard + KV cache headroom
+    # VRAM: model shard + KV cache headroom (both per-PP-stage)
     model_gb = _model_vram_gb(arch)
     shard_gb = model_gb / (tp * pp)
-    kv_per_token = _kv_cache_gb_per_token(arch, tp)
+    kv_per_token_all = _kv_cache_gb_per_token(arch, tp)
+    kv_per_token = kv_per_token_all / max(pp, 1)  # each GPU holds num_layers/pp layers
     # Need at least 1K tokens of KV cache headroom
     min_kv_gb = kv_per_token * 1024
     used_gb = shard_gb + min_kv_gb
