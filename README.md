@@ -210,6 +210,7 @@ Tandemn System parses the input file, runs the placement solver, and launches on
 | `--tp / --pp` | Override tensor / pipeline parallelism | solver |
 | `--replicas N` | Number of replica clusters | `1` |
 | `--chunk-size N` | Lines per chunk | `1000` |
+| `--no-advisor` | Skip LLM advisor, use roofline solver only | — |
 | `--force` | Skip feasibility check and launch anyway | — |
 | `--persist` | Keep cluster alive after job completes | — |
 | `--on-demand` | Use on-demand instances instead of spot | — |
