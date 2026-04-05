@@ -26,21 +26,22 @@ from placement.advisor.oracle import get_candidates, OracleCandidate
 from placement.advisor import ensemble as _ensemble
 
 
-def _max_model_len(arch_features, vram_per_gpu: float, tp: int) -> Optional[int]:
+def _max_model_len(arch_features, vram_per_gpu: float, tp: int, pp: int = 1) -> Optional[int]:
     """Estimate a safe max_model_len for vLLM given VRAM after weights."""
     from placement.advisor.oracle import _model_vram_gb, _kv_cache_gb_per_token
 
-    model_shard_gb = _model_vram_gb(arch_features) / tp
+    model_shard_gb = _model_vram_gb(arch_features) / (tp * pp)
     available_gb = vram_per_gpu * 0.90 - model_shard_gb - 2.0  # 2GB vLLM overhead
     if available_gb <= 0:
         return None
 
-    kv_per_token = _kv_cache_gb_per_token(arch_features, tp)
+    # KV cache is per-PP-stage (each GPU only holds num_layers/pp layers)
+    kv_per_token_all_layers = _kv_cache_gb_per_token(arch_features, tp)
+    kv_per_token = kv_per_token_all_layers / max(pp, 1)
     if kv_per_token <= 0:
         return None
 
     max_tokens = int(available_gb / kv_per_token)
-    # Round down to nearest power of 2 or common context length
     for ctx in [131072, 65536, 32768, 16384, 8192, 4096, 2048]:
         if max_tokens >= ctx:
             return ctx
@@ -62,7 +63,7 @@ def _candidate_to_magic_output(
         total_cost = runtime_h * candidate.predicted_cost_per_hour
         cost_per_million = (total_cost / total_tokens) * 1_000_000 if total_tokens > 0 else None
 
-    max_len = _max_model_len(arch_features, vram_per_gpu, candidate.tp)
+    max_len = _max_model_len(arch_features, vram_per_gpu, candidate.tp, candidate.pp)
 
     return MagicOutput(
         decision_id=make_job_id("advisor"),
