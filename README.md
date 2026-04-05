@@ -85,7 +85,7 @@ Create a `.env` file in the project root:
 S3_UPLOAD_BUCKET=your-s3-bucket       # Must exist in your AWS account
 HF_TOKEN=hf_your_token_here           # Required for gated models
 ORCA_API_KEY=your-secret-key          # Recommended; see Security section
-KOI_SERVICE_URL=http://localhost:8090 # Optional: Koi placement engine
+ANTHROPIC_API_KEY=sk-ant-...          # Required for LLM placement advisor
 ```
 
 </details>
