@@ -265,9 +265,10 @@ def run(
 
         data = json.loads(raw)
         placements: List[RankedPlacement] = []
+        shown_n = min(10, len(candidates))  # must match top_n in _build_prompt
         for rank, entry in enumerate(data.get("top_placements", [])[:3], start=1):
             idx = int(entry.get("candidate_idx", 0))
-            idx = max(0, min(idx, len(candidates) - 1))
+            idx = max(0, min(idx, shown_n - 1))  # clamp to what LLM actually saw
             placements.append(RankedPlacement(
                 candidate=candidates[idx],
                 rank=rank,
