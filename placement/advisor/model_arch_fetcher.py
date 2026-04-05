@@ -94,9 +94,15 @@ def _from_registry(model_name: str) -> Optional[ModelArchFeatures]:
     )
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=1)
 def _load_perfdb_configs() -> dict[str, dict]:
-    """Load model_config_json entries from data.csv, keyed by model_name. Cached."""
+    """Load model_config_json entries from data.csv, keyed by model_name.
+
+    Uses csv.reader with column index lookup to avoid DictReader overhead
+    (170 columns × 103K rows → 1-2GB transient RAM with DictReader).
+    Only reads model_name + model_config_json columns. Stops early once
+    all unique models are seen (typically ~16 models in first ~7K rows).
+    """
     data_csv = os.path.join(
         os.path.dirname(__file__),
         "../../LLM_placement_solver/llm_advisor/data/aiconfigurator/data.csv",
@@ -109,10 +115,18 @@ def _load_perfdb_configs() -> dict[str, dict]:
     try:
         import csv
         with open(data_csv, newline="") as f:
-            reader = csv.DictReader(f)
+            reader = csv.reader(f)
+            header = next(reader)
+            try:
+                name_idx = header.index("model_name")
+                cfg_idx = header.index("model_config_json")
+            except ValueError:
+                return {}
             for row in reader:
-                model = row.get("model_name", "")
-                cfg_json = row.get("model_config_json", "")
+                if len(row) <= max(name_idx, cfg_idx):
+                    continue
+                model = row[name_idx]
+                cfg_json = row[cfg_idx]
                 if model and cfg_json and model not in configs:
                     try:
                         configs[model] = json.loads(cfg_json)
