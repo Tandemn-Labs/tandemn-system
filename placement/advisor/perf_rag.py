@@ -1,18 +1,18 @@
 """
-Architecture-aware FAISS retrieval over the aiconfigurator performance database.
+Two-stage architecture-aware retrieval over the aiconfigurator performance database.
 
-On first call, builds a FAISS flat-IP index from data.csv and caches it to
-placement/advisor/data/index.faiss + meta.pkl. Subsequent calls load from cache.
+Stage 1 (FAISS): Find architecturally similar profiled models.
+  Input:  model name / arch features (from user)
+  Output: all profiled records for similar models, across ALL GPU/TP/PP configs
+  Embedding: pure architecture features (no hardware) — 9 dims:
+    [params_norm, num_layers_norm, hidden_size_norm, gqa_ratio_norm,
+     intermediate_ratio_norm, is_moe, num_experts_active_norm,
+     input_norm, output_norm]
 
-Embedding (12 dims, all in [0,1]):
-  [arch_class_0..4 (one-hot 5),  params_norm, gqa_ratio_norm, is_moe,
-   num_experts_norm, gpu_hash (one-hot 6 = dims 9..14... wait let's flatten)
+Stage 2 (Oracle): Hard-filter RAG results by (gpu, tp, pp) per candidate.
+  This happens in oracle.py, not here.
 
-Actually we encode as a flat float32 vector:
-  arch_onehot[5] + gpu_onehot[6] + [params_norm, gqa_norm, is_moe,
-   experts_norm, tp_norm, pp_norm, input_norm, output_norm,
-   bandwidth_per_param_norm, vram_headroom_norm]
-  = 5 + 6 + 10 = 21 dims
+On first call, builds index from data.csv and caches to placement/advisor/data/.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from __future__ import annotations
 import csv
 import os
 import pickle
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 
@@ -28,28 +28,15 @@ import numpy as np
 # Constants
 # ---------------------------------------------------------------------------
 
-_ARCH_CLASSES = [
-    "LlamaForCausalLM",
-    "Qwen3ForCausalLM",
-    "Qwen3MoeForCausalLM",
-    "NemotronHForCausalLM",
-    "DeciLMForCausalLM",
-]
-_ARCH_IDX = {a: i for i, a in enumerate(_ARCH_CLASSES)}
-
-_GPU_TYPES = ["A100", "B200", "GB200", "H100_SXM", "H200_SXM", "L40S"]
-_GPU_IDX = {g: i for i, g in enumerate(_GPU_TYPES)}
-
-# Normalisation denominators
-_MAX_PARAMS = 500.0       # billion
+# Normalisation denominators (based on actual data.csv ranges)
+_MAX_PARAMS = 500.0
+_MAX_LAYERS = 128.0
+_MAX_HIDDEN = 16384.0
 _MAX_GQA = 64.0
+_MAX_INTERMEDIATE_RATIO = 10.0  # intermediate / hidden, typically 3-5
 _MAX_EXPERTS = 128.0
-_MAX_TP = 8.0
-_MAX_PP = 8.0
 _MAX_INPUT = 32768.0
 _MAX_OUTPUT = 16384.0
-_MAX_BW_PER_PARAM = 8000.0   # actual range 12-7970 in CSV
-_MAX_VRAM_HEADROOM = 6200.0  # actual range 9-6128 in CSV
 
 _DATA_CSV = os.path.normpath(
     os.path.join(
@@ -58,61 +45,14 @@ _DATA_CSV = os.path.normpath(
     )
 )
 _CACHE_DIR = os.path.join(os.path.dirname(__file__), "data")
-_INDEX_PATH = os.path.join(_CACHE_DIR, "index.faiss")
-_META_PATH = os.path.join(_CACHE_DIR, "meta.pkl")
+_INDEX_PATH = os.path.join(_CACHE_DIR, "arch_index.faiss")
+_META_PATH = os.path.join(_CACHE_DIR, "arch_meta.pkl")
 
-EMBED_DIM = 21  # 5 arch + 6 gpu + 10 numeric
-
-
-# ---------------------------------------------------------------------------
-# Embedding
-# ---------------------------------------------------------------------------
-
-def _embed_row(
-    arch_class: str,
-    gpu_model: str,
-    params_b: float,
-    gqa_ratio: float,
-    is_moe: float,
-    num_experts_active: float,
-    tp: float,
-    pp: float,
-    avg_input: float,
-    avg_output: float,
-    bandwidth_per_param: float,
-    vram_headroom: float,
-) -> np.ndarray:
-    vec = np.zeros(EMBED_DIM, dtype=np.float32)
-
-    # One-hot arch (dims 0-4) — all-zeros if unknown
-    if arch_class in _ARCH_IDX:
-        vec[_ARCH_IDX[arch_class]] = 1.0
-
-    # One-hot GPU (dims 5-10) — all-zeros if unknown
-    if gpu_model in _GPU_IDX:
-        vec[5 + _GPU_IDX[gpu_model]] = 1.0
-
-    # Numeric (dims 11-20)
-    vec[11] = min(params_b / _MAX_PARAMS, 1.0)
-    vec[12] = min(gqa_ratio / _MAX_GQA, 1.0)
-    vec[13] = float(bool(is_moe))
-    vec[14] = min(num_experts_active / _MAX_EXPERTS, 1.0)
-    vec[15] = min(tp / _MAX_TP, 1.0)
-    vec[16] = min(pp / _MAX_PP, 1.0)
-    vec[17] = min(avg_input / _MAX_INPUT, 1.0)
-    vec[18] = min(avg_output / _MAX_OUTPUT, 1.0)
-    vec[19] = min(abs(bandwidth_per_param) / _MAX_BW_PER_PARAM, 1.0)
-    vec[20] = min(abs(vram_headroom) / _MAX_VRAM_HEADROOM, 1.0)
-
-    # L2 normalise for cosine via inner product
-    norm = np.linalg.norm(vec)
-    if norm > 0:
-        vec /= norm
-    return vec
+EMBED_DIM = 9  # pure architecture + I/O shape
 
 
 # ---------------------------------------------------------------------------
-# Index build / load
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _safe_float(val, default=0.0) -> float:
@@ -129,15 +69,45 @@ def _safe_float(val, default=0.0) -> float:
         return default
 
 
-def _safe_int(val, default=0) -> int:
-    try:
-        return int(float(val)) if val not in ("", None, "nan", "NaN") else default
-    except (ValueError, TypeError):
-        return default
+# ---------------------------------------------------------------------------
+# Embedding — pure architecture features, no hardware
+# ---------------------------------------------------------------------------
 
+def _embed(
+    params_b: float,
+    num_layers: float,
+    hidden_size: float,
+    gqa_ratio: float,
+    intermediate_ratio: float,
+    is_moe: float,
+    num_experts_active: float,
+    avg_input: float,
+    avg_output: float,
+) -> np.ndarray:
+    vec = np.array([
+        min(params_b / _MAX_PARAMS, 1.0),
+        min(num_layers / _MAX_LAYERS, 1.0),
+        min(hidden_size / _MAX_HIDDEN, 1.0),
+        min(gqa_ratio / _MAX_GQA, 1.0),
+        min(intermediate_ratio / _MAX_INTERMEDIATE_RATIO, 1.0),
+        float(bool(is_moe)),
+        min(num_experts_active / _MAX_EXPERTS, 1.0),
+        min(avg_input / _MAX_INPUT, 1.0),
+        min(avg_output / _MAX_OUTPUT, 1.0),
+    ], dtype=np.float32)
+
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec /= norm
+    return vec
+
+
+# ---------------------------------------------------------------------------
+# Index build / load
+# ---------------------------------------------------------------------------
 
 def _build_index(data_csv: str):
-    """Read data.csv, build FAISS flat-IP index, return (index, rows)."""
+    """Read data.csv, build FAISS flat-IP index on arch features, return (index, rows)."""
     import faiss
 
     rows: list[dict] = []
@@ -146,26 +116,32 @@ def _build_index(data_csv: str):
     with open(data_csv, newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            arch = row.get("model_architecture", "LlamaForCausalLM") or "LlamaForCausalLM"
-            gpu = row.get("gpu_model", "A100") or "A100"
+            params = _safe_float(row.get("params_billion"))
+            hidden = _safe_float(row.get("hidden_size") or
+                                 _extract_from_config(row, "hidden_size"), 4096)
+            num_layers = _safe_float(row.get("num_hidden_layers") or
+                                     _extract_from_config(row, "num_hidden_layers"), 32)
+            gqa = _safe_float(row.get("attention_heads_per_kv_head"), 1.0)
+            intermediate = _safe_float(
+                _extract_from_config(row, "intermediate_size"), hidden * 4)
+            intermediate_ratio = intermediate / max(hidden, 1)
+            is_moe = _safe_float(row.get("is_moe"))
+            experts_active = _safe_float(row.get("num_experts_active"))
+            avg_in = _safe_float(row.get("input_len_tokens_avg") or
+                                 row.get("input_len_tokens_fixed"))
+            avg_out = _safe_float(row.get("output_len_tokens_avg") or
+                                  row.get("output_len_tokens_fixed"))
 
-            # Input/output: prefer avg, fall back to fixed
-            avg_in = _safe_float(row.get("input_len_tokens_avg") or row.get("input_len_tokens_fixed"))
-            avg_out = _safe_float(row.get("output_len_tokens_avg") or row.get("output_len_tokens_fixed"))
-
-            vec = _embed_row(
-                arch_class=arch,
-                gpu_model=gpu,
-                params_b=_safe_float(row.get("params_billion")),
-                gqa_ratio=_safe_float(row.get("attention_heads_per_kv_head"), 1.0),
-                is_moe=_safe_float(row.get("is_moe")),
-                num_experts_active=_safe_float(row.get("num_experts_active")),
-                tp=_safe_float(row.get("tp"), 1.0),
-                pp=_safe_float(row.get("pp"), 1.0),
+            vec = _embed(
+                params_b=params,
+                num_layers=num_layers,
+                hidden_size=hidden,
+                gqa_ratio=gqa,
+                intermediate_ratio=intermediate_ratio,
+                is_moe=is_moe,
+                num_experts_active=experts_active,
                 avg_input=avg_in,
                 avg_output=avg_out,
-                bandwidth_per_param=_safe_float(row.get("bandwidth_per_param")),
-                vram_headroom=_safe_float(row.get("vram_headroom_gb")),
             )
             vectors.append(vec)
             rows.append(row)
@@ -176,33 +152,49 @@ def _build_index(data_csv: str):
     return index, rows
 
 
+def _extract_from_config(row: dict, key: str, default=None):
+    """Try to extract a field from the model_config_json column."""
+    import json
+    cfg_str = row.get("model_config_json", "")
+    if not cfg_str:
+        return default
+    try:
+        cfg = json.loads(cfg_str)
+        return cfg.get(key, default)
+    except (json.JSONDecodeError, ValueError):
+        return default
+
+
 def _get_index():
     """Return (faiss_index, rows). Builds and caches on first call."""
     if not os.path.exists(_DATA_CSV):
         raise FileNotFoundError(
             f"Performance database not found at {_DATA_CSV}.\n"
             "Download it with:\n"
-            "  curl -L https://github.com/Tandemn-Labs/LLM_placement_solver/releases/download/aiconfigurator-v1/data.csv \\\n"
+            "  curl -L https://github.com/Tandemn-Labs/LLM_placement_solver/"
+            "releases/download/aiconfigurator-v1/data.csv \\\n"
             f"    -o {_DATA_CSV}"
         )
 
     os.makedirs(_CACHE_DIR, exist_ok=True)
 
-    if os.path.exists(_INDEX_PATH) and os.path.exists(_META_PATH):
+    # Invalidate cache if CSV is newer
+    if (os.path.exists(_INDEX_PATH) and os.path.exists(_META_PATH)
+            and os.path.getmtime(_INDEX_PATH) >= os.path.getmtime(_DATA_CSV)):
         import faiss
         index = faiss.read_index(_INDEX_PATH)
         with open(_META_PATH, "rb") as f:
             rows = pickle.load(f)
         return index, rows
 
-    print("[advisor] Building FAISS index from performance database (one-time, ~30s)...")
+    print("[advisor] Building FAISS arch index from performance database (one-time, ~30s)...")
     index, rows = _build_index(_DATA_CSV)
 
     import faiss
     faiss.write_index(index, _INDEX_PATH)
     with open(_META_PATH, "wb") as f:
         pickle.dump(rows, f)
-    print(f"[advisor] Index cached ({len(rows):,} rows)")
+    print(f"[advisor] Arch index cached ({len(rows):,} rows)")
     return index, rows
 
 
@@ -211,85 +203,54 @@ def _get_index():
 # ---------------------------------------------------------------------------
 
 def retrieve(
-    arch_class: str,
     params_billion: float,
+    num_layers: int,
+    hidden_size: int,
     gqa_ratio: float,
+    intermediate_size: int,
     is_moe: bool,
     num_experts_active: int,
-    gpu_model: str,
-    tp: int,
-    pp: int,
     avg_input: int,
     avg_output: int,
-    k: int = 10,
+    k: int = 50,
 ) -> List[dict]:
     """
-    Return the k most architecturally similar rows from data.csv for a given
-    (gpu_model, tp, pp) configuration.
+    Find the k most architecturally similar profiled records.
+
+    Returns rows across ALL GPUs, ALL TP/PP configs. The caller (oracle)
+    is responsible for hard-filtering to a specific (gpu, tp, pp) candidate.
+
+    Args:
+        params_billion: model size (total for VRAM, but embedding uses this)
+        num_layers: decoder layer count
+        hidden_size: embedding dimension
+        gqa_ratio: num_attention_heads / num_kv_heads
+        intermediate_size: FFN intermediate dimension
+        is_moe: True if mixture-of-experts
+        num_experts_active: active experts per token (0 for dense)
+        avg_input: target average input token length
+        avg_output: target average output token length
+        k: max records to return (default 50 — covers multiple GPU/TP/PP combos)
+
+    Returns:
+        List of CSV row dicts, sorted by architecture similarity (best first).
+        Each row has all columns including gpu_model, tp, pp, tokens_per_sec_total.
     """
     index, rows = _get_index()
 
-    query = _embed_row(
-        arch_class=arch_class,
-        gpu_model=gpu_model,
+    intermediate_ratio = intermediate_size / max(hidden_size, 1)
+    query = _embed(
         params_b=params_billion,
+        num_layers=float(num_layers),
+        hidden_size=float(hidden_size),
         gqa_ratio=gqa_ratio,
+        intermediate_ratio=intermediate_ratio,
         is_moe=float(is_moe),
         num_experts_active=float(num_experts_active),
-        tp=float(tp),
-        pp=float(pp),
         avg_input=float(avg_input),
         avg_output=float(avg_output),
-        bandwidth_per_param=0.0,
-        vram_headroom=0.0,
     ).reshape(1, -1)
 
     n_results = min(k, index.ntotal)
     distances, indices = index.search(query, n_results)
     return [rows[i] for i in indices[0] if i < len(rows)]
-
-
-def retrieve_multi(
-    arch_class: str,
-    params_billion: float,
-    gqa_ratio: float,
-    is_moe: bool,
-    num_experts_active: int,
-    feasible_configs: list[tuple[str, int, int]],  # [(gpu_model, tp, pp), ...]
-    avg_input: int,
-    avg_output: int,
-    k_per_config: int = 5,
-) -> List[dict]:
-    """
-    Sweep over all feasible (gpu_model, tp, pp) combos, retrieve k per combo,
-    deduplicate by (model_name, gpu_model, tp, pp), return up to k_per_config * len(configs) unique rows.
-    """
-    seen: set[tuple] = set()
-    results: list[dict] = []
-
-    for gpu_model, tp, pp in feasible_configs:
-        hits = retrieve(
-            arch_class=arch_class,
-            params_billion=params_billion,
-            gqa_ratio=gqa_ratio,
-            is_moe=is_moe,
-            num_experts_active=num_experts_active,
-            gpu_model=gpu_model,
-            tp=tp,
-            pp=pp,
-            avg_input=avg_input,
-            avg_output=avg_output,
-            k=k_per_config,
-        )
-        for row in hits:
-            key = (
-                row.get("model_name", ""),
-                row.get("gpu_model", ""),
-                row.get("tp", ""),
-                row.get("pp", ""),
-            )
-            if key not in seen:
-                seen.add(key)
-                results.append(row)
-
-    return results

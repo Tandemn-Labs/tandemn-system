@@ -21,7 +21,7 @@ from typing import List, Optional
 from orca_server.config import AWS_INSTANCES
 from placement.roofline.gpu_specs import GPU_SPECS, GPU_MEMORY_GB
 from placement.advisor.model_arch_fetcher import ModelArchFeatures
-from placement.advisor.perf_rag import retrieve_multi
+from placement.advisor.perf_rag import retrieve
 
 # Multi-GPU instances only (single-GPU not useful for large models)
 _MULTI_GPU_PREFIXES = (
@@ -279,21 +279,18 @@ def get_candidates(
     if not feasible_combos:
         return []
 
-    # One RAG sweep across all feasible configs
-    perfdb_configs = list({
-        (_GPU_NAME_MAP.get(gpu, gpu), tp, pp)
-        for (_, tp, pp, gpu, _, _, _) in feasible_combos
-    })
-    rag_records = retrieve_multi(
-        arch_class=arch.architecture_class,
+    # Stage 1: FAISS retrieval — find architecturally similar models (all GPUs/TP/PP)
+    rag_records = retrieve(
         params_billion=arch.params_billion,
+        num_layers=arch.num_layers,
+        hidden_size=arch.hidden_size,
         gqa_ratio=arch.gqa_ratio,
+        intermediate_size=arch.intermediate_size,
         is_moe=arch.is_moe,
         num_experts_active=arch.num_experts_active,
-        feasible_configs=perfdb_configs,
         avg_input=avg_input,
         avg_output=avg_output,
-        k_per_config=8,
+        k=100,  # enough to cover multiple GPU/TP/PP combos after hard-filtering
     )
 
     # Build candidates
