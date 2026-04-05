@@ -48,8 +48,8 @@ _MAX_TP = 8.0
 _MAX_PP = 8.0
 _MAX_INPUT = 32768.0
 _MAX_OUTPUT = 16384.0
-_MAX_BW_PER_PARAM = 1.0   # already small values in CSV
-_MAX_VRAM_HEADROOM = 140.0
+_MAX_BW_PER_PARAM = 8000.0   # actual range 12-7970 in CSV
+_MAX_VRAM_HEADROOM = 6200.0  # actual range 9-6128 in CSV
 
 _DATA_CSV = os.path.normpath(
     os.path.join(
@@ -117,7 +117,14 @@ def _embed_row(
 
 def _safe_float(val, default=0.0) -> float:
     try:
-        return float(val) if val not in ("", None, "nan", "NaN") else default
+        if val in ("", None, "nan", "NaN"):
+            return default
+        if isinstance(val, str) and val.lower() in ("true", "false"):
+            return 1.0 if val.lower() == "true" else 0.0
+        v = float(val)
+        if v != v:  # NaN check
+            return default
+        return v
     except (ValueError, TypeError):
         return default
 

@@ -66,7 +66,14 @@ class OracleCandidate:
 
 def _safe_float(val, default=0.0) -> float:
     try:
-        return float(val) if val not in ("", None, "nan", "NaN") else default
+        if val in ("", None, "nan", "NaN"):
+            return default
+        if isinstance(val, str) and val.lower() in ("true", "false"):
+            return 1.0 if val.lower() == "true" else 0.0
+        v = float(val)
+        if v != v:  # NaN check
+            return default
+        return v
     except (ValueError, TypeError):
         return default
 
@@ -85,12 +92,8 @@ def _instance_price(instance_type: str) -> float:
 
 
 def _model_vram_gb(arch: ModelArchFeatures, precision_bytes: int = 2) -> float:
-    """Estimate model weight footprint in GB."""
-    # For MoE use active params fraction
-    active_params = arch.params_billion
-    if arch.is_moe and arch.num_experts > 0 and arch.num_experts_active > 0:
-        active_params = arch.params_billion * (arch.num_experts_active / arch.num_experts)
-    return active_params * precision_bytes  # bf16 = 2 bytes/param
+    """Estimate model weight footprint in GB. ALL params must fit in VRAM (including all MoE experts)."""
+    return arch.params_billion * precision_bytes  # bf16 = 2 bytes/param
 
 
 def _kv_cache_gb_per_token(arch: ModelArchFeatures, tp: int) -> float:
@@ -171,74 +174,61 @@ def _predict_from_records(
     if not matching:
         return None, 0.0, "none", ""
 
-    # T1: exact model match
-    exact = [r for r in matching if r.get("model_name", "").lower() == arch.__class__.__name__.lower()
-             or r.get("model_name", "") != ""]
-    # refine: exact model name match
-    exact_model = [r for r in matching
-                   if r.get("model_name", "").split("/")[-1].lower().replace("-", "").replace(".", "")
-                   in arch.__class__.__name__.lower().replace("for", "").replace("causallm", "")
-                   or False]
-    # simpler: check if model_name in records matches the arch's model id
-    for r in matching:
-        mn = r.get("model_name", "")
-        # direct string match on architecture class
-        if r.get("model_architecture", "") == arch.architecture_class:
-            pass  # handled in T2
+    def _io_distance(r):
+        """Distance between a record's I/O profile and the target."""
+        r_in = _safe_float(r.get("input_len_tokens_avg") or r.get("input_len_tokens_fixed"), 512)
+        r_out = _safe_float(r.get("output_len_tokens_avg") or r.get("output_len_tokens_fixed"), 256)
+        return abs(r_in - avg_input) + abs(r_out - avg_output)
 
-    # Actually: T1 = same model_architecture + same params_billion range + gpu+tp+pp
+    def _pick_closest(recs):
+        """Pick the record with the closest I/O profile to the target."""
+        return min(recs, key=_io_distance)
+
+    # T1: same architecture class + params within 15% (near-exact model match)
     t1_records = [
         r for r in matching
         if r.get("model_architecture") == arch.architecture_class
         and abs(_safe_float(r.get("params_billion")) - arch.params_billion) < arch.params_billion * 0.15
     ]
     if t1_records:
-        best = max(t1_records, key=lambda r: _safe_float(r.get("tokens_per_sec_total")))
+        best = _pick_closest(t1_records)
         base_tps = _safe_float(best.get("tokens_per_sec_total"))
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps, base_in, base_out, avg_input, avg_output)
         desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"({best.get('input_len_tokens_avg') or best.get('input_len_tokens_fixed')} in/"
-                f"{best.get('output_len_tokens_avg') or best.get('output_len_tokens_fixed')} out)")
+                f"({int(base_in)} in/{int(base_out)} out, {base_tps:.0f} tok/s measured)")
         return tps, 0.85, "T1_exact", desc
 
-    # T2: same architecture class, scale by params_billion ratio
+    # T2: same architecture class, different size — scale by params ratio
     t2_records = [r for r in matching if r.get("model_architecture") == arch.architecture_class]
     if t2_records:
-        best = max(t2_records, key=lambda r: _safe_float(r.get("tokens_per_sec_total")))
+        best = _pick_closest(t2_records)
         base_tps = _safe_float(best.get("tokens_per_sec_total"))
         ref_params = _safe_float(best.get("params_billion"), arch.params_billion)
-        # Throughput scales roughly inversely with params (memory bound decode)
+        # Decode throughput scales roughly inversely with params (memory-bound)
         param_scale = ref_params / max(arch.params_billion, 0.1)
         param_scale = max(0.3, min(3.0, param_scale))
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps * param_scale, base_in, base_out, avg_input, avg_output)
         desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"(T2: same arch class {arch.architecture_class}, "
-                f"{ref_params:.0f}B→{arch.params_billion:.0f}B scale)")
+                f"(T2: {arch.architecture_class}, {ref_params:.0f}B→{arch.params_billion:.0f}B)")
         return tps, 0.65, "T2_arch_class", desc
 
-    # T3: same gpu+tp+pp, different arch — scale by bandwidth_per_param ratio
-    t3_records = matching  # all have matching gpu+tp+pp
+    # T3: same gpu+tp+pp, different arch — scale by param ratio (simpler, no unit mismatch)
+    t3_records = matching
     if t3_records:
-        best = max(t3_records, key=lambda r: _safe_float(r.get("tokens_per_sec_total")))
+        best = _pick_closest(t3_records)
         base_tps = _safe_float(best.get("tokens_per_sec_total"))
-        ref_bw = _safe_float(best.get("bandwidth_per_param"), 1.0)
-        gpu_specs = GPU_SPECS.get(gpu_type, GPU_SPECS.get("A100"))
-        if gpu_specs and ref_bw > 0:
-            # Rough scale: target bw_per_param ∝ gpu_bw / params
-            target_bw = gpu_specs["mem_bw"] / max(arch.params_billion * 1e9 / 1e6, 1.0)
-            bw_scale = target_bw / ref_bw
-            bw_scale = max(0.2, min(5.0, bw_scale))
-        else:
-            bw_scale = 1.0
+        ref_params = _safe_float(best.get("params_billion"), arch.params_billion)
+        param_scale = ref_params / max(arch.params_billion, 0.1)
+        param_scale = max(0.2, min(5.0, param_scale))
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
-        tps = _scale_tps_for_io(base_tps * bw_scale, base_in, base_out, avg_input, avg_output)
+        tps = _scale_tps_for_io(base_tps * param_scale, base_in, base_out, avg_input, avg_output)
         desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"(T3: different arch, bw_per_param scaled)")
+                f"(T3: cross-arch, {ref_params:.0f}B→{arch.params_billion:.0f}B)")
         return tps, 0.50, "T3_gpu_scaling", desc
 
     return None, 0.0, "none", ""
