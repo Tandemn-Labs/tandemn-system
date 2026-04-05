@@ -1927,6 +1927,8 @@ async def test_placement(request: BatchedRequest):
                 cfg["estimated_runtime_hours"] = round(mo.estimated_runtime_hours, 2)
             if mo.meets_slo is not None:
                 cfg["meets_slo"] = mo.meets_slo
+            if mo.is_fallback:
+                cfg["is_fallback"] = True
             configs.append(cfg)
     elif use_solver == "llm":
         from placement.advisor.advisor import PlacementAdvisor

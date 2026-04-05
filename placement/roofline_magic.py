@@ -522,9 +522,10 @@ class RooflineAWSAllocation(VPCMagic):
             engine=req.engine or "vllm",
             instance_type="g6e.12xlarge",
             replicas=1,
-            tp_size=4,  # TP=4 is safer - works with most attention head counts
+            tp_size=4,
             pp_size=1,
-            max_model_len=8192,  # Conservative fallback
+            max_model_len=8192,
+            is_fallback=True,
         )
 
     def _default_online_config(self, req: OnlineServingRequest) -> MagicOutput:
