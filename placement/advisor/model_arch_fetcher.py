@@ -23,6 +23,7 @@ from placement.roofline.model_arch import (
     normalize_model_name,
     estimate_model_size_from_name,
 )
+from placement.advisor._utils import active_params_from_config
 
 
 @dataclass
@@ -208,15 +209,8 @@ def _features_from_hf_config(cfg: dict, source: str) -> ModelArchFeatures:
     params_b = (embed_p + num_layers * layer_p) / 1e9
 
     # Active params per token (for throughput scaling)
-    if is_moe and num_experts > 0 and num_experts_active > 0:
-        moe_intermediate = cfg.get("moe_intermediate_size", intermediate)
-        active_ffn = 3 * hidden_size * moe_intermediate * num_experts_active
-        shared_intermediate = cfg.get("shared_expert_intermediate_size", 0)
-        if shared_intermediate:
-            active_ffn += 3 * hidden_size * shared_intermediate
-        active_layer_p = qo + kv + active_ffn
-        active_params_b = (embed_p + num_layers * active_layer_p) / 1e9
-    else:
+    active_params_b = active_params_from_config(cfg, num_experts_active) if is_moe else None
+    if active_params_b is None:
         active_params_b = params_b
 
     return ModelArchFeatures(
@@ -238,20 +232,15 @@ def _features_from_hf_config(cfg: dict, source: str) -> ModelArchFeatures:
     )
 
 
-def _from_estimate(model_name: str) -> Optional[ModelArchFeatures]:
-    size_b = estimate_model_size_from_name(model_name)
-    if size_b is None:
-        return None
-
-    # Llama-class template scaled by size
+def _llama_template(params_b: float = 7.0) -> ModelArchFeatures:
+    """Build a dense Llama-class fallback from the registry, scaled by param count."""
     from placement.roofline.model_arch import KNOWN_ARCHITECTURES
-    if size_b >= 65:
+    if params_b >= 65:
         tmpl = KNOWN_ARCHITECTURES["llama-3-70b"]
-    elif size_b >= 12:
+    elif params_b >= 12:
         tmpl = KNOWN_ARCHITECTURES["llama-2-13b"]
     else:
         tmpl = KNOWN_ARCHITECTURES["llama-3-8b"]
-
     return ModelArchFeatures(
         architecture_class="LlamaForCausalLM",
         num_layers=tmpl.num_hidden_layers,
@@ -263,12 +252,19 @@ def _from_estimate(model_name: str) -> Optional[ModelArchFeatures]:
         is_moe=False,
         num_experts=0,
         num_experts_active=0,
-        params_billion=round(size_b, 2),
-        active_params_billion=round(size_b, 2),  # dense estimate
+        params_billion=round(params_b, 2),
+        active_params_billion=round(params_b, 2),
         vocab_size=tmpl.vocab_size,
         max_position_embeddings=tmpl.max_position_embeddings,
         source="estimate",
     )
+
+
+def _from_estimate(model_name: str) -> Optional[ModelArchFeatures]:
+    size_b = estimate_model_size_from_name(model_name)
+    if size_b is None:
+        return None
+    return _llama_template(size_b)
 
 
 def fetch_arch_features(model_name: str) -> ModelArchFeatures:
@@ -282,24 +278,4 @@ def fetch_arch_features(model_name: str) -> ModelArchFeatures:
         result = fn(model_name)
         if result is not None:
             return result
-
-    # Last resort: 7B Llama template
-    from placement.roofline.model_arch import KNOWN_ARCHITECTURES
-    tmpl = KNOWN_ARCHITECTURES["llama-3-8b"]
-    return ModelArchFeatures(
-        architecture_class="LlamaForCausalLM",
-        num_layers=tmpl.num_hidden_layers,
-        hidden_size=tmpl.hidden_size,
-        num_attention_heads=tmpl.num_attention_heads,
-        num_kv_heads=tmpl.num_kv_heads,
-        gqa_ratio=tmpl.num_attention_heads / max(tmpl.num_kv_heads, 1),
-        intermediate_size=tmpl.intermediate_size,
-        is_moe=False,
-        num_experts=0,
-        num_experts_active=0,
-        params_billion=7.0,
-        active_params_billion=7.0,
-        vocab_size=tmpl.vocab_size,
-        max_position_embeddings=tmpl.max_position_embeddings,
-        source="estimate",
-    )
+    return _llama_template(7.0)
