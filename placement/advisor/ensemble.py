@@ -14,9 +14,12 @@ Fallback: cheapest SLO-meeting candidate if API call fails.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import List, Optional
+
+log = logging.getLogger(__name__)
 
 from placement.advisor.model_arch_fetcher import ModelArchFeatures
 from placement.advisor.oracle import OracleCandidate
@@ -179,12 +182,16 @@ def _build_prompt(
             lines.append(f"     └─ Derived from: {c.nearest_db_entry}")
 
     lines.append("\n=== ARCHITECTURE CONTEXT ===")
-    if candidates and candidates[0].nearest_db_entry:
-        lines.append(f"Closest profiled match: {candidates[0].nearest_db_entry}")
     lines.append(
         f"Model arch class: {arch.architecture_class} | "
         f"Arch source: {arch.source}"
     )
+    # Show unique provenance entries so LLM knows which candidates are well-grounded
+    seen_provenance: set[str] = set()
+    for i, c in enumerate(candidates[:top_n]):
+        if c.nearest_db_entry and c.nearest_db_entry not in seen_provenance:
+            seen_provenance.add(c.nearest_db_entry)
+            lines.append(f"  #{i} ({c.tier}): {c.nearest_db_entry}")
 
     lines.append(f"\n{_build_gpu_ref()}")
 
@@ -286,4 +293,5 @@ def run(
         )
 
     except Exception:
+        log.warning("LLM ensemble call failed, using fallback", exc_info=True)
         return _fallback(candidates)
