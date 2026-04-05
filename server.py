@@ -1928,11 +1928,51 @@ async def test_placement(request: BatchedRequest):
             if mo.meets_slo is not None:
                 cfg["meets_slo"] = mo.meets_slo
             configs.append(cfg)
+    elif use_solver == "llm":
+        from placement.advisor.advisor import PlacementAdvisor
+        advisor = PlacementAdvisor(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        magic_outputs = await asyncio.to_thread(
+            advisor.recommend,
+            request.model_name,
+            request.avg_input_tokens or avg_input_tokens,
+            request.avg_output_tokens or 256,
+            request.num_lines or num_lines,
+            request.slo_deadline_hours or 4.0,
+            None,  # gpu_pool: None = all AWS instances
+        )
+        configs = []
+        for mo in magic_outputs:
+            cfg = {
+                "instance_type": mo.instance_type,
+                "gpu_type": INSTANCE_TO_GPU.get(mo.instance_type, "unknown"),
+                "tp_size": mo.tp_size,
+                "pp_size": mo.pp_size,
+                "num_instances": mo.num_instances or mo.num_nodes,
+                "max_model_len": mo.max_model_len,
+                "replicas": mo.replicas,
+            }
+            if mo.throughput_tokens_per_sec is not None:
+                cfg["throughput_tokens_per_sec"] = mo.throughput_tokens_per_sec
+            if mo.cost_per_hour is not None:
+                cfg["cost_per_hour"] = mo.cost_per_hour
+            if mo.cost_per_million_tokens is not None:
+                cfg["cost_per_million_tokens"] = mo.cost_per_million_tokens
+            if mo.estimated_runtime_hours is not None:
+                cfg["estimated_runtime_hours"] = round(mo.estimated_runtime_hours, 2)
+            if mo.meets_slo is not None:
+                cfg["meets_slo"] = mo.meets_slo
+            configs.append(cfg)
+        if not configs:
+            return {
+                "status": "error",
+                "error_type": "no_candidates",
+                "message": "Advisor found no feasible configurations. Check model name and quota.",
+            }
     else:
         return {
             "status": "error",
             "error_type": "invalid_solver",
-            "message": f"Unknown solver: '{use_solver}'. Use 'roofline' or 'user_specified'.",
+            "message": f"Unknown solver: '{use_solver}'. Use 'roofline', 'llm', or 'user_specified'.",
         }
 
     # Context length check
