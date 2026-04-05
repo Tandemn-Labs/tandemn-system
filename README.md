@@ -67,7 +67,7 @@ curl -L https://github.com/Tandemn-Labs/LLM_placement_solver/releases/download/a
   -o LLM_placement_solver/llm_advisor/data/aiconfigurator/data.csv
 ```
 
-This dataset contains 103K profiled vLLM runs across A100, H100, H200, B200, GB200, and L40S GPUs. Without it, `orca plan` falls back to the roofline solver only.
+This dataset contains 103K profiled vLLM runs across A100, H100, H200, B200, GB200, and L40S GPUs, sourced from [NVIDIA Dynamo AIConfigurator](https://github.com/ai-dynamo/aiconfigurator). Without it, `orca plan` falls back to the roofline solver only.
 
 <details>
 <summary>Manual installation</summary>
