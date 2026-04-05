@@ -1930,6 +1930,13 @@ async def test_placement(request: BatchedRequest):
             configs.append(cfg)
     elif use_solver == "llm":
         from placement.advisor.advisor import PlacementAdvisor
+        from placement.roofline_magic import quota_to_gpu_pool
+        from utils.utils import load_aws_quota_csv
+        try:
+            _quota_df = load_aws_quota_csv("./quota/aws_gpu_quota_by_region.csv")
+            _gpu_pool = quota_to_gpu_pool(_quota_df) or None
+        except Exception:
+            _gpu_pool = None  # fall back to all instances if quota unavailable
         advisor = PlacementAdvisor(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         magic_outputs = await asyncio.to_thread(
             advisor.recommend,
@@ -1938,7 +1945,7 @@ async def test_placement(request: BatchedRequest):
             request.avg_output_tokens or 256,
             request.num_lines or num_lines,
             request.slo_deadline_hours or 4.0,
-            None,  # gpu_pool: None = all AWS instances
+            _gpu_pool,
         )
         configs = []
         for mo in magic_outputs:
