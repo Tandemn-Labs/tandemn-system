@@ -201,35 +201,35 @@ def _predict_from_records(
                 f"({int(base_in)} in/{int(base_out)} out, {base_tps:.0f} tok/s measured)")
         return tps, 0.85, "T1_exact", desc
 
-    # T2: same architecture class, different size — scale by params ratio
+    # T2: same architecture class, different size — scale by active params ratio
     t2_records = [r for r in matching if r.get("model_architecture") == arch.architecture_class]
     if t2_records:
         best = _pick_closest(t2_records)
         base_tps = _safe_float(best.get("tokens_per_sec_total"))
-        ref_params = _safe_float(best.get("params_billion"), arch.params_billion)
-        # Decode throughput scales roughly inversely with params (memory-bound)
-        param_scale = ref_params / max(arch.params_billion, 0.1)
+        ref_params = _safe_float(best.get("params_billion"), arch.active_params_billion)
+        # Throughput scales with active params (compute per token), not total VRAM params
+        param_scale = ref_params / max(arch.active_params_billion, 0.1)
         param_scale = max(0.3, min(3.0, param_scale))
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps * param_scale, base_in, base_out, avg_input, avg_output)
         desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"(T2: {arch.architecture_class}, {ref_params:.0f}B→{arch.params_billion:.0f}B)")
+                f"(T2: {arch.architecture_class}, {ref_params:.0f}B→{arch.active_params_billion:.0f}B active)")
         return tps, 0.65, "T2_arch_class", desc
 
-    # T3: same gpu+tp+pp, different arch — scale by param ratio (simpler, no unit mismatch)
+    # T3: same gpu+tp+pp, different arch — scale by active params ratio
     t3_records = matching
     if t3_records:
         best = _pick_closest(t3_records)
         base_tps = _safe_float(best.get("tokens_per_sec_total"))
-        ref_params = _safe_float(best.get("params_billion"), arch.params_billion)
-        param_scale = ref_params / max(arch.params_billion, 0.1)
+        ref_params = _safe_float(best.get("params_billion"), arch.active_params_billion)
+        param_scale = ref_params / max(arch.active_params_billion, 0.1)
         param_scale = max(0.2, min(5.0, param_scale))
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps * param_scale, base_in, base_out, avg_input, avg_output)
         desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"(T3: cross-arch, {ref_params:.0f}B→{arch.params_billion:.0f}B)")
+                f"(T3: cross-arch, {ref_params:.0f}B→{arch.active_params_billion:.0f}B active)")
         return tps, 0.50, "T3_gpu_scaling", desc
 
     return None, 0.0, "none", ""
@@ -321,6 +321,18 @@ def get_candidates(
             runtime_h = None
             meets_slo = None
 
+        # Filter RAG records to this candidate's GPU/TP/PP for LLM context
+        perfdb_gpu = _GPU_NAME_MAP.get(gpu_name, gpu_name)
+        candidate_rag = [
+            r for r in rag_records
+            if r.get("gpu_model") == perfdb_gpu
+            and _safe_float(r.get("tp")) == tp
+            and _safe_float(r.get("pp")) == pp
+        ][:5]
+        if not candidate_rag:
+            # Fall back to same-GPU records if exact tp/pp not found
+            candidate_rag = [r for r in rag_records if r.get("gpu_model") == perfdb_gpu][:5]
+
         candidates.append(OracleCandidate(
             gpu_type=gpu_name,
             instance_type=inst,
@@ -335,7 +347,7 @@ def get_candidates(
             confidence=confidence,
             tier=tier,
             nearest_db_entry=nearest_entry,
-            rag_records=rag_records[:5],  # top-5 for LLM context
+            rag_records=candidate_rag,
         ))
 
     # Sort: SLO-meeting first, then by cost

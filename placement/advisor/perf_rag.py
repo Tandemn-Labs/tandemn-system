@@ -84,13 +84,13 @@ def _embed_row(
 ) -> np.ndarray:
     vec = np.zeros(EMBED_DIM, dtype=np.float32)
 
-    # One-hot arch (dims 0-4)
-    arch_i = _ARCH_IDX.get(arch_class, 0)
-    vec[arch_i] = 1.0
+    # One-hot arch (dims 0-4) — all-zeros if unknown
+    if arch_class in _ARCH_IDX:
+        vec[_ARCH_IDX[arch_class]] = 1.0
 
-    # One-hot GPU (dims 5-10)
-    gpu_i = _GPU_IDX.get(gpu_model, 0)
-    vec[5 + gpu_i] = 1.0
+    # One-hot GPU (dims 5-10) — all-zeros if unknown
+    if gpu_model in _GPU_IDX:
+        vec[5 + _GPU_IDX[gpu_model]] = 1.0
 
     # Numeric (dims 11-20)
     vec[11] = min(params_b / _MAX_PARAMS, 1.0)
