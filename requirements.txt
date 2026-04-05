@@ -29,4 +29,4 @@ matplotlib
 numpy
 
 # Solver dependencies (swap this line to use a different solver)
--r LLM_placement_solver/requirements.txt
+-r LLM_placement_solver/requirements.txtfaiss-cpu>=1.7
