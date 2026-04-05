@@ -526,7 +526,7 @@ def cmd_deploy(args):
 
     # ── Phase 3: Solve placement (advisor + roofline in parallel) ───────
     print()
-    use_advisor = not args.gpu and not is_s3
+    use_advisor = not args.gpu and not is_s3 and not args.no_advisor
     advisor_configs = None
 
     if use_advisor:
@@ -794,7 +794,7 @@ def cmd_plan(args):
 
     # ── Run advisor + roofline concurrently ──────────────────────────
     advisor_configs = None
-    use_advisor = not args.gpu and not is_s3
+    use_advisor = not args.gpu and not is_s3 and not args.no_advisor
     t0 = time.time()
 
     if use_advisor:
@@ -2315,6 +2315,8 @@ Examples:
     p_deploy.add_argument("--s3-models", type=str, default=None, metavar="S3_URI",
                           help="S3 path to model weights (e.g. s3://tandemn-model-shards/hf-models/Qwen/Qwen3-32B)")
     p_deploy.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
+    p_deploy.add_argument("--no-advisor", action="store_true",
+                          help="Skip LLM advisor, use roofline solver only")
     p_deploy.add_argument("--skip-dangerously", action="store_true",
                           help="Auto-pick Koi recommendation without prompting")
 
@@ -2328,6 +2330,8 @@ Examples:
     p_plan.add_argument("--gpu", help="GPU type (e.g., L40S, A100, H100). Triggers user_specified solver.")
     p_plan.add_argument("--tp", type=int, help="Tensor parallelism (1,2,4,8)")
     p_plan.add_argument("--pp", type=int, help="Pipeline parallelism (1,2,3,4)")
+    p_plan.add_argument("--no-advisor", action="store_true",
+                        help="Skip LLM advisor, use roofline solver only")
     p_plan.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
 
     # progress
