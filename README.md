@@ -112,19 +112,34 @@ Tandemn System supports **any HuggingFace model compatible with vLLM**. Specify 
 ./orca deploy <any-hf-model> input.jsonl --gpu A10G --tp 1
 ```
 
-The **automatic placement solver** — which selects GPU type, TP/PP configuration, and region on your behalf — has profiling data for the following models:
+**Two placement solvers** run in parallel when you call `orca plan` or `orca deploy`:
 
-| Model | Parameters | Profiled GPUs |
-|-------|------------|---------------|
-| Llama 3.3 70B (FP8) | 70B | H100 |
-| Llama 3.1 8B (FP8) | 8B | H100 |
-| DeepSeek-R1-Distill-Llama-70B | 70B | L40S, A100 |
-| Llama 2 70B | 70B | A100 |
-| Llama 3 70B Instruct | 70B | A100 |
+1. **LLM Advisor** — architecture-aware RAG over a 103K-row performance database, with an LLM reasoning layer (Claude) that ranks candidates by cost, throughput, and SLO feasibility. Requires `ANTHROPIC_API_KEY` and the performance database (see [Installation](#performance-database)).
+2. **Roofline solver** — deterministic analytical model based on GPU bandwidth, TFLOPS, and memory constraints. No API key required.
 
-For models not listed, use `./orca plan` to see solver recommendations, or override manually with `--gpu` and `--tp`.
+Both recommendations are shown side by side. For deploy, a prompt lets you choose between them (`--skip-dangerously` auto-picks the advisor). Falls back to roofline if the advisor is unavailable.
 
-**Koi integration.** When `KOI_SERVICE_URL` is set, `orca plan` and `orca deploy` call the [Koi](https://github.com/Tandemn-Labs/koi) LLM-powered placement engine in parallel with the roofline solver. Both recommendations are shown side by side. For deploy, a prompt lets you choose between them (`--skip-dangerously` auto-picks Koi). Falls back to roofline silently if Koi is unreachable.
+The performance database covers 16 models across 6 GPU types:
+
+| Model | Params | Type | Profiled GPUs |
+|-------|--------|------|---------------|
+| Meta-Llama-3.1-8B | 8B | Dense | A100, H100, H200, B200, GB200, L40S |
+| Meta-Llama-3.1-70B | 70B | Dense | A100, H100, H200, B200, GB200, L40S |
+| Llama-3.1-70B-Instruct-FP8 | 70B | Dense (FP8) | A100, H100, H200, B200, GB200, L40S |
+| Meta-Llama-3.1-405B | 405B | Dense | A100, H100, H200, B200, GB200 |
+| Nemotron-Super-49B | 49B | Dense | A100, H100, H200, B200, GB200, L40S |
+| Nemotron-H-56B | 56B | Dense | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-8B | 8B | Dense | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-32B | 32B | Dense | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-32B-FP8 | 32B | Dense (FP8) | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-30B-A3B | 30B | MoE (3B active) | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-235B-A22B | 235B | MoE (22B active) | A100, H100, H200, B200, GB200 |
+| Qwen3-235B-A22B-FP8 | 235B | MoE (22B active, FP8) | A100, H100, H200, B200, GB200 |
+| Qwen3-235B-A22B-NVFP4 | 235B | MoE (22B active, FP4) | A100, H100, H200, B200, GB200 |
+| Qwen3-Coder-480B-A35B | 480B | MoE (35B active) | H100, H200, B200, GB200 |
+| Nemotron-3-Nano-30B-A3B | 30B | MoE (3B active) | A100, H100, H200, B200, GB200, L40S |
+
+For models not in the database, the advisor uses architecture-aware interpolation (matching by model family, size, and I/O profile) to estimate throughput. Use `--gpu` and `--tp` to override manually.
 
 ---
 
@@ -361,7 +376,7 @@ $ ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
                 └────────────────────────────────────────────────────────────┘
 ```
 
-**Placement solver.** Uses a roofline model to estimate throughput and memory requirements across GPU types and TP/PP configurations. Selects the cheapest option that completes within your SLO, with automatic fallback to alternative regions and instance types if the primary launch fails.
+**Placement.** Two solvers run in parallel: an **LLM advisor** (RAG over 103K profiled runs + Claude reasoning) and a **roofline solver** (analytical bandwidth/compute model). The advisor fetches model architecture from HuggingFace, prunes infeasible GPU/TP/PP configs, predicts throughput from profiled data, and uses an LLM to rank the top candidates. Falls back to roofline if the advisor API key is missing or the performance database isn't downloaded.
 
 **Chunked multi-replica execution.** Input is split into chunks (default: 1,000 lines each) and queued in Redis. Independent replicas pull chunks, process them via vLLM, and upload outputs to S3. Lease-based fault tolerance ensures that if a replica dies, its in-flight chunks are reclaimed and re-queued within 45 seconds via a ReplicaWatchdog heartbeat.
 
@@ -606,7 +621,7 @@ New replicas launch first. Old replicas are killed after `ready_threshold` new r
 </details>
 
 <details>
-<summary><strong>GET /resources</strong> — Instance catalog + quota pools for Koi</summary>
+<summary><strong>GET /resources</strong> — Instance catalog + quota pools</summary>
 
 **Response:**
 ```json
@@ -636,8 +651,8 @@ New replicas launch first. Old replicas are killed after `ready_threshold` new r
   ]
 }
 ```
-- **instances**: Multi-GPU instance types with GPU specs and SkyPilot pricing. Filtered to Koi-supported GPUs (H100, A100, L40S, L4, A10G).
-- **quotas**: Raw per-(family, region, market) vCPU limits from AWS. Koi's Oracle joins instances to quotas via `quota_family` to compute how many instances of each type can be launched.
+- **instances**: Multi-GPU instance types with GPU specs and SkyPilot pricing.
+- **quotas**: Raw per-(family, region, market) vCPU limits from AWS. The advisor's Oracle joins instances to quotas via `quota_family` to compute how many instances of each type can be launched.
 </details>
 
 ---
