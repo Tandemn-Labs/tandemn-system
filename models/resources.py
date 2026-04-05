@@ -19,6 +19,7 @@ class MagicOutput(BaseModel):
     # SLO estimates (populated when slo_deadline_hours is set)
     estimated_runtime_hours: Optional[float] = None
     meets_slo: Optional[bool] = None
+    is_fallback: bool = False  # True when solver returned a generic fallback (unsupported model)
 
     @property
     def num_nodes(self) -> int:
