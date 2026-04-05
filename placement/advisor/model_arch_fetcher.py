@@ -171,18 +171,22 @@ def _features_from_hf_config(cfg: dict, source: str) -> ModelArchFeatures:
     )
     is_moe = num_experts > 1
 
-    # Param estimate: use active params for MoE
-    active_intermediate = intermediate
-    if is_moe:
-        moe_intermediate = cfg.get("moe_intermediate_size", intermediate)
-        # Each token routes through num_experts_active experts
-        active_intermediate = moe_intermediate * num_experts_active if num_experts_active else intermediate
-
+    # Param estimate: ALL expert weights for MoE (they all load into VRAM)
     d_head = hidden_size / max(num_heads, 1)
     kv_dim = num_kv * d_head
     qo = 2 * hidden_size * hidden_size
     kv = 2 * hidden_size * kv_dim
-    ffn = 3 * hidden_size * active_intermediate
+    if is_moe and num_experts > 0:
+        moe_intermediate = cfg.get("moe_intermediate_size", intermediate)
+        # Each expert has its own FFN; all experts' weights must be in VRAM
+        ffn_per_expert = 3 * hidden_size * moe_intermediate
+        ffn = ffn_per_expert * num_experts
+        # Shared experts (some MoE architectures like Qwen3-MoE have them)
+        shared_intermediate = cfg.get("shared_expert_intermediate_size", 0)
+        if shared_intermediate:
+            ffn += 3 * hidden_size * shared_intermediate
+    else:
+        ffn = 3 * hidden_size * intermediate
     layer_p = qo + kv + ffn
     embed_p = vocab_size * hidden_size * 2
     params_b = (embed_p + num_layers * layer_p) / 1e9
