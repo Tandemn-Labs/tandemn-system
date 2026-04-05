@@ -22,6 +22,7 @@ from orca_server.config import AWS_INSTANCES
 from placement.roofline.gpu_specs import GPU_SPECS, GPU_MEMORY_GB
 from placement.advisor.model_arch_fetcher import ModelArchFeatures
 from placement.advisor.perf_rag import retrieve
+from placement.advisor._utils import safe_float, active_params_from_config, instance_price
 
 # Multi-GPU instances only (single-GPU not useful for large models)
 _MULTI_GPU_PREFIXES = (
@@ -64,31 +65,7 @@ class OracleCandidate:
     rag_records: List[dict] = field(default_factory=list)
 
 
-def _safe_float(val, default=0.0) -> float:
-    try:
-        if val in ("", None, "nan", "NaN"):
-            return default
-        if isinstance(val, str) and val.lower() in ("true", "false"):
-            return 1.0 if val.lower() == "true" else 0.0
-        v = float(val)
-        if v != v:  # NaN check
-            return default
-        return v
-    except (ValueError, TypeError):
-        return default
-
-
-def _instance_price(instance_type: str) -> float:
-    """Approximate on-demand hourly price. Falls back to a rough estimate."""
-    try:
-        import sky.catalog as _sky_catalog
-        cost = _sky_catalog.get_hourly_cost(
-            instance_type=instance_type, use_spot=False,
-            region="us-east-1", zone=None, clouds="aws",
-        )
-        return cost if cost else 0.0
-    except Exception:
-        return 0.0
+_safe_float = safe_float  # local alias for brevity
 
 
 def _model_vram_gb(arch: ModelArchFeatures, precision_bytes: int = 2) -> float:
@@ -150,22 +127,12 @@ def _scale_tps_for_io(base_tps: float, base_input: float, base_output: float,
 
 
 def _ref_active_params(record: dict) -> float:
-    """Estimate active params per token for a reference record from the CSV.
-
-    For dense models, active == total. For MoE, computes from model_config_json:
-    active = embedding + attention + active_experts × per_expert_FFN + shared_expert_FFN.
-    """
-    total = _safe_float(record.get("params_billion"))
-    if total <= 0:
-        return total
-    is_moe = _safe_float(record.get("is_moe"))
-    if not is_moe:
-        return total
-    active_experts = _safe_float(record.get("num_experts_active"))
-    if active_experts <= 0:
-        return total
-    # Parse config for precise computation
+    """Active params per token for a CSV reference record. Falls back to total params."""
     import json
+    total = _safe_float(record.get("params_billion"))
+    if total <= 0 or not _safe_float(record.get("is_moe")):
+        return total
+    active_experts = int(_safe_float(record.get("num_experts_active")))
     cfg_str = record.get("model_config_json", "")
     if not cfg_str:
         return total
@@ -173,26 +140,8 @@ def _ref_active_params(record: dict) -> float:
         cfg = json.loads(cfg_str)
     except (json.JSONDecodeError, ValueError):
         return total
-    total_experts = cfg.get("num_experts", cfg.get("num_local_experts", 0))
-    if total_experts <= 0 or active_experts >= total_experts:
-        return total
-    hidden = cfg.get("hidden_size", 4096)
-    n_heads = cfg.get("num_attention_heads", 32)
-    n_kv = cfg.get("num_key_value_heads", n_heads)
-    n_layers = cfg.get("num_hidden_layers", 32)
-    vocab = cfg.get("vocab_size", 32000)
-    moe_intermediate = cfg.get("moe_intermediate_size", cfg.get("intermediate_size", hidden * 4))
-    shared_intermediate = cfg.get("shared_expert_intermediate_size", 0)
-    # Compute active params from architecture
-    d_head = hidden / max(n_heads, 1)
-    kv_dim = n_kv * d_head
-    attn_per_layer = 2 * hidden * hidden + 2 * hidden * kv_dim  # QO + KV projections
-    ffn_per_expert = 3 * hidden * moe_intermediate  # gate + up + down
-    active_ffn = ffn_per_expert * active_experts
-    shared_ffn = 3 * hidden * shared_intermediate if shared_intermediate else 0
-    embed = vocab * hidden * 2  # input + output embeddings
-    active_total = (embed + n_layers * (attn_per_layer + active_ffn + shared_ffn)) / 1e9
-    return active_total
+    result = active_params_from_config(cfg, active_experts)
+    return result if result is not None else total
 
 
 def _predict_from_records(
@@ -309,7 +258,7 @@ def get_candidates(
     # Collect all feasible (instance, tp, pp) combos for RAG multi-query
     feasible_combos: list[tuple[str, int, int, str, int, int, float]] = []  # (inst, tp, pp, gpu, count, vram, price)
     for inst, gpu_name, gpu_count, vram_per_gpu in candidate_instances:
-        price = _instance_price(inst)
+        price = instance_price(inst)
         for tp in _TP_OPTIONS:
             if tp > gpu_count:
                 continue
@@ -335,8 +284,19 @@ def get_candidates(
         num_experts_active=arch.num_experts_active,
         avg_input=avg_input,
         avg_output=avg_output,
-        k=100,  # enough to cover multiple GPU/TP/PP combos after hard-filtering
+        k=100,
     )
+
+    # Pre-index RAG records by (gpu, tp, pp) to avoid re-scanning per combo
+    from collections import defaultdict
+    _rag_by_key: dict[tuple, list[dict]] = defaultdict(list)
+    _rag_by_gpu: dict[str, list[dict]] = defaultdict(list)
+    for r in rag_records:
+        gpu = r.get("gpu_model", "")
+        _rag_by_key[(gpu, int(_safe_float(r.get("tp"))), int(_safe_float(r.get("pp"))))].append(r)
+        _rag_by_gpu[gpu].append(r)
+
+    total_tokens = num_requests * (avg_input + avg_output)
 
     # Build candidates
     candidates: list[OracleCandidate] = []
@@ -355,7 +315,6 @@ def get_candidates(
             avg_output=avg_output,
         )
 
-        total_tokens = num_requests * (avg_input + avg_output)
         if predicted_tps and predicted_tps > 0:
             runtime_h = (total_tokens / predicted_tps) / 3600.0
             meets_slo = runtime_h <= slo_hours
@@ -363,17 +322,10 @@ def get_candidates(
             runtime_h = None
             meets_slo = None
 
-        # Filter RAG records to this candidate's GPU/TP/PP for LLM context
         perfdb_gpu = _GPU_NAME_MAP.get(gpu_name, gpu_name)
-        candidate_rag = [
-            r for r in rag_records
-            if r.get("gpu_model") == perfdb_gpu
-            and _safe_float(r.get("tp")) == tp
-            and _safe_float(r.get("pp")) == pp
-        ][:5]
+        candidate_rag = _rag_by_key.get((perfdb_gpu, tp, pp), [])[:5]
         if not candidate_rag:
-            # Fall back to same-GPU records if exact tp/pp not found
-            candidate_rag = [r for r in rag_records if r.get("gpu_model") == perfdb_gpu][:5]
+            candidate_rag = _rag_by_gpu.get(perfdb_gpu, [])[:5]
 
         candidates.append(OracleCandidate(
             gpu_type=gpu_name,

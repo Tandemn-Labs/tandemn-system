@@ -24,6 +24,8 @@ from typing import List
 
 import numpy as np
 
+from placement.advisor._utils import safe_float as _safe_float
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -49,24 +51,6 @@ _INDEX_PATH = os.path.join(_CACHE_DIR, "arch_index.faiss")
 _META_PATH = os.path.join(_CACHE_DIR, "arch_meta.pkl")
 
 EMBED_DIM = 9  # pure architecture + I/O shape
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _safe_float(val, default=0.0) -> float:
-    try:
-        if val in ("", None, "nan", "NaN"):
-            return default
-        if isinstance(val, str) and val.lower() in ("true", "false"):
-            return 1.0 if val.lower() == "true" else 0.0
-        v = float(val)
-        if v != v:  # NaN check
-            return default
-        return v
-    except (ValueError, TypeError):
-        return default
 
 
 # ---------------------------------------------------------------------------
@@ -217,24 +201,8 @@ def retrieve(
     """
     Find the k most architecturally similar profiled records.
 
-    Returns rows across ALL GPUs, ALL TP/PP configs. The caller (oracle)
-    is responsible for hard-filtering to a specific (gpu, tp, pp) candidate.
-
-    Args:
-        params_billion: model size (total for VRAM, but embedding uses this)
-        num_layers: decoder layer count
-        hidden_size: embedding dimension
-        gqa_ratio: num_attention_heads / num_kv_heads
-        intermediate_size: FFN intermediate dimension
-        is_moe: True if mixture-of-experts
-        num_experts_active: active experts per token (0 for dense)
-        avg_input: target average input token length
-        avg_output: target average output token length
-        k: max records to return (default 50 — covers multiple GPU/TP/PP combos)
-
-    Returns:
-        List of CSV row dicts, sorted by architecture similarity (best first).
-        Each row has all columns including gpu_model, tp, pp, tokens_per_sec_total.
+    Returns rows across ALL GPUs/TP/PP configs. The caller (oracle)
+    hard-filters to specific (gpu, tp, pp) candidates.
     """
     index, rows = _get_index()
 

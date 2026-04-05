@@ -127,15 +127,13 @@ Always return exactly 3 placements. If fewer than 3 candidates exist, repeat the
 """
 
 
-def _build_gpu_ref() -> str:
-    lines = ["GPU specs reference:"]
-    for gpu, specs in GPU_SPECS.items():
-        vram = GPU_MEMORY_GB.get(gpu, "?")
-        lines.append(
-            f"  {gpu}: {specs['tflops']} TFLOPS FP16, {specs['mem_bw']} GB/s bandwidth, "
-            f"{vram}GB VRAM, efficiency={specs['efficiency']}"
-        )
-    return "\n".join(lines)
+_GPU_REF = "\n".join(
+    ["GPU specs reference:"] + [
+        f"  {gpu}: {specs['tflops']} TFLOPS FP16, {specs['mem_bw']} GB/s bandwidth, "
+        f"{GPU_MEMORY_GB.get(gpu, '?')}GB VRAM, efficiency={specs['efficiency']}"
+        for gpu, specs in GPU_SPECS.items()
+    ]
+)
 
 
 def _build_prompt(
@@ -193,7 +191,7 @@ def _build_prompt(
             seen_provenance.add(c.nearest_db_entry)
             lines.append(f"  #{i} ({c.tier}): {c.nearest_db_entry}")
 
-    lines.append(f"\n{_build_gpu_ref()}")
+    lines.append(f"\n{_GPU_REF}")
 
     lines.append(
         "\n=== YOUR TASK ===\n"
