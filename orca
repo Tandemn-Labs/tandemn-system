@@ -2321,6 +2321,8 @@ Examples:
     p_deploy.add_argument("--s3-models", type=str, default=None, metavar="S3_URI",
                           help="S3 path to model weights (e.g. s3://tandemn-model-shards/hf-models/Qwen/Qwen3-32B)")
     p_deploy.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
+    p_deploy.add_argument("--quantization", choices=["fp16", "fp8", "int8"], default=None,
+                          help="Quantization (default: fp16, no quantization)")
     p_deploy.add_argument("--no-advisor", action="store_true",
                           help="Skip LLM advisor, use roofline solver only")
     p_deploy.add_argument("--skip-dangerously", action="store_true",
@@ -2336,6 +2338,8 @@ Examples:
     p_plan.add_argument("--gpu", help="GPU type (e.g., L40S, A100, H100). Triggers user_specified solver.")
     p_plan.add_argument("--tp", type=int, help="Tensor parallelism (1,2,4,8)")
     p_plan.add_argument("--pp", type=int, help="Pipeline parallelism (1,2,3,4)")
+    p_plan.add_argument("--quantization", choices=["fp16", "fp8", "int8"], default=None,
+                        help="Quantization (default: fp16, no quantization)")
     p_plan.add_argument("--no-advisor", action="store_true",
                         help="Skip LLM advisor, use roofline solver only")
     p_plan.add_argument("--log-level", default="info", choices=["debug", "info", "warning"])
