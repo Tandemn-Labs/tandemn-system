@@ -1004,6 +1004,22 @@ async def _assemble_output(job_id: str):
         else:
             job_logger.info(f"[Assembly] Job {job_id} completed successfully")
 
+        # Notify Koi of job completion (if KOI_SERVICE_URL is set)
+        from orca_server.config import KOI_SERVICE_URL
+        if KOI_SERVICE_URL:
+            try:
+                import requests as _req
+                final_status = "failed" if assembly_failures else "succeeded"
+                koi_payload = {
+                    "job_id": job_id,
+                    "status": final_status,
+                    "metrics": agg if agg else {},
+                }
+                _req.post(f"{KOI_SERVICE_URL}/job/complete", json=koi_payload, timeout=10)
+                job_logger.info(f"[Assembly] Notified Koi at {KOI_SERVICE_URL}/job/complete")
+            except Exception as ke:
+                job_logger.warning(f"[Assembly] Failed to notify Koi: {ke}")
+
         # Rename directory with success-/partial-/failed- prefix (after all writes are done)
         status_prefix = "failed" if assembly_failures else ("partial" if failed_ids else "success")
         prefixed_dirname = prefix_job_dirname(job_dirname, status_prefix)
