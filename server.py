@@ -1818,6 +1818,26 @@ async def submit_batch(request: BatchedRequest):
     )
 
     if success:
+        # Notify Koi that the job launched (starts monitoring)
+        from orca_server.config import KOI_SERVICE_URL
+        if KOI_SERVICE_URL:
+            try:
+                import requests as _req
+                _req.post(f"{KOI_SERVICE_URL}/job/started", json={
+                    "job_id": used_config.decision_id,
+                    "decision_id": getattr(request, "_koi_decision_id", None),
+                    "gpu_type": used_config.instance_type.split(".")[0] if "." in used_config.instance_type else "unknown",
+                    "instance_type": used_config.instance_type,
+                    "tp": used_config.tp_size,
+                    "pp": used_config.pp_size,
+                    "dp": getattr(request, "replicas", 1) or 1,
+                    "slo_deadline_hours": request.slo_deadline_hours or 8.0,
+                    "total_tokens": (request.num_lines or 0) * ((request.avg_input_tokens or 0) + (request.avg_output_tokens or 0)),
+                }, timeout=5)
+                logger.info(f"[Launch] Notified Koi: job {used_config.decision_id} started")
+            except Exception as ke:
+                logger.warning(f"[Launch] Failed to notify Koi of job start: {ke}")
+
         resp = {
             "status": "launched",
             "job_id": used_config.decision_id,
