@@ -47,6 +47,7 @@ except ImportError:
 # ─── Config ──────────────────────────────────────────────────────────────────
 ORCA_SERVER = os.environ.get("ORCA_SERVER", "http://localhost:26336")
 ORCA_API_KEY = os.environ.get("ORCA_API_KEY", "")
+KOI_SERVICE_URL = os.environ.get("KOI_SERVICE_URL", "")
 
 # ─── ANSI helpers ────────────────────────────────────────────────────────────
 BOLD    = "\033[1m"
@@ -313,6 +314,81 @@ def _advisor_summary_lines(cfg):
     return lines
 
 
+# ─── Koi integration helpers ────────────────────────────────────────────────
+
+def fetch_resources():
+    """Fetch resource map from Orca server GET /resources. Returns dict or None."""
+    url = f"{ORCA_SERVER}/resources"
+    headers = {}
+    if ORCA_API_KEY:
+        headers["Authorization"] = f"Bearer {ORCA_API_KEY}"
+    try:
+        resp = requests.get(url, timeout=10, headers=headers)
+        if resp.status_code == 200:
+            return resp.json()
+    except (requests.ConnectionError, requests.Timeout):
+        pass
+    except Exception:
+        pass
+    return None
+
+
+def call_koi(job_params, resource_map, timeout=300):
+    """POST to Koi /decide endpoint. Returns response JSON or None on failure."""
+    if not KOI_SERVICE_URL:
+        return None
+    try:
+        resp = requests.post(
+            f"{KOI_SERVICE_URL}/decide",
+            json={"job_request": job_params, "resource_map": resource_map},
+            timeout=timeout,
+        )
+        if resp.status_code in (200, 201):
+            return resp.json()
+        return None
+    except (requests.ConnectionError, requests.Timeout):
+        return None
+    except Exception:
+        return None
+
+
+def _koi_summary_lines(koi_data):
+    """Format Koi placement decision as display lines for box()."""
+    rec = koi_data.get("config", {})
+    eng = rec.get("engine_config", {})
+
+    gpu = rec.get("gpu_type", "?")
+    tp = rec.get("tp", "?")
+    pp = rec.get("pp", "?")
+    dp = rec.get("dp", "?")
+    inst = rec.get("instance_type", "?")
+
+    lines = [
+        f"{DIM}Instance:{RESET}     {c(inst, WHITE+BOLD)}",
+        f"{DIM}GPU:{RESET}          {c(gpu, CYAN+BOLD)}",
+        f"{DIM}TP:{RESET}           {tp}    {DIM}PP:{RESET} {pp}    {DIM}DP:{RESET} {dp}",
+    ]
+    tps = koi_data.get("predicted_tps")
+    if tps:
+        lines.append(f"{DIM}Est. tput:{RESET}   {c(f'{tps:.0f}', GREEN)} tok/s")
+    cph = koi_data.get("predicted_cost_per_hour")
+    if cph:
+        lines.append(f"{DIM}Est. cost:{RESET}   ${cph:.2f}/hr")
+    rt = koi_data.get("predicted_runtime_hours")
+    if rt is not None:
+        lines.append(f"{DIM}Est. time:{RESET}   {rt:.2f}h")
+    tc = koi_data.get("predicted_total_cost")
+    if tc is not None:
+        lines.append(f"{DIM}Total cost:{RESET}  ${tc:.2f}")
+    conf = koi_data.get("confidence")
+    if conf is not None:
+        lines.append(f"{DIM}Confidence:{RESET}  {conf:.0%}")
+    src = koi_data.get("data_source", "")
+    if src:
+        lines.append(f"{DIM}Source:{RESET}      {src}")
+    return lines
+
+
 # ─── Animated print helpers ─────────────────────────────────────────────────
 def step(msg, icon="▸"):
     print(f"  {CYAN}{icon}{RESET} {msg}")
@@ -524,20 +600,33 @@ def cmd_deploy(args):
     payload["chunks"] = chunk_infos
     payload["replicas"] = effective_replicas
 
-    # ── Phase 3: Solve placement (advisor + roofline in parallel) ───────
+    # ── Phase 3: Solve placement (Koi + roofline in parallel) ─────────
     print()
-    use_advisor = not args.gpu and not is_s3 and not args.no_advisor
-    advisor_configs = None
+    use_koi = KOI_SERVICE_URL and not args.gpu and not is_s3
+    koi_data = None
 
-    if use_advisor:
+    if use_koi:
         import threading as _thr
-        advisor_result = [None]
-        def _advisor_thread():
-            advisor_result[0] = _call_advisor(payload)
-        kt = _thr.Thread(target=_advisor_thread, daemon=True)
+        step("Running Koi + Orca roofline in parallel...")
+
+        koi_job = {
+            "model_name": model_name,
+            "task_type": "batch",
+            "avg_input_tokens": stats["avg_input_tokens"],
+            "avg_output_tokens": avg_out,
+            "num_requests": stats["num_lines"],
+            "slo_deadline_hours": args.slo,
+            "objective": "cheapest",
+        }
+
+        koi_result = [None]
+        def _koi_thread():
+            rm = fetch_resources()
+            if rm:
+                koi_result[0] = call_koi(koi_job, rm)
+        kt = _thr.Thread(target=_koi_thread, daemon=True)
         kt.start()
 
-        # Roofline in parallel (with spinner covering both)
         plan_payload = {
             k: v for k, v in payload.items()
             if k not in ("chunks", "replicas", "force", "persist", "prefer_spot",
@@ -546,7 +635,7 @@ def cmd_deploy(args):
         plan_payload["input_file"] = "s3://plan-dry-run/placeholder"
         import threading as _thr2
         _stop = _thr2.Event()
-        _spin = _thr2.Thread(target=spinner, args=("Solving placement (advisor + roofline)...", _stop), daemon=True)
+        _spin = _thr2.Thread(target=spinner, args=("Solving placement...", _stop), daemon=True)
         _spin.start()
         try:
             roofline_resp = api("post", "/test/placement", json=plan_payload)
@@ -554,22 +643,22 @@ def cmd_deploy(args):
             kt.join(timeout=300)
             _stop.set()
             _spin.join(timeout=2)
-        advisor_configs = advisor_result[0]
+        koi_data = koi_result[0]
 
-        # Parse roofline result (drop fallback configs — model not supported by roofline)
+        if koi_data is None and KOI_SERVICE_URL:
+            step(f"{YELLOW}Warning:{RESET} Koi service unavailable, using roofline only")
+
         roofline_configs = []
         if roofline_resp.status_code in (200, 201):
             rdata = roofline_resp.json()
             if rdata.get("status") != "error":
-                roofline_configs = [c for c in (rdata.get("placements") or [])
-                                    if not c.get("is_fallback")]
+                roofline_configs = rdata.get("placements") or rdata.get("configs") or []
 
-        # Show both and let user choose
-        if advisor_configs and roofline_configs:
-            acfg = advisor_configs[0]
+        if koi_data and roofline_configs:
+            rec = koi_data.get("config", {})
             rcfg = roofline_configs[0]
             print()
-            print(box(_advisor_summary_lines(acfg), title="[1] ADVISOR RECOMMENDATION"))
+            print(box(_koi_summary_lines(koi_data), title="[1] KOI RECOMMENDATION"))
             print()
             orca_lines = [
                 f"{DIM}Instance:{RESET}     {c(rcfg.get('instance_type', '?'), WHITE+BOLD)}",
@@ -587,18 +676,21 @@ def cmd_deploy(args):
 
             if getattr(args, 'skip_dangerously', False):
                 choice = "1"
-                step("--skip-dangerously: auto-picking advisor recommendation")
+                step(f"--skip-dangerously: auto-picking Koi recommendation")
             else:
                 choice = input(f"\n  {BOLD}Choice [1/2/3]:{RESET} ").strip()
 
             if choice == "1":
                 payload["placement_solver"] = "user_specified"
-                payload["gpu_type"] = acfg.get("gpu_type")
-                payload["tp_size"] = acfg.get("tp_size")
-                payload["pp_size"] = acfg.get("pp_size")
-                if acfg.get("max_model_len"):
-                    payload.setdefault("vllm_specific_config", {})["max_model_len"] = acfg["max_model_len"]
-                step(f"Launching with advisor: {c(acfg.get('gpu_type','?'), CYAN)} TP={acfg.get('tp_size')} PP={acfg.get('pp_size')}")
+                payload["gpu_type"] = rec.get("gpu_type")
+                payload["tp_size"] = rec.get("tp")
+                payload["pp_size"] = rec.get("pp")
+                payload["replicas"] = rec.get("dp", 1)
+                # Pass Koi alternatives for fallback retry
+                alts = koi_data.get("alternatives", [])
+                if alts:
+                    payload["koi_alternatives"] = alts
+                step(f"Launching with Koi: {c(rec.get('gpu_type','?'), CYAN)} TP={rec.get('tp')} PP={rec.get('pp')} DP={rec.get('dp')}")
             elif choice == "2":
                 payload["placement_solver"] = "user_specified"
                 payload["gpu_type"] = rcfg.get("gpu_type")
@@ -610,27 +702,28 @@ def cmd_deploy(args):
             else:
                 print(f"\n  {DIM}Aborted.{RESET}")
                 sys.exit(0)
-        elif advisor_configs and not roofline_configs:
-            acfg = advisor_configs[0]
+        elif koi_data and not roofline_configs:
+            rec = koi_data.get("config", {})
             print()
-            print(box(_advisor_summary_lines(acfg), title="[ADVISOR RECOMMENDATION]"))
+            print(box(_koi_summary_lines(koi_data), title="[KOI RECOMMENDATION]"))
             print()
-            step(f"{DIM}Roofline solver does not have a profile for this model — showing advisor only.{RESET}")
             if getattr(args, 'skip_dangerously', False):
                 confirmed = True
-                step("--skip-dangerously: auto-confirming advisor recommendation")
+                step("--skip-dangerously: auto-confirming Koi recommendation")
             else:
-                ans = input(f"  {BOLD}Launch with advisor recommendation? [y/N]:{RESET} ").strip().lower()
+                ans = input(f"  {BOLD}Launch with Koi recommendation? [y/N]:{RESET} ").strip().lower()
                 confirmed = ans == "y"
             if not confirmed:
                 print(f"\n  {DIM}Aborted.{RESET}")
                 sys.exit(0)
             payload["placement_solver"] = "user_specified"
-            payload["gpu_type"] = acfg.get("gpu_type")
-            payload["tp_size"] = acfg.get("tp_size")
-            payload["pp_size"] = acfg.get("pp_size")
-            if acfg.get("max_model_len"):
-                payload.setdefault("vllm_specific_config", {})["max_model_len"] = acfg["max_model_len"]
+            payload["gpu_type"] = rec.get("gpu_type")
+            payload["tp_size"] = rec.get("tp")
+            payload["pp_size"] = rec.get("pp")
+            payload["replicas"] = rec.get("dp", 1)
+            alts = koi_data.get("alternatives", [])
+            if alts:
+                payload["koi_alternatives"] = alts
         # else: no advisor — fall through to normal roofline submit
 
     # ── Submit to server ─────────────────────────────────────────────
@@ -793,22 +886,36 @@ def cmd_plan(args):
         if args.pp:
             payload["pp_size"] = args.pp
 
-    # ── Run advisor + roofline concurrently ──────────────────────────
-    advisor_configs = None
-    use_advisor = not args.gpu and not is_s3 and not args.no_advisor
+    # ── Run Koi + roofline concurrently ──────────────────────────────
+    koi_data = None
+    use_koi = KOI_SERVICE_URL and not args.gpu and not is_s3
     t0 = time.time()
 
-    if use_advisor:
+    if use_koi:
         import threading as _thr
-        advisor_result = [None]
-        def _advisor_thread():
-            advisor_result[0] = _call_advisor(payload)
-        kt = _thr.Thread(target=_advisor_thread, daemon=True)
+        step("Running Orca roofline + Koi solvers in parallel...")
+
+        koi_job = {
+            "model_name": model_name,
+            "task_type": "batch",
+            "avg_input_tokens": stats["avg_input_tokens"],
+            "avg_output_tokens": avg_out,
+            "num_requests": stats["num_lines"],
+            "slo_deadline_hours": args.slo,
+            "objective": "cheapest",
+        }
+
+        koi_result = [None]
+        def _koi_thread():
+            rm = fetch_resources()
+            if rm:
+                koi_result[0] = call_koi(koi_job, rm)
+        kt = _thr.Thread(target=_koi_thread, daemon=True)
         kt.start()
 
         import threading as _thr2
         _stop = _thr2.Event()
-        _spin = _thr2.Thread(target=spinner, args=("Running advisor + roofline in parallel...", _stop), daemon=True)
+        _spin = _thr2.Thread(target=spinner, args=("Solving placement...", _stop), daemon=True)
         _spin.start()
         try:
             resp = api("post", "/test/placement", json=payload)
@@ -816,7 +923,10 @@ def cmd_plan(args):
             kt.join(timeout=300)
             _stop.set()
             _spin.join(timeout=2)
-        advisor_configs = advisor_result[0]
+        koi_data = koi_result[0]
+
+        if koi_data is None and KOI_SERVICE_URL:
+            step(f"{YELLOW}Warning:{RESET} Koi service unavailable, using roofline only")
     else:
         step("Running Orca placement solver...")
         resp = api("post", "/test/placement", json=payload)
@@ -882,19 +992,19 @@ def cmd_plan(args):
         print()
         return
 
-    # ── Show advisor recommendation (if available) ───────────────────
-    if advisor_configs:
+    # ── Show Koi recommendation (if available) ─────────────────────────
+    if koi_data:
         print()
-        print(box(_advisor_summary_lines(advisor_configs[0]), title="ADVISOR RECOMMENDATION"))
+        print(box(_koi_summary_lines(koi_data), title="KOI RECOMMENDATION"))
 
-    if not configs and not advisor_configs:
+    if not configs and not koi_data:
         print(f"\n  {RED}No feasible configuration found for this model.{RESET}")
         sys.exit(1)
 
-    # ── Show roofline recommendations (skip if model unsupported) ────
+    # ── Show roofline recommendations ────────────────────────────────
     if configs:
         print()
-        label = "ORCA ROOFLINE" if advisor_configs else "PLACEMENT PLAN"
+        label = "ORCA ROOFLINE" if koi_data else "PLACEMENT PLAN"
         header(f"{label}  ({len(configs)} option{'s' if len(configs) > 1 else ''})")
 
         for i, cfg in enumerate(configs):
@@ -916,8 +1026,8 @@ def cmd_plan(args):
                 lines.append(slo)
             print(box(lines, title=f"CONFIG {rank_label}"))
             print()
-    elif advisor_configs:
-        print(f"\n  {DIM}Roofline solver does not have a profile for this model — showing advisor only.{RESET}\n")
+    elif koi_data:
+        print(f"\n  {DIM}Roofline solver does not have a profile for this model — showing Koi only.{RESET}\n")
 
     if data.get("slo_warning"):
         print(f"  {YELLOW}SLO warning:{RESET} {data['slo_warning']}")
