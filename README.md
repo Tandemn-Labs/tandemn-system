@@ -14,7 +14,6 @@ Tandemn System (currently referenced in this repository as `orca`) is a self-hos
 
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-- [Naming](#naming)
 - [Supported Models](#supported-models)
 - [Supported Hardware](#supported-hardware)
 - [Quick Start](#quick-start)
@@ -78,18 +77,6 @@ KOI_SERVICE_URL=http://localhost:8090 # Optional: Koi placement engine
 ```
 
 </details>
-
----
-
-## Naming
-
-This repository currently uses the legacy name `orca` in parts of the codebase, CLI, environment variables, and examples.
-
-- **Product name:** Tandemn System
-- **Current CLI:** `orca`
-- **Repo internals / env vars:** may still reference `orca`
-
-Over time, repository naming may be updated for consistency, but current commands and interfaces remain unchanged.
 
 ---
 
