@@ -1652,6 +1652,34 @@ async def submit_batch(request: BatchedRequest):
             )
         ]
 
+        # Append Koi alternatives as fallback configs
+        if getattr(request, "koi_alternatives", None):
+            for alt in request.koi_alternatives:
+                alt_gpu = alt.get("gpu_type")
+                alt_tp = alt.get("tp", 1)
+                alt_pp = alt.get("pp", 1)
+                if not alt_gpu:
+                    continue
+                try:
+                    alt_inst, alt_gpu_count = resolve_gpu_type_to_instance(alt_gpu, alt_tp)
+                except ValueError:
+                    continue
+                alt_num_inst = max(1, (alt_tp * alt_pp) // alt_gpu_count)
+                configs.append(
+                    MagicOutput(
+                        decision_id=_make_job_id(request.model_name),
+                        engine=request.engine or "vllm",
+                        instance_type=alt_inst,
+                        tp_size=alt_tp,
+                        pp_size=alt_pp,
+                        replicas=1,
+                        max_model_len=result["max_model_len"],
+                        num_instances=alt_num_inst,
+                    )
+                )
+            if len(configs) > 1:
+                logger.info(f"[Placement] {len(configs)} configs total (primary + {len(configs)-1} Koi alternatives)")
+
         sol = result.get("solution") or {}
         msg = (
             f"[Placement] user_specified: {instance_type} TP={tp} PP={pp} "

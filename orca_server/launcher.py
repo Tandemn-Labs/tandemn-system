@@ -2,6 +2,7 @@
 SkyPilot cluster launch orchestration for vLLM batch and online jobs.
 """
 
+import asyncio
 import logging
 import subprocess
 import threading
@@ -53,13 +54,40 @@ async def sp_launch_vllm_batch_with_fallback(
     early_messages: list = None,
     quota_tracker=None,
     persist: bool = False,
+    timeout_seconds: float = 300.0,  # 5-minute total timeout
 ) -> Tuple[bool, MagicOutput]:
-    """Launch vLLM batch job with fallback to alternative instance types."""
+    """Launch vLLM batch job with fallback to alternative instance types.
+
+    Tries each config in order. If all fail or 5 minutes elapse, returns failure.
+    Configs can come from roofline solver OR Koi alternatives.
+    """
     if early_messages is None:
         early_messages = []
 
+    try:
+        return await asyncio.wait_for(
+            _launch_with_fallback_inner(
+                request, configs, solver, early_messages, quota_tracker, persist,
+            ),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"[Launch] Timeout after {timeout_seconds:.0f}s, tried {len(configs)} configs")
+        return (False, configs[0])
+
+
+async def _launch_with_fallback_inner(
+    request: BatchedRequest,
+    configs: List[MagicOutput],
+    solver: str,
+    early_messages: list,
+    quota_tracker,
+    persist: bool,
+) -> Tuple[bool, MagicOutput]:
+    """Inner loop — tries each config in order until one succeeds."""
     for i, config in enumerate(configs):
         msg = f"[Launch] Trying config {i + 1}/{len(configs)}: {config.instance_type} TP={config.tp_size} PP={config.pp_size}"
+        logger.info(msg)
         early_messages.append(("INFO", msg))
 
         try:
@@ -73,7 +101,7 @@ async def sp_launch_vllm_batch_with_fallback(
         except Exception as e:
             logger.warning(f"[Launch] Config {i + 1} failed: {e}")
             if i < len(configs) - 1:
-                logger.info("[Launch] Trying next instance type...")
+                logger.info(f"[Launch] Trying alternative {i + 2}/{len(configs)}...")
                 continue
             else:
                 logger.error(f"[Launch] All {len(configs)} configs failed")
