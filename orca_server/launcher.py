@@ -6,6 +6,7 @@ import asyncio
 import logging
 import subprocess
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 from pathlib import Path
@@ -530,6 +531,7 @@ async def launch_chunked_replicas(
         "group_id": parent_job_id,
         "slo_deadline_hours": request.slo_deadline_hours or 8.0,
         "total_tokens": total_tokens // max(num_replicas, 1),
+        "deploy_timestamp": time.time(),
     }
 
     # Launch all replicas in background threads so the server stays responsive.
@@ -743,6 +745,19 @@ async def _launch_chunked_replica(
                 if job_logger:
                     job_logger.error(f"[Chunked] Replica {replica_id} error: {e}")
                 cm.set_replica_state(parent_job_id, replica_id, phase="failed")
+                # Notify Koi that this replica died
+                try:
+                    from orca_server.config import KOI_SERVICE_URL
+                    if KOI_SERVICE_URL:
+                        import requests as _req
+                        _req.post(f"{KOI_SERVICE_URL}/job/replica-failed", json={
+                            "job_id": replica_id,
+                            "group_id": parent_job_id,
+                            "status": "failed",
+                            "reason": str(e)[:200],
+                        }, timeout=5)
+                except Exception:
+                    pass
         finally:
             if quota_tracker is not None:
                 quota_tracker.release_cluster(replica_id)

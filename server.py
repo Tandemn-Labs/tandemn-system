@@ -762,6 +762,16 @@ def _notify_koi_replica_ready(job_id: str, replica_id: str):
     koi_info = state.get("koi_webhook_info")
     if not koi_info:
         return
+    # Adjust SLO for provisioning time already elapsed
+    import time as _time
+    original_slo = koi_info.get("slo_deadline_hours", 8.0)
+    deploy_ts = koi_info.get("deploy_timestamp")
+    if deploy_ts:
+        elapsed_hours = (_time.time() - deploy_ts) / 3600
+        adjusted_slo = max(0.1, original_slo - elapsed_hours)
+    else:
+        adjusted_slo = original_slo
+
     try:
         import requests as _req
         _req.post(f"{KOI_SERVICE_URL}/job/started", json={
@@ -773,11 +783,13 @@ def _notify_koi_replica_ready(job_id: str, replica_id: str):
             "tp": state.get("tp", 1),
             "pp": state.get("pp", 1),
             "dp": 1,
-            "slo_deadline_hours": koi_info.get("slo_deadline_hours", 8.0),
+            "slo_deadline_hours": adjusted_slo,
             "total_tokens": koi_info.get("total_tokens", 0),
             "predicted_tps": 0.0,
         }, timeout=5)
-        logger.info("[Koi] Notified model_ready: %s (%s)", replica_id, state.get("instance_type"))
+        logger.info("[Koi] Notified model_ready: %s (%s), SLO adjusted %.2fh→%.2fh (%.0fmin provisioning)",
+                    replica_id, state.get("instance_type"), original_slo, adjusted_slo,
+                    (original_slo - adjusted_slo) * 60)
     except Exception as e:
         logger.warning("[Koi] Failed to notify model_ready: %s", e)
 
