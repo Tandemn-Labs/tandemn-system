@@ -1005,6 +1005,8 @@ async def _assemble_output(job_id: str):
             job_logger.info(f"[Assembly] Job {job_id} completed successfully")
 
         # Notify Koi of job completion (if KOI_SERVICE_URL is set)
+        # Send parent job_id — Koi looks up all chains in this group and
+        # records ONE aggregate outcome, then unregisters all chains.
         from orca_server.config import KOI_SERVICE_URL
         if KOI_SERVICE_URL:
             try:
@@ -1016,7 +1018,7 @@ async def _assemble_output(job_id: str):
                     "metrics": agg if agg else {},
                 }
                 _req.post(f"{KOI_SERVICE_URL}/job/complete", json=koi_payload, timeout=10)
-                job_logger.info(f"[Assembly] Notified Koi at {KOI_SERVICE_URL}/job/complete")
+                job_logger.info(f"[Assembly] Notified Koi: job {job_id} completed ({final_status})")
             except Exception as ke:
                 job_logger.warning(f"[Assembly] Failed to notify Koi: {ke}")
 
@@ -1778,7 +1780,7 @@ async def submit_batch(request: BatchedRequest):
         early_messages.append(("INFO", msg))
 
         success = await launch_chunked_replicas(
-            request, primary, effective_replicas,
+            request, configs, effective_replicas,
             solver=use_solver, early_messages=early_messages,
             quota_tracker=get_quota_tracker(),
             persist=getattr(request, "persist", False),
@@ -1819,14 +1821,14 @@ async def submit_batch(request: BatchedRequest):
 
     if success:
         # Notify Koi that the job launched (starts monitoring)
-        from orca_server.config import KOI_SERVICE_URL
+        from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
         if KOI_SERVICE_URL:
             try:
                 import requests as _req
                 _req.post(f"{KOI_SERVICE_URL}/job/started", json={
                     "job_id": used_config.decision_id,
-                    "decision_id": getattr(request, "_koi_decision_id", None),
-                    "gpu_type": used_config.instance_type.split(".")[0] if "." in used_config.instance_type else "unknown",
+                    "decision_id": request.koi_decision_id,
+                    "gpu_type": INSTANCE_TO_GPU.get(used_config.instance_type, "unknown"),
                     "instance_type": used_config.instance_type,
                     "tp": used_config.tp_size,
                     "pp": used_config.pp_size,

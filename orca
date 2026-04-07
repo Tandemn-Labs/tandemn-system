@@ -333,7 +333,7 @@ def fetch_resources():
     return None
 
 
-def call_koi(job_params, resource_map, timeout=300):
+def call_koi(job_params, resource_map, timeout=600):
     """POST to Koi /decide endpoint. Returns response JSON or None on failure."""
     if not KOI_SERVICE_URL:
         return None
@@ -640,7 +640,7 @@ def cmd_deploy(args):
         try:
             roofline_resp = api("post", "/test/placement", json=plan_payload)
         finally:
-            kt.join(timeout=300)
+            kt.join(timeout=600)
             _stop.set()
             _spin.join(timeout=2)
         koi_data = koi_result[0]
@@ -686,6 +686,7 @@ def cmd_deploy(args):
                 payload["tp_size"] = rec.get("tp")
                 payload["pp_size"] = rec.get("pp")
                 payload["replicas"] = rec.get("dp", 1)
+                payload["koi_decision_id"] = koi_data.get("_decision_id")
                 # Pass Koi alternatives for fallback retry
                 alts = koi_data.get("alternatives", [])
                 if alts:
@@ -721,6 +722,7 @@ def cmd_deploy(args):
             payload["tp_size"] = rec.get("tp")
             payload["pp_size"] = rec.get("pp")
             payload["replicas"] = rec.get("dp", 1)
+            payload["koi_decision_id"] = koi_data.get("_decision_id")
             alts = koi_data.get("alternatives", [])
             if alts:
                 payload["koi_alternatives"] = alts
@@ -920,7 +922,7 @@ def cmd_plan(args):
         try:
             resp = api("post", "/test/placement", json=payload)
         finally:
-            kt.join(timeout=300)
+            kt.join(timeout=600)
             _stop.set()
             _spin.join(timeout=2)
         koi_data = koi_result[0]
