@@ -189,8 +189,8 @@ def get_ordered_regions(
     candidates: List[RegionCandidate] = []
 
     for region, quota in quotas.items():
-        # Check spot quota
-        if quota.spot_vcpus >= required_vcpus:
+        # Check spot quota (skip if user explicitly requested on-demand)
+        if prefer_spot and quota.spot_vcpus >= required_vcpus:
             candidates.append(
                 RegionCandidate(
                     region=region, use_spot=True, available_quota=quota.spot_vcpus
