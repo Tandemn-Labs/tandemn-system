@@ -747,7 +747,39 @@ async def update_job_phase(
         get_job_tracker().update_status(job_id, phase)
         if phase == "generating":
             app.state.metrics_collector.set_baseline(job_id)
+        if phase == "model_ready" and replica_id:
+            _notify_koi_replica_ready(job_id, replica_id)
     return {"ok": True}
+
+
+def _notify_koi_replica_ready(job_id: str, replica_id: str):
+    """Fire /job/started webhook to Koi when vLLM is ready to serve."""
+    from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
+    if not KOI_SERVICE_URL:
+        return
+    cm = app.state.cluster_manager
+    state = cm.get_replica_states(job_id).get(replica_id, {})
+    koi_info = state.get("koi_webhook_info")
+    if not koi_info:
+        return
+    try:
+        import requests as _req
+        _req.post(f"{KOI_SERVICE_URL}/job/started", json={
+            "job_id": replica_id,
+            "group_id": koi_info.get("group_id"),
+            "decision_id": koi_info.get("decision_id"),
+            "gpu_type": INSTANCE_TO_GPU.get(state.get("instance_type", ""), "unknown"),
+            "instance_type": state.get("instance_type", "unknown"),
+            "tp": state.get("tp", 1),
+            "pp": state.get("pp", 1),
+            "dp": 1,
+            "slo_deadline_hours": koi_info.get("slo_deadline_hours", 8.0),
+            "total_tokens": koi_info.get("total_tokens", 0),
+            "predicted_tps": 0.0,
+        }, timeout=5)
+        logger.info("[Koi] Notified model_ready: %s (%s)", replica_id, state.get("instance_type"))
+    except Exception as e:
+        logger.warning("[Koi] Failed to notify model_ready: %s", e)
 
 
 @app.post("/job/{job_id}/chunks/pull")
