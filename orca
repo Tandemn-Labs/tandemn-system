@@ -731,7 +731,7 @@ def cmd_deploy(args):
     # ── Submit to server ─────────────────────────────────────────────
     if args.gpu:
         step(f"Running feasibility check: {c(args.gpu, CYAN)} TP={args.tp or 1} PP={args.pp or 1}...")
-    elif not use_advisor:
+    elif not use_koi:
         step("Submitting job...")
 
     resp = api_with_spinner("post", "/submit/batch",
