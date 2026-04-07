@@ -704,31 +704,13 @@ async def _launch_chunked_replica(
                 instance_type=config.instance_type, num_instances=num_nodes)
     cm.set_replica_state(parent_job_id, replica_id,
                          phase="provisioned", region=actual_region,
-                         market=actual_market, instance_type=config.instance_type)
+                         market=actual_market, instance_type=config.instance_type,
+                         koi_webhook_info=koi_webhook_info,
+                         tp=config.tp_size, pp=config.pp_size)
 
-    # Notify Koi that this replica launched (with actual config used)
-    koi_url = _cfg.KOI_SERVICE_URL
-    if koi_url and koi_webhook_info:
-        try:
-            import requests as _req
-            _req.post(f"{koi_url}/job/started", json={
-                "job_id": replica_id,
-                "group_id": koi_webhook_info.get("group_id"),
-                "decision_id": koi_webhook_info.get("decision_id"),
-                "gpu_type": _cfg.INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
-                "instance_type": config.instance_type,
-                "tp": config.tp_size,
-                "pp": config.pp_size,
-                "dp": 1,
-                "slo_deadline_hours": koi_webhook_info.get("slo_deadline_hours", 8.0),
-                "total_tokens": koi_webhook_info.get("total_tokens", 0),
-                "predicted_tps": 0.0,
-            }, timeout=5)
-            if job_logger:
-                job_logger.info(f"[Koi] Notified replica started: {replica_id} ({config.instance_type})")
-        except Exception as ke:
-            if job_logger:
-                job_logger.warning(f"[Koi] Failed to notify replica start: {ke}")
+    # NOTE: Koi webhook (/job/started) is now fired from server.py when the
+    # in-cluster runner reports "model_ready" phase, NOT here. This ensures
+    # Koi only starts monitoring after vLLM is actually serving.
 
     def monitor_replica(sky_job_id):
         """Background thread: stream replica logs, tear down when done."""
