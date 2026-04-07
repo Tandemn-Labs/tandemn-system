@@ -1356,16 +1356,26 @@ async def scale_replicas(
 
     if not force:
         model_name = ""
+        spec = None
         if rec and hasattr(rec, "state") and hasattr(rec.state, "spec"):
-            model_name = getattr(rec.state.spec, "model_name", "")
-        feasibility = check_user_specified_feasibility(
-            gpu_type=gpu_type, tp_size=tp_size, pp_size=pp_size,
-            model_name=model_name,
-        )
-        if not feasibility.get("feasible", True):
-            return {"status": "confirm",
-                    "message": feasibility.get("reason", "Config may not be feasible"),
-                    "detail": feasibility}
+            spec = rec.state.spec
+            model_name = getattr(spec, "model_name", "")
+        try:
+            feasibility = check_user_specified_feasibility(
+                model_name=model_name,
+                instance_type=instance_type,
+                gpu_count=tp_size * pp_size,
+                tp=tp_size,
+                pp=pp_size,
+                avg_input_tokens=getattr(spec, "avg_input_tokens", 2000) if spec else 2000,
+                avg_output_tokens=getattr(spec, "avg_output_tokens", 1024) if spec else 1024,
+            )
+            if not feasibility.get("feasible", True):
+                return {"status": "confirm",
+                        "message": feasibility.get("reason", "Config may not be feasible"),
+                        "detail": feasibility}
+        except Exception as e:
+            logger.warning("[Scale] Feasibility check failed, proceeding anyway: %s", e)
 
     result = _do_scale(job_id, count, gpu_type, tp_size, pp_size,
                        on_demand=on_demand, instance_type=instance_type)
