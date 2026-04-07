@@ -461,7 +461,7 @@ async def sp_launch_vllm_batch(
 
 async def launch_chunked_replicas(
     request: BatchedRequest,
-    config: MagicOutput,
+    configs: List[MagicOutput],
     num_replicas: int,
     solver: str = "roofline",
     early_messages: list = None,
@@ -472,6 +472,9 @@ async def launch_chunked_replicas(
 
     Each replica is an independent cluster that pulls chunks from the Redis queue
     via HTTP endpoints on the control plane.
+
+    Each replica tries configs in order (fallback). Different replicas may end up
+    on different instance types if the primary has no capacity.
     """
     if not _cfg.TD_SERVER_URL:
         raise ValueError(
@@ -483,6 +486,8 @@ async def launch_chunked_replicas(
     if early_messages is None:
         early_messages = []
 
+    primary = configs[0]
+
     from orca_server.job_manager import (
         setup_job_logger,
         generate_job_dirname,
@@ -490,28 +495,42 @@ async def launch_chunked_replicas(
     from pathlib import Path
 
     job_dirname = generate_job_dirname(
-        request, solver, config.tp_size, config.pp_size, config.instance_type
+        request, solver, primary.tp_size, primary.pp_size, primary.instance_type
     )
     output_dir = Path(f"outputs/{job_dirname}")
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "replicas").mkdir(exist_ok=True)
-    job_logger = setup_job_logger(config.decision_id, str(output_dir / "job.log"))
+    job_logger = setup_job_logger(primary.decision_id, str(output_dir / "job.log"))
 
     if early_messages:
         for level, msg in early_messages:
             getattr(job_logger, level.lower(), job_logger.info)(msg)
 
     jt = get_job_tracker()
-    job_state = jt.build_job_state_batched(request, config)
+    job_state = jt.build_job_state_batched(request, primary)
     jt.add(job_state)
-    jt.update_status(config.decision_id, "launching")
+    jt.update_status(primary.decision_id, "launching")
 
     # Store job_dirname on the record for assembly
-    rec = jt.get(config.decision_id)
+    rec = jt.get(primary.decision_id)
     if rec:
         rec._job_dirname = job_dirname
 
     cm = get_cluster_manager()
+    parent_job_id = primary.decision_id
+
+    # Koi webhook info — job-level fields shared by all replicas.
+    # Config-specific fields (gpu_type, instance_type, tp, pp) are added
+    # by _launch_chunked_replica based on whichever config actually succeeds.
+    total_tokens = (request.num_lines or 0) * (
+        (request.avg_input_tokens or 0) + (request.avg_output_tokens or 0)
+    )
+    koi_webhook_info = {
+        "decision_id": request.koi_decision_id,
+        "group_id": parent_job_id,
+        "slo_deadline_hours": request.slo_deadline_hours or 8.0,
+        "total_tokens": total_tokens // max(num_replicas, 1),
+    }
 
     # Launch all replicas in background threads so the server stays responsive.
     # Each replica launch takes 5-15 min (SkyPilot provision + setup).
@@ -520,33 +539,53 @@ async def launch_chunked_replicas(
 
     # Pre-register all replicas as "launching"
     for i in range(num_replicas):
-        rid = f"{config.decision_id}-r{i}"
-        cm.set_replica_state(config.decision_id, rid, phase="launching")
-        cm.register_for_job(config.decision_id, rid)
+        rid = f"{parent_job_id}-r{i}"
+        cm.set_replica_state(parent_job_id, rid, phase="launching")
+        cm.register_for_job(parent_job_id, rid)
 
     def _launch_replica_thread(i):
+        """Try each config in order until one succeeds (per-replica fallback)."""
         import asyncio as _aio
-        replica_id = f"{config.decision_id}-r{i}"
-        replica_config = config.model_copy(update={
-            "decision_id": replica_id,
-            "replicas": 1,
-            "num_instances": config.num_nodes,  # solver handles fixed-size (p4d) vs variable-size (g6e)
-        })
-        job_logger.info(f"[Chunked] Launching replica {i}/{num_replicas}: {replica_id}")
-        try:
-            loop = _aio.new_event_loop()
-            loop.run_until_complete(_launch_chunked_replica(
-                request, replica_config, replica_id,
-                parent_job_id=config.decision_id,
-                job_dirname=job_dirname,
-                job_logger=job_logger,
-                quota_tracker=quota_tracker,
-                persist=persist,
-            ))
-            loop.close()
-        except Exception as e:
-            job_logger.error(f"[Chunked] Failed to launch replica {replica_id}: {e}")
-            cm.set_replica_state(config.decision_id, replica_id, phase="failed")
+        replica_id = f"{parent_job_id}-r{i}"
+
+        for j, cfg in enumerate(configs):
+            replica_config = cfg.model_copy(update={
+                "decision_id": replica_id,
+                "replicas": 1,
+                "num_instances": cfg.num_nodes,
+            })
+            job_logger.info(
+                f"[Chunked] Replica {i} trying config {j + 1}/{len(configs)}: "
+                f"{cfg.instance_type} TP={cfg.tp_size} PP={cfg.pp_size}"
+            )
+            try:
+                loop = _aio.new_event_loop()
+                loop.run_until_complete(_launch_chunked_replica(
+                    request, replica_config, replica_id,
+                    parent_job_id=parent_job_id,
+                    job_dirname=job_dirname,
+                    job_logger=job_logger,
+                    quota_tracker=quota_tracker,
+                    persist=persist,
+                    koi_webhook_info=koi_webhook_info,
+                ))
+                loop.close()
+                return  # success — stop trying alternatives
+            except Exception as e:
+                if j < len(configs) - 1:
+                    job_logger.warning(
+                        f"[Chunked] Replica {i} config {j + 1} failed: {e}. Trying next..."
+                    )
+                    # Clean up partial cluster state before retrying
+                    try:
+                        sky_down_with_retry(replica_id)
+                    except Exception:
+                        pass
+                else:
+                    job_logger.error(
+                        f"[Chunked] Replica {i} all {len(configs)} configs failed: {e}"
+                    )
+                    cm.set_replica_state(parent_job_id, replica_id, phase="failed")
 
     for i in range(num_replicas):
         t = threading.Thread(
@@ -556,9 +595,9 @@ async def launch_chunked_replicas(
         t.start()
 
     # Track parent job (individual replicas register themselves on launch)
-    cm.register(config.decision_id, config.decision_id,
-                instance_type=config.instance_type,
-                num_instances=num_replicas * config.num_nodes)
+    cm.register(parent_job_id, parent_job_id,
+                instance_type=primary.instance_type,
+                num_instances=num_replicas * primary.num_nodes)
     return True
 
 
@@ -571,6 +610,7 @@ async def _launch_chunked_replica(
     job_logger=None,
     quota_tracker=None,
     persist: bool = False,
+    koi_webhook_info: dict = None,
 ):
     """Launch a single replica cluster for chunked batch inference."""
     from pathlib import Path
@@ -665,6 +705,30 @@ async def _launch_chunked_replica(
     cm.set_replica_state(parent_job_id, replica_id,
                          phase="provisioned", region=actual_region,
                          market=actual_market, instance_type=config.instance_type)
+
+    # Notify Koi that this replica launched (with actual config used)
+    koi_url = _cfg.KOI_SERVICE_URL
+    if koi_url and koi_webhook_info:
+        try:
+            import requests as _req
+            _req.post(f"{koi_url}/job/started", json={
+                "job_id": replica_id,
+                "group_id": koi_webhook_info.get("group_id"),
+                "decision_id": koi_webhook_info.get("decision_id"),
+                "gpu_type": _cfg.INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
+                "instance_type": config.instance_type,
+                "tp": config.tp_size,
+                "pp": config.pp_size,
+                "dp": 1,
+                "slo_deadline_hours": koi_webhook_info.get("slo_deadline_hours", 8.0),
+                "total_tokens": koi_webhook_info.get("total_tokens", 0),
+                "predicted_tps": 0.0,
+            }, timeout=5)
+            if job_logger:
+                job_logger.info(f"[Koi] Notified replica started: {replica_id} ({config.instance_type})")
+        except Exception as ke:
+            if job_logger:
+                job_logger.warning(f"[Koi] Failed to notify replica start: {ke}")
 
     def monitor_replica(sky_job_id):
         """Background thread: stream replica logs, tear down when done."""
