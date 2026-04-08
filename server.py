@@ -1231,6 +1231,20 @@ def _do_scale(job_id: str, count: int, gpu_type: str, tp_size: int, pp_size: int
 
     job_dirname = getattr(rec, "_job_dirname", None) or f"scale-{job_id}"
 
+    # Reconstruct koi_webhook_info from existing replicas so Koi gets notified
+    existing_states = cm.get_replica_states(job_id)
+    koi_info_source = next(
+        (s.get("koi_webhook_info") for s in existing_states.values() if s.get("koi_webhook_info")),
+        None,
+    )
+    scale_koi_info = {
+        "decision_id": koi_info_source.get("decision_id") if koi_info_source else None,
+        "group_id": job_id,
+        "slo_deadline_hours": koi_info_source.get("slo_deadline_hours", 8.0) if koi_info_source else 8.0,
+        "total_tokens": koi_info_source.get("total_tokens", 0) if koi_info_source else 0,
+        "deploy_timestamp": time.time(),
+    } if koi_info_source else None
+
     def _launch_thread(replica_id):
         import asyncio as _aio
         replica_config = new_config.model_copy(update={
@@ -1245,6 +1259,7 @@ def _do_scale(job_id: str, count: int, gpu_type: str, tp_size: int, pp_size: int
                 parent_job_id=job_id,
                 job_dirname=job_dirname,
                 persist=False,
+                koi_webhook_info=scale_koi_info,
             ))
             loop.close()
         except Exception as e:
