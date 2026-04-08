@@ -786,6 +786,7 @@ def _notify_koi_replica_ready(job_id: str, replica_id: str):
             "slo_deadline_hours": adjusted_slo,
             "total_tokens": koi_info.get("total_tokens", 0),
             "predicted_tps": 0.0,
+            "is_fallback": state.get("config_index", 0) > 0,
         }, timeout=5)
         logger.info("[Koi] Notified model_ready: %s (%s), SLO adjusted %.2fh→%.2fh (%.0fmin provisioning)",
                     replica_id, state.get("instance_type"), original_slo, adjusted_slo,
