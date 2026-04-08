@@ -761,9 +761,9 @@ async def _launch_chunked_replica(
             rec_tmp = jt_tmp.get(parent_job_id)
             job_done = rec_tmp and rec_tmp.status in ("succeeded", "failed")
 
-            if cur_phase == "completed":
+            if cur_phase in ("completed", "killed", "swapped_out"):
                 if job_logger:
-                    job_logger.info(f"[Chunked] Replica {replica_id} log stream ended (already completed)")
+                    job_logger.info(f"[Chunked] Replica {replica_id} log stream ended (phase={cur_phase})")
             elif is_log_cancel or job_done:
                 # Log cancellation or job already finished — not a real failure
                 if job_logger:
