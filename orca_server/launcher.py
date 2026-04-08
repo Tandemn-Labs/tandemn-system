@@ -570,6 +570,7 @@ async def launch_chunked_replicas(
                     quota_tracker=quota_tracker,
                     persist=persist,
                     koi_webhook_info=koi_webhook_info,
+                    config_index=j,
                 ))
                 loop.close()
                 return  # success — stop trying alternatives
@@ -612,6 +613,7 @@ async def _launch_chunked_replica(
     job_logger=None,
     quota_tracker=None,
     persist: bool = False,
+    config_index: int = 0,
     koi_webhook_info: dict = None,
 ):
     """Launch a single replica cluster for chunked batch inference."""
@@ -708,7 +710,8 @@ async def _launch_chunked_replica(
                          phase="provisioned", region=actual_region,
                          market=actual_market, instance_type=config.instance_type,
                          koi_webhook_info=koi_webhook_info,
-                         tp=config.tp_size, pp=config.pp_size)
+                         tp=config.tp_size, pp=config.pp_size,
+                         config_index=config_index)
 
     # NOTE: Koi webhook (/job/started) is now fired from server.py when the
     # in-cluster runner reports "model_ready" phase, NOT here. This ensures
