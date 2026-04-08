@@ -722,9 +722,33 @@ async def _launch_chunked_replica(
         cm.set_replica_state(parent_job_id, replica_id, phase="running")
         try:
             sky.tail_logs(cluster_name=replica_id, job_id=sky_job_id, follow=True)
-            if job_logger:
-                job_logger.info(f"[Chunked] Replica {replica_id} completed")
-            cm.set_replica_state(parent_job_id, replica_id, phase="completed")
+            # Verify this is a real completion — not a killed instance
+            try:
+                from orca_server.chunk_manager import get_chunk_manager as _gcm
+                _progress = _gcm().get_progress(parent_job_id)
+            except Exception:
+                _progress = None
+            if _progress and not _progress.get("all_done", False):
+                # Chunks still pending → replica was killed mid-job, not completed
+                if job_logger:
+                    job_logger.warning(f"[Chunked] Replica {replica_id} exited but chunks still pending — treating as failure")
+                cm.set_replica_state(parent_job_id, replica_id, phase="failed")
+                try:
+                    from orca_server.config import KOI_SERVICE_URL
+                    if KOI_SERVICE_URL:
+                        import requests as _req
+                        _req.post(f"{KOI_SERVICE_URL}/job/replica-failed", json={
+                            "job_id": replica_id,
+                            "group_id": parent_job_id,
+                            "status": "failed",
+                            "reason": "Clean exit with pending chunks (likely killed)",
+                        }, timeout=5)
+                except Exception:
+                    pass
+            else:
+                if job_logger:
+                    job_logger.info(f"[Chunked] Replica {replica_id} completed")
+                cm.set_replica_state(parent_job_id, replica_id, phase="completed")
         except Exception as e:
             # sky.tail_logs raises when the log stream is cancelled by another
             # process (e.g. assembly, SkyPilot internal).  This is NOT a replica

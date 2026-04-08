@@ -162,6 +162,20 @@ class ReplicaWatchdog:
         # 1. Update replica phase
         self._cm.set_replica_state(job_id, replica_id, phase="dead")
 
+        # 1b. Notify Koi that this replica died
+        try:
+            from orca_server.config import KOI_SERVICE_URL
+            if KOI_SERVICE_URL:
+                import requests as _req
+                _req.post(f"{KOI_SERVICE_URL}/job/replica-failed", json={
+                    "job_id": replica_id,
+                    "group_id": job_id,
+                    "status": "failed",
+                    "reason": f"Heartbeat timeout ({self._dead_threshold}s)",
+                }, timeout=5)
+        except Exception as exc:
+            logger.warning("[Watchdog] Failed to notify Koi of replica death: %s", exc)
+
         # 2. Force-reclaim inflight chunks
         cm = self._chunk_manager_fn()
         result = cm.force_reclaim(job_id, [replica_id])
