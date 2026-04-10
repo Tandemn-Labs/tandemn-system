@@ -296,6 +296,9 @@ async def sp_launch_vllm_batch(
     job_state = jt.build_job_state_batched(request, config)
     jt.add(job_state)
     jt.update_status(config.decision_id, "launching")
+    # Mark as chunked if this is a chunked deployment (enables watchdog heartbeat monitoring)
+    if getattr(request, "chunks", None):
+        jt.set_chunked_info(config.decision_id, len(request.chunks), 1)
 
     # Construct S3 output path for later download
     output_s3_path = f"{s3_output_dir}/{request.output_file}"
