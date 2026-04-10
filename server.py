@@ -574,6 +574,50 @@ async def prometheus_metrics():
     return Response(content=text, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
+@app.post("/debug/inject-replica")
+async def debug_inject_replica(request: Request):
+    """
+    Debug/test only — inject a fake running replica so the watchdog can be
+    tested without real GPUs.
+
+    POST /debug/inject-replica
+    {
+        "job_id":     "test-job-1",
+        "replica_id": "test-job-1-r0",
+        "num_chunks": 10
+    }
+
+    After calling this, pump heartbeats via POST /job/{job_id}/metrics/ingest
+    (replica_id + snapshots). Stop pumping and the watchdog will detect death
+    after REPLICA_DEAD_THRESHOLD_SEC seconds.
+    """
+    body = await request.json()
+    job_id     = body["job_id"]
+    replica_id = body["replica_id"]
+    num_chunks = body.get("num_chunks", 10)
+
+    jt = get_job_tracker()
+    cm = app.state.cluster_manager
+    mc = app.state.metrics_collector
+
+    # 1. Create job record with is_chunked=True
+    from orca_server.job_manager import JobRecord
+    with jt.lock:
+        if job_id not in jt.jobs:
+            jt.jobs[job_id] = JobRecord(job_id=job_id, model_name="debug-model", status="generating")
+    jt.set_chunked_info(job_id, num_chunks, 1)
+
+    # 2. Register replica as running in cluster manager
+    cm.set_replica_state(job_id, replica_id, phase="running", running_since=time.time())
+
+    # 3. Start metrics collection so ring buffer exists
+    mc.start_collecting(job_id)
+    mc.start_replica_collecting(job_id, replica_id)
+
+    return {"ok": True, "job_id": job_id, "replica_id": replica_id,
+            "msg": "Now POST /job/{job_id}/metrics/ingest to pump heartbeats. Stop to trigger watchdog."}
+
+
 @app.post("/job/{job_id}/metrics/ingest")
 async def ingest_job_metrics(
     job_id: str,
