@@ -602,9 +602,13 @@ async def debug_inject_replica(request: Request):
 
     # 1. Create job record with is_chunked=True
     from orca_server.job_manager import JobRecord
+    from quota.tracker import JobSpec, JobState
     with jt.lock:
         if job_id not in jt.jobs:
-            jt.jobs[job_id] = JobRecord(job_id=job_id, model_name="debug-model", status="generating")
+            spec = JobSpec(job_id=job_id, model_name="debug-model", num_lines=1000,
+                           avg_input_tokens=512, avg_output_tokens=256, slo_hours=2.0)
+            state = JobState(spec=spec, submitted_at=time.time())
+            jt.jobs[job_id] = JobRecord(state=state, status="generating")
     jt.set_chunked_info(job_id, num_chunks, 1)
 
     # 2. Register replica as running in cluster manager

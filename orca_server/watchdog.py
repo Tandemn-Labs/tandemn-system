@@ -120,18 +120,29 @@ class ReplicaWatchdog:
             return rc.buffer[-1].timestamp
 
     def _is_graceful_completion(self, job_id: str, replica_id: str) -> bool:
-        """Check if a replica finished its work gracefully (not a failure)."""
+        """Check if a replica finished its work gracefully (not a failure).
+
+        A replica only completed gracefully if it has no inflight chunks remaining.
+        A replica that processed some requests but still has inflight work is DEAD, not done.
+        """
         state = self._cm.get_replica_states(job_id).get(replica_id, {})
         if state.get("phase") not in ("running",):
-            return False
-        # Check if it actually processed requests
-        snap = self._mc.get_replica_latest(job_id, replica_id)
-        if snap is None or snap.request_success_total <= 0:
             return False
         # Job must still be active (not already terminal)
         rec = self._jt.get(job_id)
         if rec and rec.status in ("succeeded", "failed", "cancelled"):
             return False
+        # Key check: is the job fully done? If not, a replica going silent
+        # mid-job is a death, not a graceful exit.
+        cm = self._chunk_manager_fn()
+        try:
+            progress = cm.get_progress(job_id)
+            if progress is None:
+                return False  # no chunk data → can't confirm completion → not graceful
+            if not progress.get("all_done", False):
+                return False  # job still has work → replica died, not completed
+        except Exception:
+            return False  # can't tell → assume not graceful
         return True
 
     def _handle_dead_replica(self, job_id: str, replica_id: str, last_hb: float | None) -> None:
