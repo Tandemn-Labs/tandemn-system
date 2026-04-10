@@ -213,6 +213,37 @@ class TestIdempotency:
         assert chunk_mgr.force_reclaim.call_count == 1  # still 1, not 2
 
 
+class TestIsChunkedGuard:
+    def test_non_chunked_job_skipped(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """Job with is_chunked=False → watchdog skips it entirely (was the prod bug)."""
+        job_id = "job-1"
+        jt.jobs[job_id] = FakeJobRecord(status="running", is_chunked=False)
+        cm_cluster.get_replica_states.return_value = {
+            "job-1-r0": {"phase": "running"},
+        }
+        mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 120])  # stale, should be dead
+
+        watchdog._check_all_jobs()
+
+        # Watchdog should skip — is_chunked=False means set_chunked_info was never called
+        cm_cluster.set_replica_state.assert_not_called()
+        chunk_mgr.force_reclaim.assert_not_called()
+
+    def test_chunked_job_detected(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """Same job with is_chunked=True → stale replica IS detected dead."""
+        job_id = "job-1"
+        jt.jobs[job_id] = FakeJobRecord(status="running", is_chunked=True)
+        cm_cluster.get_replica_states.return_value = {
+            "job-1-r0": {"phase": "running"},
+        }
+        mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 120])
+
+        watchdog._check_all_jobs()
+
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
+        chunk_mgr.force_reclaim.assert_called_once()
+
+
 class TestLaunchingGuard:
     def test_launching_replica_not_flagged(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Replica with phase='launching' and no heartbeat → NOT marked dead."""
