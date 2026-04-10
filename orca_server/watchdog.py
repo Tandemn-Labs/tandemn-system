@@ -76,12 +76,8 @@ class ReplicaWatchdog:
         now = time.time()
 
         for job_id, rec in list(jt.jobs.items()):
-            if not getattr(rec, "is_chunked", False):
-                logger.debug("[Watchdog] Skipping %s: is_chunked=%s", job_id, getattr(rec, "is_chunked", "MISSING"))
-                continue
             if rec.status in ("succeeded", "failed", "cancelled"):
                 continue
-            logger.info("[Watchdog] Checking %s (status=%s, is_chunked=%s)", job_id, rec.status, rec.is_chunked)
 
             states = self._cm.get_replica_states(job_id)
             for replica_id, state in states.items():

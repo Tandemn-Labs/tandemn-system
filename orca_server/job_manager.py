@@ -33,8 +33,8 @@ class JobRecord:
     last_updated_at: float = field(default_factory=time.time)
     head_ip: Optional[str] = None
     output_s3_path: Optional[str] = None
-    # Chunked job extensions
-    is_chunked: bool = False
+    # All batch jobs are chunked — non-chunked path is blocked
+    is_chunked: bool = True
     total_chunks: Optional[int] = None
     num_replicas: int = 1
     _job_dirname: Optional[str] = None
