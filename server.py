@@ -1857,6 +1857,9 @@ async def submit_batch(request: BatchedRequest):
         cm = get_chunk_manager()
         cm.create_job_queue(job_id, request.chunks, request.model_name, s3_output_base)
 
+        # Mark job as chunked so watchdog monitors replica heartbeats
+        get_job_tracker().set_chunked_info(job_id, len(request.chunks), effective_replicas)
+
         msg = f"[Chunked] {len(request.chunks)} chunks, {effective_replicas} replicas"
         logger.info(msg)
         early_messages.append(("INFO", msg))
