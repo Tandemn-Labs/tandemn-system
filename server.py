@@ -448,15 +448,27 @@ async def resources():
                 "baseline_vcpus": baseline,
                 "used_vcpus": int(row["Used"]),
             })
-        return instances, quotas
+        # Compute allocated GPUs from running clusters (ground truth)
+        cm = app.state.cluster_manager
+        allocated_gpus = {}
+        with cm.lock:
+            for _, info in cm.active_clusters.items():
+                inst = info.get("instance_type")
+                n = info.get("num_instances", 0)
+                if inst in AWS_INSTANCES:
+                    gpu_name, gpu_count, _, _ = AWS_INSTANCES[inst]
+                    allocated_gpus[gpu_name] = allocated_gpus.get(gpu_name, 0) + gpu_count * n
 
-    instances, quotas = await asyncio.to_thread(_build_catalog)
+        return instances, quotas, allocated_gpus
+
+    instances, quotas, allocated_gpus = await asyncio.to_thread(_build_catalog)
 
     return {
         "vpc_id": "orca-cluster",
         "snapshot_time": datetime.now().isoformat(),
         "instances": instances,
         "quotas": quotas,
+        "allocated_gpus": allocated_gpus,
     }
 
 
