@@ -687,6 +687,7 @@ def cmd_deploy(args):
                 payload["pp_size"] = rec.get("pp")
                 payload["replicas"] = rec.get("dp", 1)
                 payload["koi_decision_id"] = koi_data.get("_decision_id")
+                payload["koi_predicted_tps"] = rec.get("predicted_tps", 0)
                 # Pass Koi alternatives for fallback retry
                 alts = koi_data.get("alternatives", [])
                 if alts:
@@ -723,6 +724,7 @@ def cmd_deploy(args):
             payload["pp_size"] = rec.get("pp")
             payload["replicas"] = rec.get("dp", 1)
             payload["koi_decision_id"] = koi_data.get("_decision_id")
+            payload["koi_predicted_tps"] = rec.get("predicted_tps", 0)
             alts = koi_data.get("alternatives", [])
             if alts:
                 payload["koi_alternatives"] = alts
