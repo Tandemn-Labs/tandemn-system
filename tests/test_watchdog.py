@@ -109,7 +109,6 @@ def watchdog(mc, cm_cluster, jt, chunk_mgr):
         chunk_manager_fn=lambda: chunk_mgr,
         dead_threshold_sec=45,
         poll_interval_sec=1,
-        recovery_cooldown_sec=300,
     )
 
 
@@ -147,27 +146,26 @@ class TestDeadDetection:
         chunk_mgr.force_reclaim.assert_not_called()
 
 
-class TestRecoveryDecision:
-    def test_recovery_skipped_when_95pct_done(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
-        """Progress 19/20 → _should_recover returns False."""
-        job_id = "job-1"
-        chunk_mgr.get_progress.return_value = {
-            "total": 20, "completed": 19, "failed": 0,
-            "pending": 0, "inflight": 1, "all_done": False,
-        }
-
-        assert watchdog._should_recover(job_id, "r0") is False
-
-    def test_recovery_triggered_when_50pct_done(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
-        """Progress 10/20 → _should_recover returns True."""
+class TestNoSelfRecovery:
+    def test_dead_replica_no_recovery_attempted(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """Dead replica: force-reclaim and webhook fire, but NO recovery launched.
+        Recovery is Koi's responsibility via scale_chain_tool."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running")
-        chunk_mgr.get_progress.return_value = {
-            "total": 20, "completed": 10, "failed": 0,
-            "pending": 5, "inflight": 5, "all_done": False,
+        cm_cluster.get_replica_states.return_value = {
+            "job-1-r0": {"phase": "running"},
         }
+        mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 60])
 
-        assert watchdog._should_recover(job_id, "r0") is True
+        watchdog._check_all_jobs()
+
+        # Force-reclaim happened
+        chunk_mgr.force_reclaim.assert_called_once()
+        # Phase set to dead
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
+        # No recovery attributes exist on watchdog
+        assert not hasattr(watchdog, '_recover_callback')
+        assert not hasattr(watchdog, '_last_recovery')
 
 
 class TestAllReplicasDie:
@@ -214,8 +212,8 @@ class TestIdempotency:
 
 
 class TestIsChunkedGuard:
-    def test_non_chunked_job_skipped(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
-        """Job with is_chunked=False → watchdog skips it entirely (was the prod bug)."""
+    def test_non_chunked_job_still_monitored(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """is_chunked guard was removed — watchdog monitors ALL jobs (all jobs are chunked now)."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running", is_chunked=False)
         cm_cluster.get_replica_states.return_value = {
@@ -225,9 +223,9 @@ class TestIsChunkedGuard:
 
         watchdog._check_all_jobs()
 
-        # Watchdog should skip — is_chunked=False means set_chunked_info was never called
-        cm_cluster.set_replica_state.assert_not_called()
-        chunk_mgr.force_reclaim.assert_not_called()
+        # Watchdog detects the dead replica regardless of is_chunked flag
+        cm_cluster.set_replica_state.assert_called()
+        chunk_mgr.force_reclaim.assert_called_once()
 
     def test_chunked_job_detected(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Same job with is_chunked=True → stale replica IS detected dead."""
@@ -276,7 +274,13 @@ class TestLaunchingGuard:
 
 class TestAssemblyTrigger:
     def test_assembly_on_all_done(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
-        """force_reclaim causes all_done=True → assembly callback triggered."""
+        """force_reclaim causes all_done=True → assembly callback triggered.
+
+        _is_graceful_completion runs first and calls get_progress — must see
+        inflight work (all_done=False) so the replica is treated as dead, not
+        gracefully completed.  After force_reclaim, get_progress returns
+        all_done=True → assembly fires.
+        """
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running")
         cm_cluster.get_replica_states.return_value = {
@@ -284,11 +288,14 @@ class TestAssemblyTrigger:
         }
         mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 60])
 
-        # After force_reclaim, job is all_done (failed chunk was the last one)
-        chunk_mgr.get_progress.return_value = {
-            "total": 5, "completed": 4, "failed": 1,
-            "pending": 0, "inflight": 0, "all_done": True,
-        }
+        # 1st call: _is_graceful_completion — inflight work remains → not graceful
+        # 2nd call: after force_reclaim — last chunk failed → all_done
+        chunk_mgr.get_progress.side_effect = [
+            {"total": 5, "completed": 4, "failed": 0,
+             "pending": 0, "inflight": 1, "all_done": False},
+            {"total": 5, "completed": 4, "failed": 1,
+             "pending": 0, "inflight": 0, "all_done": True},
+        ]
 
         assembly_called = []
         watchdog._assembly_callback = lambda jid: assembly_called.append(jid)
