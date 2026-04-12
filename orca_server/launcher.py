@@ -562,6 +562,7 @@ async def launch_chunked_replicas(
         "slo_deadline_hours": request.slo_deadline_hours or 8.0,
         "total_tokens": total_tokens // max(num_replicas, 1),
         "deploy_timestamp": time.time(),
+        "predicted_tps": getattr(request, "koi_predicted_tps", 0),
     }
 
     # Accumulator for /job/launch-failed webhook (shared across replica threads)
