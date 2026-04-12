@@ -305,6 +305,25 @@ class TestAssemblyTrigger:
         assert assembly_called == [job_id]
 
 
+class TestProvisionedPhase:
+    def test_provisioned_replica_not_flagged_dead(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """Replica in 'provisioned' phase (vLLM loading) → watchdog skips it.
+        Previously monitor_replica set phase='running' immediately, causing
+        false dead detection during model load."""
+        job_id = "job-1"
+        jt.jobs[job_id] = FakeJobRecord(status="running")
+        cm_cluster.get_replica_states.return_value = {
+            "job-1-r0": {"phase": "provisioned"},  # vLLM still loading
+        }
+        # No heartbeat — hasn't started serving yet
+
+        watchdog._check_all_jobs()
+
+        # Watchdog should skip provisioned replicas entirely
+        cm_cluster.set_replica_state.assert_not_called()
+        chunk_mgr.force_reclaim.assert_not_called()
+
+
 class TestPPValidation:
     def test_pp_exceeds_num_nodes_raises(self):
         """PP=2 with num_nodes=1 should be caught before sky.launch, not crash vLLM."""

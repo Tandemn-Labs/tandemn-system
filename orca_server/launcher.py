@@ -810,8 +810,14 @@ async def _launch_chunked_replica(
     # Koi only starts monitoring after vLLM is actually serving.
 
     def monitor_replica(sky_job_id):
-        """Background thread: stream replica logs, tear down when done."""
-        cm.set_replica_state(parent_job_id, replica_id, phase="running")
+        """Background thread: stream replica logs, tear down when done.
+
+        Phase stays 'provisioned' until the sidecar ingest endpoint receives
+        first metrics — that's the real proof vLLM is up and serving.
+        The ingest endpoint (server.py) transitions to 'running' with running_since.
+        """
+        # Don't set phase="running" here — vLLM hasn't loaded yet.
+        # Phase was already set to "provisioned" at line ~751 after sky.launch.
         try:
             sky.tail_logs(cluster_name=replica_id, job_id=sky_job_id, follow=True)
             # Verify this is a real completion — not a killed instance
