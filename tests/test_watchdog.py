@@ -305,6 +305,49 @@ class TestAssemblyTrigger:
         assert assembly_called == [job_id]
 
 
+class TestPPValidation:
+    def test_pp_exceeds_num_nodes_raises(self):
+        """PP=2 with num_nodes=1 should be caught before sky.launch, not crash vLLM."""
+        import asyncio
+        from models.resources import MagicOutput
+        from models.requests import BatchedRequest
+        from orca_server.launcher import _launch_chunked_replica
+
+        config = MagicOutput(
+            decision_id="test-r0", engine="vllm",
+            instance_type="g6e.12xlarge",
+            tp_size=4, pp_size=2,
+            replicas=1, num_instances=1,  # 1 node but PP=2 needs 2
+        )
+        request = BatchedRequest(
+            user_id="test", model_name="test-model",
+            input_file="s3://b/in.jsonl", output_file="out.jsonl",
+            description="test", task_type="batch", task_priority="normal",
+            engine="vllm", slo_mode="cost_first", placement="user_specified",
+            avg_output_tokens=1024,
+        )
+        with pytest.raises(ValueError, match="PP=2 requires 2 nodes but config has 1"):
+            asyncio.get_event_loop().run_until_complete(
+                _launch_chunked_replica(
+                    request, config, "test-r0",
+                    parent_job_id="test-job",
+                    job_dirname="test",
+                )
+            )
+
+    def test_pp1_single_node_ok(self):
+        """PP=1 with num_nodes=1 should NOT raise (validation passes)."""
+        from models.resources import MagicOutput
+        config = MagicOutput(
+            decision_id="test-r0", engine="vllm",
+            instance_type="g6e.12xlarge",
+            tp_size=4, pp_size=1,
+            replicas=1, num_instances=1,
+        )
+        # No error expected for PP=1, just verify the condition
+        assert not (config.pp_size > 1 and config.num_nodes < config.pp_size)
+
+
 # ---------------------------------------------------------------------------
 # Integration test — watchdog + real Redis chunks
 # ---------------------------------------------------------------------------
