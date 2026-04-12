@@ -1,8 +1,11 @@
-"""ReplicaWatchdog — heartbeat-based dead replica detection + force-reclaim + recovery.
+"""ReplicaWatchdog — heartbeat-based dead replica detection + force-reclaim.
 
 Uses the existing MetricsCollector per-replica ring buffers as the heartbeat source:
 the timestamp of the most recent snapshot IS the last heartbeat. Zero-cost since the
 buffer already exists from sidecar ingest endpoint writes.
+
+Recovery is handled by Koi: watchdog fires /job/replica-failed webhook → Koi's agent
+decides config → calls scale_chain_tool → Orca's /job/{id}/scale launches replacement.
 """
 from __future__ import annotations
 
@@ -12,7 +15,6 @@ import time
 from typing import TYPE_CHECKING, Callable
 
 from orca_server.config import (
-    RECOVERY_COOLDOWN_SEC,
     REPLICA_DEAD_THRESHOLD_SEC,
     WATCHDOG_POLL_INTERVAL_SEC,
 )
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class ReplicaWatchdog:
-    """Detect dead replicas via sidecar heartbeat, force-reclaim chunks, optionally recover."""
+    """Detect dead replicas via sidecar heartbeat, force-reclaim chunks."""
 
     def __init__(
         self,
@@ -36,9 +38,7 @@ class ReplicaWatchdog:
         chunk_manager_fn: Callable[[], ChunkManager],
         dead_threshold_sec: float = REPLICA_DEAD_THRESHOLD_SEC,
         poll_interval_sec: float = WATCHDOG_POLL_INTERVAL_SEC,
-        recovery_cooldown_sec: float = RECOVERY_COOLDOWN_SEC,
         assembly_callback: Callable[[str], None] | None = None,
-        recover_callback: Callable[[str, str], None] | None = None,
     ):
         self._mc = metrics_collector
         self._cm = cluster_manager
@@ -46,14 +46,10 @@ class ReplicaWatchdog:
         self._chunk_manager_fn = chunk_manager_fn
         self._dead_threshold = dead_threshold_sec
         self._poll_interval = poll_interval_sec
-        self._recovery_cooldown = recovery_cooldown_sec
         self._assembly_callback = assembly_callback
-        self._recover_callback = recover_callback
 
         # replica_id → timestamp when declared dead (avoid re-processing)
         self._dead_replicas: dict[str, float] = {}
-        # replica_id → timestamp of last recovery attempt
-        self._last_recovery: dict[str, float] = {}
 
     def clear_dead(self, replica_id: str) -> None:
         """Clear dead tracking for a replica (e.g. after it recovers and sends heartbeat)."""
@@ -144,7 +140,7 @@ class ReplicaWatchdog:
         return True
 
     def _handle_dead_replica(self, job_id: str, replica_id: str, last_hb: float | None) -> None:
-        """Force-reclaim chunks and optionally schedule recovery."""
+        """Force-reclaim chunks and notify Koi. Recovery is Koi's responsibility."""
         if replica_id in self._dead_replicas:
             return  # already processed
 
@@ -170,6 +166,7 @@ class ReplicaWatchdog:
 
         # 1. Update replica phase
         self._cm.set_replica_state(job_id, replica_id, phase="dead")
+        self._mc.exclude_replica(job_id, replica_id)
 
         # 1b. Notify Koi that this replica died
         try:
@@ -199,45 +196,3 @@ class ReplicaWatchdog:
             logger.info("[Watchdog] Job %s is all_done after force-reclaim, triggering assembly", job_id)
             if self._assembly_callback:
                 self._assembly_callback(job_id)
-            return
-
-        # 4. Decide whether to recover
-        if not self._should_recover(job_id, replica_id):
-            return
-
-        # 5. Schedule recovery
-        self._last_recovery[replica_id] = time.time()
-        logger.info("[Watchdog] Scheduling recovery for %s", replica_id)
-        if self._recover_callback:
-            self._recover_callback(job_id, replica_id)
-
-    def _should_recover(self, job_id: str, replica_id: str) -> bool:
-        """Decide whether to relaunch a dead replica."""
-        # Cooldown: don't recover if we recently tried
-        last = self._last_recovery.get(replica_id, 0)
-        if time.time() - last < self._recovery_cooldown:
-            logger.info("[Watchdog] Recovery cooldown active for %s, skipping", replica_id)
-            return False
-
-        # Job nearly done: cold start waste
-        cm = self._chunk_manager_fn()
-        progress = cm.get_progress(job_id)
-        if progress is None:
-            return False
-        total = progress["total"]
-        if total == 0:
-            return False
-        done_frac = (progress["completed"] + progress["failed"]) / total
-        if done_frac >= 0.95:
-            logger.info(
-                "[Watchdog] Job %s is %.0f%% done, skipping recovery for %s",
-                job_id, done_frac * 100, replica_id,
-            )
-            return False
-
-        # Job already terminal
-        rec = self._jt.get(job_id)
-        if rec and rec.status in ("succeeded", "failed", "cancelled"):
-            return False
-
-        return True
