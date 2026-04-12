@@ -805,6 +805,24 @@ async def _launch_chunked_replica(
         time_to_launch=round(time.time() - _launch_start, 2),
     )
 
+    # Notify Koi: replica is provisioned (pre-model_ready visibility)
+    try:
+        from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
+        if KOI_SERVICE_URL:
+            import requests as _req
+            _req.post(f"{KOI_SERVICE_URL}/job/launching", json={
+                "job_id": replica_id,
+                "group_id": parent_job_id,
+                "gpu_type": INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
+                "instance_type": config.instance_type,
+                "tp": config.tp_size,
+                "pp": config.pp_size,
+                "region": actual_region,
+                "market": actual_market,
+            }, timeout=5)
+    except Exception:
+        pass
+
     # NOTE: Koi webhook (/job/started) is now fired from server.py when the
     # in-cluster runner reports "model_ready" phase, NOT here. This ensures
     # Koi only starts monitoring after vLLM is actually serving.
