@@ -97,6 +97,7 @@ def chunk_mgr():
     mock.force_reclaim.return_value = {"reclaimed": 0, "failed": 0}
     mock.get_progress.return_value = {"total": 20, "completed": 10, "failed": 0,
                                        "pending": 5, "inflight": 5, "all_done": False}
+    mock.get_replica_inflight_count.return_value = 3  # default: has inflight work → not graceful
     return mock
 
 
@@ -288,14 +289,14 @@ class TestAssemblyTrigger:
         }
         mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 60])
 
-        # 1st call: _is_graceful_completion — inflight work remains → not graceful
-        # 2nd call: after force_reclaim — last chunk failed → all_done
-        chunk_mgr.get_progress.side_effect = [
-            {"total": 5, "completed": 4, "failed": 0,
-             "pending": 0, "inflight": 1, "all_done": False},
-            {"total": 5, "completed": 4, "failed": 1,
-             "pending": 0, "inflight": 0, "all_done": True},
-        ]
+        # _is_graceful_completion now uses get_replica_inflight_count (not get_progress)
+        # Replica has 1 inflight chunk → not graceful → treated as dead
+        chunk_mgr.get_replica_inflight_count.return_value = 1
+        # After force_reclaim, get_progress returns all_done → assembly fires
+        chunk_mgr.get_progress.return_value = {
+            "total": 5, "completed": 4, "failed": 1,
+            "pending": 0, "inflight": 0, "all_done": True,
+        }
 
         assembly_called = []
         watchdog._assembly_callback = lambda jid: assembly_called.append(jid)
@@ -303,6 +304,62 @@ class TestAssemblyTrigger:
         watchdog._check_all_jobs()
 
         assert assembly_called == [job_id]
+
+
+class TestGracefulCompletionPerReplica:
+    def test_replica_with_zero_inflight_is_graceful(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """Replica owns 0 inflight chunks → graceful completion, not dead."""
+        job_id = "job-1"
+        jt.jobs[job_id] = FakeJobRecord(status="running")
+        cm_cluster.get_replica_states.return_value = {
+            "job-1-r0": {"phase": "running"},
+        }
+        mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 60])
+        chunk_mgr.get_replica_inflight_count.return_value = 0  # no inflight work
+
+        watchdog._check_all_jobs()
+
+        # Graceful: phase=completed, NOT dead
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="completed")
+        chunk_mgr.force_reclaim.assert_not_called()
+
+    def test_replica_with_inflight_is_dead(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """Replica owns 3 inflight chunks → dead, not graceful."""
+        job_id = "job-1"
+        jt.jobs[job_id] = FakeJobRecord(status="running")
+        cm_cluster.get_replica_states.return_value = {
+            "job-1-r0": {"phase": "running"},
+        }
+        mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 60])
+        chunk_mgr.get_replica_inflight_count.return_value = 3  # has work
+
+        watchdog._check_all_jobs()
+
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
+        chunk_mgr.force_reclaim.assert_called_once()
+
+    def test_job_all_done_but_replica_has_inflight_is_dead(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """Critical race: job all_done=True (other replicas finished) but THIS
+        replica still has 3 inflight chunks → DEAD, not graceful. Chunks must
+        be force-reclaimed."""
+        job_id = "job-1"
+        jt.jobs[job_id] = FakeJobRecord(status="running")
+        cm_cluster.get_replica_states.return_value = {
+            "job-1-r0": {"phase": "running"},
+        }
+        mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 60])
+        # Job is "all_done" at job level, but this replica has inflight
+        chunk_mgr.get_progress.return_value = {
+            "total": 50, "completed": 50, "failed": 0,
+            "pending": 0, "inflight": 0, "all_done": True,
+        }
+        chunk_mgr.get_replica_inflight_count.return_value = 3  # THIS replica has work
+
+        watchdog._check_all_jobs()
+
+        # Dead, not graceful — force_reclaim must be called
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
+        chunk_mgr.force_reclaim.assert_called_once()
 
 
 class TestProvisionedPhase:
