@@ -136,6 +136,27 @@ return {reclaimed, failed}
 """
 
 
+# Count inflight chunks owned by a specific replica.
+# KEYS: [inflight_key]
+# ARGV: [job_prefix, target_replica_id]
+# Returns: integer count
+_REPLICA_INFLIGHT_LUA = """
+local inflight_key    = KEYS[1]
+local job_prefix      = ARGV[1]
+local target_replica  = ARGV[2]
+local count = 0
+local members = redis.call('SMEMBERS', inflight_key)
+for _, cid in ipairs(members) do
+    local chunk_key = job_prefix .. ':chunk:' .. cid
+    local rid = redis.call('HGET', chunk_key, 'replica_id') or ''
+    if rid == target_replica then
+        count = count + 1
+    end
+end
+return count
+"""
+
+
 # Atomically renew a chunk lease if the replica still owns it.
 # KEYS: [chunk_key]
 # ARGV: [replica_id, new_lease_until]
@@ -164,6 +185,7 @@ class ChunkManager:
         self._r = redis.from_url(redis_url, decode_responses=True)
         self._reclaim_script = self._r.register_script(_RECLAIM_LUA)
         self._force_reclaim_script = self._r.register_script(_FORCE_RECLAIM_LUA)
+        self._replica_inflight_script = self._r.register_script(_REPLICA_INFLIGHT_LUA)
         self._renew_script = self._r.register_script(_RENEW_LUA)
 
     def create_job_queue(
@@ -298,6 +320,13 @@ class ChunkManager:
             args=[f"{_PREFIX}:{job_id}", CHUNK_MAX_RETRIES] + list(replica_ids),
         )
         return {"reclaimed": int(result[0]), "failed": int(result[1])}
+
+    def get_replica_inflight_count(self, job_id: str, replica_id: str) -> int:
+        """Count inflight chunks owned by a specific replica."""
+        return self._replica_inflight_script(
+            keys=[_inflight_key(job_id)],
+            args=[f"{_PREFIX}:{job_id}", replica_id],
+        )
 
     def complete_chunk(self, job_id: str, chunk_id: str, replica_id: str) -> dict:
         """Mark chunk as completed and return progress.
