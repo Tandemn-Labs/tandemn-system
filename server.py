@@ -597,6 +597,12 @@ async def ingest_job_metrics(
         wd = getattr(app.state, "watchdog", None)
         if wd:
             wd.clear_dead(replica_id)
+        # Un-exclude from metrics aggregation if previously excluded (replica ID reuse)
+        rkey = f"{job_id}:{replica_id}"
+        if rkey in mc._excluded_replicas:
+            mc._excluded_replicas.discard(rkey)
+            mc._excluded_cumulative.pop(rkey, None)
+            logger.info("[MetricsCollector] Un-excluded recovered replica %s", rkey)
 
     ingested = 0
     batch_for_db = []
