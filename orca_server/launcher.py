@@ -48,6 +48,33 @@ def _needs_efa(instance_type: str) -> bool:
     return any(instance_type.startswith(p) for p in EFA_PREFIXES)
 
 
+def _notify_koi_config_attempted(
+    parent_job_id, koi_webhook_info, instance_type,
+    region, market, launched, attempt_index,
+    time_to_launch=0, failure_reason="",
+):
+    """Fire-and-forget: tell Koi about one allocation attempt."""
+    try:
+        from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
+        if not KOI_SERVICE_URL:
+            return
+        import requests as _req
+        _req.post(f"{KOI_SERVICE_URL}/job/config-attempted", json={
+            "job_id": parent_job_id,
+            "decision_id": koi_webhook_info.get("decision_id") if koi_webhook_info else None,
+            "instance_type": instance_type,
+            "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
+            "region": region,
+            "market": market,
+            "launched": launched,
+            "failure_reason": failure_reason,
+            "time_to_launch": time_to_launch,
+            "attempt_index": attempt_index,
+        }, timeout=5)
+    except Exception:
+        pass
+
+
 async def sp_launch_vllm_batch_with_fallback(
     request: BatchedRequest,
     configs: List[MagicOutput],
@@ -537,6 +564,12 @@ async def launch_chunked_replicas(
         "deploy_timestamp": time.time(),
     }
 
+    # Accumulator for /job/launch-failed webhook (shared across replica threads)
+    _attempt_log = []
+    _attempt_log_lock = threading.Lock()
+    _launch_start_time = time.time()
+    _launch_failed_fired = threading.Event()
+
     # Launch all replicas in background threads so the server stays responsive.
     # Each replica launch takes 5-15 min (SkyPilot provision + setup).
     # If we did this inline, the event loop would be blocked and chunk pull
@@ -578,6 +611,20 @@ async def launch_chunked_replicas(
                 loop.close()
                 return  # success — stop trying alternatives
             except Exception as e:
+                # Notify Koi: this config attempt failed
+                _notify_koi_config_attempted(
+                    parent_job_id, koi_webhook_info, cfg.instance_type,
+                    region="unknown", market="unknown",
+                    launched=False, attempt_index=j,
+                    failure_reason=str(e)[:500],
+                )
+                with _attempt_log_lock:
+                    _attempt_log.append({
+                        "gpu_type": _cfg.INSTANCE_TO_GPU.get(cfg.instance_type, "unknown"),
+                        "instance_type": cfg.instance_type,
+                        "region": "unknown", "market": "unknown",
+                        "reason": str(e)[:500],
+                    })
                 if j < len(configs) - 1:
                     job_logger.warning(
                         f"[Chunked] Replica {i} config {j + 1} failed: {e}. Trying next..."
@@ -592,6 +639,32 @@ async def launch_chunked_replicas(
                         f"[Chunked] Replica {i} all {len(configs)} configs failed: {e}"
                     )
                     cm.set_replica_state(parent_job_id, replica_id, phase="failed")
+                    # Check if ALL replicas failed at launch → fire /job/launch-failed
+                    states = cm.get_replica_states(parent_job_id)
+                    terminal = {"completed", "failed", "dead", "killed", "swapped_out"}
+                    if states and all(s.get("phase") in terminal for s in states.values()):
+                        any_ok = any(s.get("phase") == "completed" for s in states.values())
+                        if not any_ok and not _launch_failed_fired.is_set():
+                            _launch_failed_fired.set()
+                            jt_tmp = get_job_tracker()
+                            rec_tmp = jt_tmp.get(parent_job_id)
+                            if rec_tmp and rec_tmp.status in ("launching", "loading_model"):
+                                jt_tmp.update_status(parent_job_id, "failed")
+                                job_logger.warning("[Chunked] All replicas failed at launch — marking job as failed")
+                            try:
+                                from orca_server.config import KOI_SERVICE_URL
+                                if KOI_SERVICE_URL:
+                                    import requests as _req
+                                    with _attempt_log_lock:
+                                        attempts = list(_attempt_log)
+                                    _req.post(f"{KOI_SERVICE_URL}/job/launch-failed", json={
+                                        "job_id": parent_job_id,
+                                        "configs_tried": attempts,
+                                        "failure_reasons": [a["reason"] for a in attempts],
+                                        "total_time_seconds": round(time.time() - _launch_start_time, 2),
+                                    }, timeout=5)
+                            except Exception:
+                                pass
 
     for i in range(num_replicas):
         t = threading.Thread(
@@ -620,10 +693,18 @@ async def _launch_chunked_replica(
     koi_webhook_info: dict = None,
 ):
     """Launch a single replica cluster for chunked batch inference."""
+    _launch_start = time.time()
     from pathlib import Path
 
     hf_token = request.hf_token or HF_TOKEN or ""
     num_nodes = config.num_nodes
+
+    # Validate: PP requires enough nodes (catches broken fallback configs early)
+    if config.pp_size > 1 and num_nodes < config.pp_size:
+        raise ValueError(
+            f"PP={config.pp_size} requires {config.pp_size} nodes but config has {num_nodes}. "
+            f"Instance {config.instance_type} with TP={config.tp_size} cannot satisfy this."
+        )
 
     # Get quota-aware ordered regions
     instance_family = get_instance_family(config.instance_type)
@@ -715,6 +796,14 @@ async def _launch_chunked_replica(
                          koi_webhook_info=koi_webhook_info,
                          tp=config.tp_size, pp=config.pp_size,
                          config_index=config_index)
+
+    # Notify Koi: this config attempt succeeded
+    _notify_koi_config_attempted(
+        parent_job_id, koi_webhook_info, config.instance_type,
+        region=actual_region, market=actual_market,
+        launched=True, attempt_index=config_index,
+        time_to_launch=round(time.time() - _launch_start, 2),
+    )
 
     # NOTE: Koi webhook (/job/started) is now fired from server.py when the
     # in-cluster runner reports "model_ready" phase, NOT here. This ensures
