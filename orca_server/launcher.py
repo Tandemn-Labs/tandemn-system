@@ -48,31 +48,38 @@ def _needs_efa(instance_type: str) -> bool:
     return any(instance_type.startswith(p) for p in EFA_PREFIXES)
 
 
+def _post_koi_webhook(path: str, payload: dict, event: str) -> None:
+    """Best-effort Koi callback with warning-level visibility on failures."""
+    try:
+        from orca_server.config import KOI_SERVICE_URL
+        if not KOI_SERVICE_URL:
+            return
+        import requests as _req
+        _req.post(f"{KOI_SERVICE_URL}{path}", json=payload, timeout=5)
+    except Exception as exc:
+        ident = payload.get("job_id") or payload.get("group_id") or "unknown"
+        logger.warning("[Koi] Failed to notify %s for %s: %s", event, ident, exc)
+
+
 def _notify_koi_config_attempted(
     parent_job_id, koi_webhook_info, instance_type,
     region, market, launched, attempt_index,
     time_to_launch=0, failure_reason="",
 ):
     """Fire-and-forget: tell Koi about one allocation attempt."""
-    try:
-        from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
-        if not KOI_SERVICE_URL:
-            return
-        import requests as _req
-        _req.post(f"{KOI_SERVICE_URL}/job/config-attempted", json={
-            "job_id": parent_job_id,
-            "decision_id": koi_webhook_info.get("decision_id") if koi_webhook_info else None,
-            "instance_type": instance_type,
-            "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
-            "region": region,
-            "market": market,
-            "launched": launched,
-            "failure_reason": failure_reason,
-            "time_to_launch": time_to_launch,
-            "attempt_index": attempt_index,
-        }, timeout=5)
-    except Exception:
-        pass
+    from orca_server.config import INSTANCE_TO_GPU
+    _post_koi_webhook("/job/config-attempted", {
+        "job_id": parent_job_id,
+        "decision_id": koi_webhook_info.get("decision_id") if koi_webhook_info else None,
+        "instance_type": instance_type,
+        "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
+        "region": region,
+        "market": market,
+        "launched": launched,
+        "failure_reason": failure_reason,
+        "time_to_launch": time_to_launch,
+        "attempt_index": attempt_index,
+    }, "config-attempted")
 
 
 async def sp_launch_vllm_batch_with_fallback(
@@ -652,21 +659,15 @@ async def launch_chunked_replicas(
                             if rec_tmp and rec_tmp.status in ("launching", "loading_model"):
                                 jt_tmp.update_status(parent_job_id, "failed")
                                 job_logger.warning("[Chunked] All replicas failed at launch — marking job as failed")
-                            try:
-                                from orca_server.config import KOI_SERVICE_URL
-                                if KOI_SERVICE_URL:
-                                    import requests as _req
-                                    with _attempt_log_lock:
-                                        attempts = list(_attempt_log)
-                                    _req.post(f"{KOI_SERVICE_URL}/job/launch-failed", json={
-                                        "job_id": parent_job_id,
-                                        "decision_id": request.koi_decision_id,
-                                        "configs_tried": attempts,
-                                        "failure_reasons": [a["reason"] for a in attempts],
-                                        "total_time_seconds": round(time.time() - _launch_start_time, 2),
-                                    }, timeout=5)
-                            except Exception:
-                                pass
+                            with _attempt_log_lock:
+                                attempts = list(_attempt_log)
+                            _post_koi_webhook("/job/launch-failed", {
+                                "job_id": parent_job_id,
+                                "decision_id": request.koi_decision_id,
+                                "configs_tried": attempts,
+                                "failure_reasons": [a["reason"] for a in attempts],
+                                "total_time_seconds": round(time.time() - _launch_start_time, 2),
+                            }, "launch-failed")
 
     for i in range(num_replicas):
         t = threading.Thread(
@@ -808,22 +809,17 @@ async def _launch_chunked_replica(
     )
 
     # Notify Koi: replica is provisioned (pre-model_ready visibility)
-    try:
-        from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
-        if KOI_SERVICE_URL:
-            import requests as _req
-            _req.post(f"{KOI_SERVICE_URL}/job/launching", json={
-                "job_id": replica_id,
-                "group_id": parent_job_id,
-                "gpu_type": INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
-                "instance_type": config.instance_type,
-                "tp": config.tp_size,
-                "pp": config.pp_size,
-                "region": actual_region,
-                "market": actual_market,
-            }, timeout=5)
-    except Exception:
-        pass
+    from orca_server.config import INSTANCE_TO_GPU
+    _post_koi_webhook("/job/launching", {
+        "job_id": replica_id,
+        "group_id": parent_job_id,
+        "gpu_type": INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
+        "instance_type": config.instance_type,
+        "tp": config.tp_size,
+        "pp": config.pp_size,
+        "region": actual_region,
+        "market": actual_market,
+    }, "launching")
 
     # NOTE: Koi webhook (/job/started) is now fired from server.py when the
     # in-cluster runner reports "model_ready" phase, NOT here. This ensures
@@ -851,18 +847,12 @@ async def _launch_chunked_replica(
                 if job_logger:
                     job_logger.warning(f"[Chunked] Replica {replica_id} exited but chunks still pending — treating as failure")
                 cm.set_replica_state(parent_job_id, replica_id, phase="failed")
-                try:
-                    from orca_server.config import KOI_SERVICE_URL
-                    if KOI_SERVICE_URL:
-                        import requests as _req
-                        _req.post(f"{KOI_SERVICE_URL}/job/replica-failed", json={
-                            "job_id": replica_id,
-                            "group_id": parent_job_id,
-                            "status": "failed",
-                            "reason": "Clean exit with pending chunks (likely killed)",
-                        }, timeout=5)
-                except Exception:
-                    pass
+                _post_koi_webhook("/job/replica-failed", {
+                    "job_id": replica_id,
+                    "group_id": parent_job_id,
+                    "status": "failed",
+                    "reason": "Clean exit with pending chunks (likely killed)",
+                }, "replica-failed")
             else:
                 if job_logger:
                     job_logger.info(f"[Chunked] Replica {replica_id} completed")
@@ -891,18 +881,12 @@ async def _launch_chunked_replica(
                     job_logger.error(f"[Chunked] Replica {replica_id} error: {e}")
                 cm.set_replica_state(parent_job_id, replica_id, phase="failed")
                 # Notify Koi that this replica died
-                try:
-                    from orca_server.config import KOI_SERVICE_URL
-                    if KOI_SERVICE_URL:
-                        import requests as _req
-                        _req.post(f"{KOI_SERVICE_URL}/job/replica-failed", json={
-                            "job_id": replica_id,
-                            "group_id": parent_job_id,
-                            "status": "failed",
-                            "reason": str(e)[:200],
-                        }, timeout=5)
-                except Exception:
-                    pass
+                _post_koi_webhook("/job/replica-failed", {
+                    "job_id": replica_id,
+                    "group_id": parent_job_id,
+                    "status": "failed",
+                    "reason": str(e)[:200],
+                }, "replica-failed")
         finally:
             if quota_tracker is not None:
                 quota_tracker.release_cluster(replica_id)
