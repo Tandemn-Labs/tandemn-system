@@ -132,6 +132,29 @@ class TestDeadDetection:
         cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
         chunk_mgr.force_reclaim.assert_called_once_with(job_id, ["job-1-r0"])
 
+    def test_dead_replica_notifies_koi_with_watchdog_payload(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
+        """Watchdog death path should emit the real /job/replica-failed payload."""
+        import orca_server.config as cfg
+
+        job_id = "job-1"
+        jt.jobs[job_id] = FakeJobRecord(status="running")
+        cm_cluster.get_replica_states.return_value = {
+            "job-1-r0": {"phase": "running"},
+        }
+        mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 60])
+
+        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+             patch("requests.post") as post:
+            watchdog._check_all_jobs()
+
+        post.assert_called_once()
+        assert post.call_args.args[0] == "http://koi:8090/job/replica-failed"
+        payload = post.call_args.kwargs["json"]
+        assert payload["job_id"] == "job-1-r0"
+        assert payload["group_id"] == "job-1"
+        assert payload["status"] == "failed"
+        assert payload["reason"] == "Heartbeat timeout (45s)"
+
     def test_healthy_replica_not_flagged(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Replica with fresh heartbeat (5s ago) → not touched."""
         job_id = "job-1"
