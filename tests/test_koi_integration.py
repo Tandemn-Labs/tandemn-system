@@ -238,6 +238,59 @@ class TestKoiHelpers:
         assert len(lines) >= 3  # instance, GPU, parallelism lines at minimum
 
 
+class TestKoiWebhookNotifications:
+    def test_notify_koi_replica_ready_sends_actual_fallback_payload(self):
+        """model_ready webhook should report actual launched config to Koi."""
+        import server
+        import orca_server.config as cfg
+
+        mock_cm = MagicMock()
+        mock_cm.get_replica_states.return_value = {
+            "parent-job-r1": {
+                "instance_type": "p4de.24xlarge",
+                "tp": 8,
+                "pp": 1,
+                "config_index": 1,
+                "koi_webhook_info": {
+                    "group_id": "parent-job",
+                    "decision_id": "dec-123",
+                    "slo_deadline_hours": 8.0,
+                    "total_tokens": 6_000_000,
+                    "predicted_tps": 1500.0,
+                    "deploy_timestamp": 5400.0,
+                },
+            },
+        }
+
+        old_cm = getattr(server.app.state, "cluster_manager", None)
+        server.app.state.cluster_manager = mock_cm
+        try:
+            with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+                 patch.dict(cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False), \
+                 patch("time.time", return_value=7200.0), \
+                 patch("requests.post") as post:
+                server._notify_koi_replica_ready("parent-job", "parent-job-r1")
+
+            post.assert_called_once()
+            assert post.call_args.args[0] == "http://koi:8090/job/started"
+            payload = post.call_args.kwargs["json"]
+            assert payload["job_id"] == "parent-job-r1"
+            assert payload["group_id"] == "parent-job"
+            assert payload["decision_id"] == "dec-123"
+            assert payload["gpu_type"] == "A100-80GB"
+            assert payload["instance_type"] == "p4de.24xlarge"
+            assert payload["tp"] == 8
+            assert payload["pp"] == 1
+            assert payload["predicted_tps"] == 1500.0
+            assert payload["is_fallback"] is True
+            assert payload["slo_deadline_hours"] == pytest.approx(7.5)
+        finally:
+            if old_cm is None:
+                delattr(server.app.state, "cluster_manager")
+            else:
+                server.app.state.cluster_manager = old_cm
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Task 5: --skip-dangerously flag
 # ──────────────────────────────────────────────────────────────────────────────
