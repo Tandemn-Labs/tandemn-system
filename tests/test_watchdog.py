@@ -403,7 +403,7 @@ class TestPPValidation:
             avg_output_tokens=1024,
         )
         with pytest.raises(ValueError, match="PP=2 requires 2 nodes but config has 1"):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 _launch_chunked_replica(
                     request, config, "test-r0",
                     parent_job_id="test-job",
