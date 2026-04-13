@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -386,12 +387,14 @@ class TestKoiWebhookNotifications:
         server.app.state.cluster_manager = mock_cm
         try:
             with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+                 patch("orca_server.launcher._stop_koi_launch_heartbeat") as stop_heartbeat, \
                  patch.dict(cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False), \
                  patch("time.time", return_value=7200.0), \
                  patch("requests.post") as post:
                 server._notify_koi_replica_ready("parent-job", "parent-job-r1")
 
             post.assert_called_once()
+            stop_heartbeat.assert_called_once_with("parent-job-r1")
             assert post.call_args.args[0] == "http://koi:8090/job/started"
             payload = post.call_args.kwargs["json"]
             assert payload["job_id"] == "parent-job-r1"
@@ -744,6 +747,95 @@ class TestKoiWebhookNotifications:
             )
 
         assert "Failed to notify config-attempted" in caplog.text
+
+    def test_notify_koi_launch_heartbeat_sends_payload(self):
+        """Launch heartbeat should send coarse launch-progress state to Koi."""
+        import orca_server.config as cfg
+        from orca_server.launcher import _notify_koi_launch_heartbeat
+
+        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+             patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False), \
+             patch("requests.post") as post:
+            _notify_koi_launch_heartbeat(
+                replica_id="parent-job-r0",
+                parent_job_id="parent-job",
+                koi_webhook_info={"decision_id": "dec-123"},
+                instance_type="g6e.12xlarge",
+                tp=4,
+                pp=1,
+                attempt_index=2,
+                phase="provisioning",
+                message="still provisioning",
+                region="us-east-1",
+                market="spot",
+            )
+
+        post.assert_called_once()
+        assert post.call_args.args[0] == "http://koi:8090/job/launch-heartbeat"
+        payload = post.call_args.kwargs["json"]
+        assert payload["job_id"] == "parent-job-r0"
+        assert payload["group_id"] == "parent-job"
+        assert payload["decision_id"] == "dec-123"
+        assert payload["gpu_type"] == "L40S"
+        assert payload["instance_type"] == "g6e.12xlarge"
+        assert payload["tp"] == 4
+        assert payload["pp"] == 1
+        assert payload["attempt_index"] == 2
+        assert payload["phase"] == "provisioning"
+        assert payload["message"] == "still provisioning"
+        assert payload["region"] == "us-east-1"
+        assert payload["market"] == "spot"
+        assert "timestamp" in payload
+
+    def test_launch_heartbeat_worker_updates_phase_and_stops(self):
+        """Heartbeat worker should emit updated launch phases and stop cleanly."""
+        import orca_server.config as cfg
+        import orca_server.launcher as launcher
+
+        events = []
+
+        def capture(path, payload, event):
+            events.append((path, payload.copy(), event))
+
+        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+             patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False), \
+             patch.object(launcher, "_KOI_LAUNCH_HEARTBEAT_INTERVAL_SECONDS", 0.01), \
+             patch.object(launcher, "_post_koi_webhook", side_effect=capture):
+            assert launcher._start_koi_launch_heartbeat(
+                replica_id="parent-job-r0",
+                parent_job_id="parent-job",
+                koi_webhook_info={"decision_id": "dec-123"},
+                instance_type="g6e.12xlarge",
+                tp=4,
+                pp=1,
+                attempt_index=0,
+                phase="searching_capacity",
+                message="searching for capacity",
+            ) is True
+
+            time.sleep(0.03)
+            assert launcher._update_koi_launch_heartbeat(
+                "parent-job-r0",
+                phase="provisioning",
+                message="cluster provisioning",
+                region="us-east-1",
+                market="on_demand",
+            ) is True
+            time.sleep(0.03)
+            before_stop = len(events)
+            assert launcher._stop_koi_launch_heartbeat("parent-job-r0") is True
+            time.sleep(0.03)
+
+        assert len(events) == before_stop
+        phases = [payload["phase"] for _, payload, _ in events]
+        assert "searching_capacity" in phases
+        assert "provisioning" in phases
+        assert any(
+            payload["phase"] == "provisioning"
+            and payload["region"] == "us-east-1"
+            and payload["market"] == "on_demand"
+            for _, payload, _ in events
+        )
 
     def test_launch_chunked_replicas_notifies_koi_when_all_configs_fail(self):
         """All failed chunked launch attempts should emit one /job/launch-failed webhook."""
