@@ -781,6 +781,8 @@ def _notify_koi_replica_ready(job_id: str, replica_id: str):
             "decision_id": koi_info.get("decision_id"),
             "gpu_type": INSTANCE_TO_GPU.get(state.get("instance_type", ""), "unknown"),
             "instance_type": state.get("instance_type", "unknown"),
+            "region": state.get("region", "unknown"),
+            "market": state.get("market", "unknown"),
             "tp": state.get("tp", 1),
             "pp": state.get("pp", 1),
             "dp": 1,

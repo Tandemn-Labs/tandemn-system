@@ -560,7 +560,7 @@ async def launch_chunked_replicas(
         "decision_id": request.koi_decision_id,
         "group_id": parent_job_id,
         "slo_deadline_hours": request.slo_deadline_hours or 8.0,
-        "total_tokens": total_tokens // max(num_replicas, 1),
+        "total_tokens": total_tokens,
         "deploy_timestamp": time.time(),
         "predicted_tps": getattr(request, "koi_predicted_tps", 0),
     }
@@ -660,6 +660,7 @@ async def launch_chunked_replicas(
                                         attempts = list(_attempt_log)
                                     _req.post(f"{KOI_SERVICE_URL}/job/launch-failed", json={
                                         "job_id": parent_job_id,
+                                        "decision_id": request.koi_decision_id,
                                         "configs_tried": attempts,
                                         "failure_reasons": [a["reason"] for a in attempts],
                                         "total_time_seconds": round(time.time() - _launch_start_time, 2),

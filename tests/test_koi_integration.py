@@ -365,6 +365,8 @@ class TestKoiWebhookNotifications:
         mock_cm.get_replica_states.return_value = {
             "parent-job-r1": {
                 "instance_type": "p4de.24xlarge",
+                "region": "us-west-2",
+                "market": "on_demand",
                 "tp": 8,
                 "pp": 1,
                 "config_index": 1,
@@ -396,6 +398,8 @@ class TestKoiWebhookNotifications:
             assert payload["decision_id"] == "dec-123"
             assert payload["gpu_type"] == "A100-80GB"
             assert payload["instance_type"] == "p4de.24xlarge"
+            assert payload["region"] == "us-west-2"
+            assert payload["market"] == "on_demand"
             assert payload["tp"] == 8
             assert payload["pp"] == 1
             assert payload["predicted_tps"] == 1500.0
@@ -406,6 +410,110 @@ class TestKoiWebhookNotifications:
                 delattr(server.app.state, "cluster_manager")
             else:
                 server.app.state.cluster_manager = old_cm
+
+    def test_cmd_deploy_uses_top_level_koi_predicted_tps_for_chunked_submit(self, orca_mod):
+        """Chunked deploy should forward Koi predicted_tps from the top-level response."""
+        from types import SimpleNamespace
+
+        plan_response = MagicMock(status_code=200)
+        plan_response.json.return_value = {
+            "status": "ok",
+            "placements": [{
+                "gpu_type": "L40S",
+                "instance_type": "g6e.12xlarge",
+                "tp_size": 4,
+                "pp_size": 1,
+                "cost_per_hour": 9.36,
+            }],
+        }
+        submit_response = MagicMock(status_code=200)
+        submit_response.json.return_value = {
+            "status": "launched",
+            "job_id": "job-123",
+            "config": {
+                "instance_type": "p4de.24xlarge",
+                "tp": 8,
+                "pp": 1,
+            },
+            "chunks": 1,
+            "replicas": 1,
+        }
+        captured = {}
+
+        def fake_api(method, path, **kwargs):
+            assert method == "post"
+            assert path == "/test/placement"
+            return plan_response
+
+        def fake_api_with_spinner(method, path, message="Working...", **kwargs):
+            assert method == "post"
+            assert path == "/submit/batch"
+            captured["payload"] = kwargs["json"]
+            return submit_response
+
+        args = SimpleNamespace(
+            model_name="Qwen/Qwen2.5-72B-Instruct",
+            input_file="/tmp/input.jsonl",
+            output="output.jsonl",
+            slo=8.0,
+            max_output_tokens=1024,
+            gpu=None,
+            tp=None,
+            pp=None,
+            force=False,
+            chunk_size=1000,
+            replicas=None,
+            persist=False,
+            on_demand=False,
+            log_level="INFO",
+            s3_models=None,
+            skip_dangerously=False,
+        )
+        koi_data = {
+            "_decision_id": "dec-123",
+            "config": {
+                "gpu_type": "A100-80GB",
+                "instance_type": "p4de.24xlarge",
+                "tp": 8,
+                "pp": 1,
+                "dp": 2,
+                "num_instances": 1,
+                "engine_config": {},
+            },
+            "predicted_tps": 2500.0,
+            "alternatives": [{"gpu_type": "L40S", "tp": 4, "pp": 1}],
+        }
+
+        original_koi = orca_mod.KOI_SERVICE_URL
+        orca_mod.KOI_SERVICE_URL = "http://koi:8090"
+        try:
+            with patch.object(orca_mod, "parse_input_file", return_value={
+                "num_lines": 1000,
+                "avg_input_tokens": 953,
+                "max_input_tokens": 2048,
+                "has_explicit_max_tokens": False,
+            }), \
+                 patch.object(orca_mod.os.path, "exists", return_value=True), \
+                 patch.object(orca_mod, "upload_to_server", return_value="s3://bucket/input.jsonl"), \
+                 patch.object(orca_mod, "split_and_upload_chunks", return_value=[{
+                     "chunk_id": 0,
+                     "s3_input_path": "s3://bucket/chunk-0.jsonl",
+                     "num_lines": 1000,
+                 }]), \
+                 patch.object(orca_mod, "fetch_resources", return_value={"resources": []}), \
+                 patch.object(orca_mod, "call_koi", return_value=koi_data), \
+                 patch.object(orca_mod, "api", side_effect=fake_api), \
+                 patch.object(orca_mod, "api_with_spinner", side_effect=fake_api_with_spinner), \
+                 patch.object(orca_mod, "spinner", return_value=None), \
+                 patch("builtins.input", return_value="1"):
+                orca_mod.cmd_deploy(args)
+        finally:
+            orca_mod.KOI_SERVICE_URL = original_koi
+
+        assert captured["payload"]["koi_decision_id"] == "dec-123"
+        assert captured["payload"]["koi_predicted_tps"] == 2500.0
+        assert captured["payload"]["gpu_type"] == "A100-80GB"
+        assert captured["payload"]["replicas"] == 2
 
     def test_launch_chunked_replicas_fallback_success_updates_ready_payload(self):
         """If the primary config fails, the started webhook should reflect the fallback config."""
@@ -570,8 +678,11 @@ class TestKoiWebhookNotifications:
             assert payload["decision_id"] == "dec-123"
             assert payload["gpu_type"] == "A100-80GB"
             assert payload["instance_type"] == "p4de.24xlarge"
+            assert payload["region"] == "us-east-1"
+            assert payload["market"] == "on_demand"
             assert payload["tp"] == 8
             assert payload["pp"] == 1
+            assert payload["total_tokens"] == 1_977_000
             assert payload["is_fallback"] is True
         finally:
             if old_cm is None:
@@ -716,6 +827,7 @@ class TestKoiWebhookNotifications:
         assert post.call_args.args[0] == "http://koi:8090/job/launch-failed"
         payload = post.call_args.kwargs["json"]
         assert payload["job_id"] == "parent-job"
+        assert payload["decision_id"] == "dec-123"
         assert [a["instance_type"] for a in payload["configs_tried"]] == [
             "g6e.12xlarge",
             "p4de.24xlarge",
