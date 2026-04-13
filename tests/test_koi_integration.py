@@ -216,6 +216,17 @@ class TestKoiHelpers:
         finally:
             orca_mod.KOI_SERVICE_URL = original
 
+    def test_call_koi_returns_none_on_timeout(self, orca_mod):
+        """call_koi should fail closed if Koi times out."""
+        original = orca_mod.KOI_SERVICE_URL
+        orca_mod.KOI_SERVICE_URL = "http://koi:8090"
+        try:
+            with patch.object(orca_mod.requests, "post", side_effect=orca_mod.requests.Timeout):
+                result = orca_mod.call_koi({"model_name": "test"}, {"resources": []}, timeout=1)
+            assert result is None
+        finally:
+            orca_mod.KOI_SERVICE_URL = original
+
     def test_koi_summary_lines_basic(self, orca_mod):
         """_koi_summary_lines produces display lines from Koi response."""
         koi_data = {
