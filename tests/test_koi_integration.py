@@ -290,6 +290,38 @@ class TestKoiWebhookNotifications:
             else:
                 server.app.state.cluster_manager = old_cm
 
+    def test_notify_koi_config_attempted_sends_failure_payload(self):
+        """Launch-attempt webhook should send config failure details to Koi."""
+        import orca_server.config as cfg
+        from orca_server.launcher import _notify_koi_config_attempted
+
+        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+             patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False), \
+             patch("requests.post") as post:
+            _notify_koi_config_attempted(
+                parent_job_id="parent-job",
+                koi_webhook_info={"decision_id": "dec-123"},
+                instance_type="g6e.12xlarge",
+                region="us-east-1",
+                market="spot",
+                launched=False,
+                attempt_index=1,
+                failure_reason="InsufficientCapacity",
+            )
+
+        post.assert_called_once()
+        assert post.call_args.args[0] == "http://koi:8090/job/config-attempted"
+        payload = post.call_args.kwargs["json"]
+        assert payload["job_id"] == "parent-job"
+        assert payload["decision_id"] == "dec-123"
+        assert payload["instance_type"] == "g6e.12xlarge"
+        assert payload["gpu_type"] == "L40S"
+        assert payload["region"] == "us-east-1"
+        assert payload["market"] == "spot"
+        assert payload["launched"] is False
+        assert payload["failure_reason"] == "InsufficientCapacity"
+        assert payload["attempt_index"] == 1
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Task 5: --skip-dangerously flag
