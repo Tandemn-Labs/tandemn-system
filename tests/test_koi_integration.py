@@ -407,6 +407,178 @@ class TestKoiWebhookNotifications:
             else:
                 server.app.state.cluster_manager = old_cm
 
+    def test_launch_chunked_replicas_fallback_success_updates_ready_payload(self):
+        """If the primary config fails, the started webhook should reflect the fallback config."""
+        import asyncio
+        import threading as real_threading
+        import server
+        import orca_server.config as cfg
+        import orca_server.launcher as launcher
+        from models.requests import BatchedRequest
+        from models.resources import MagicOutput
+        from orca_server.job_manager import ClusterManager
+
+        RealThread = real_threading.Thread
+
+        class InlineThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+                self._thread = RealThread(
+                    target=target,
+                    args=args,
+                    kwargs=kwargs or {},
+                    daemon=daemon,
+                    name=name,
+                )
+
+            def start(self):
+                self._thread.start()
+                self._thread.join()
+
+        async def fake_launch_replica(
+            request,
+            config,
+            replica_id,
+            parent_job_id,
+            job_dirname,
+            job_logger=None,
+            quota_tracker=None,
+            persist=False,
+            config_index=0,
+            koi_webhook_info=None,
+        ):
+            if config_index == 0:
+                raise RuntimeError(f"{config.instance_type} failed")
+            launcher._notify_koi_config_attempted(
+                parent_job_id,
+                koi_webhook_info,
+                config.instance_type,
+                region="us-east-1",
+                market="on_demand",
+                launched=True,
+                attempt_index=config_index,
+                time_to_launch=42.0,
+            )
+            cm.register(
+                replica_id,
+                parent_job_id,
+                region="us-east-1",
+                market="on_demand",
+                instance_type=config.instance_type,
+                num_instances=config.num_nodes,
+            )
+            cm.set_replica_state(
+                parent_job_id,
+                replica_id,
+                phase="provisioned",
+                region="us-east-1",
+                market="on_demand",
+                instance_type=config.instance_type,
+                koi_webhook_info=koi_webhook_info,
+                tp=config.tp_size,
+                pp=config.pp_size,
+                config_index=config_index,
+            )
+
+        jt = MagicMock()
+        jt.build_job_state_batched.return_value = MagicMock()
+        jt.get.return_value = MagicMock(status="launching")
+        cm = ClusterManager()
+        request = BatchedRequest(
+            user_id="test-user",
+            input_file="s3://bucket/input.jsonl",
+            output_file="output.jsonl",
+            num_lines=1000,
+            avg_input_tokens=953,
+            avg_output_tokens=1024,
+            description="test",
+            task_type="batch",
+            task_priority="low",
+            model_name="Qwen/Qwen2.5-72B-Instruct",
+            engine="vllm",
+            slo_mode="throughput",
+            slo_deadline_hours=8.0,
+            placement="auto",
+            replicas=1,
+            chunks=[{"chunk_id": 0}],
+            koi_decision_id="dec-123",
+        )
+        configs = [
+            MagicOutput(
+                decision_id="parent-job",
+                engine="vllm",
+                instance_type="g6e.12xlarge",
+                tp_size=4,
+                pp_size=1,
+                replicas=1,
+                num_instances=1,
+            ),
+            MagicOutput(
+                decision_id="parent-job",
+                engine="vllm",
+                instance_type="p4de.24xlarge",
+                tp_size=8,
+                pp_size=1,
+                replicas=1,
+                num_instances=1,
+            ),
+        ]
+
+        old_cm = getattr(server.app.state, "cluster_manager", None)
+        server.app.state.cluster_manager = cm
+        try:
+            with patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"), \
+                 patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+                 patch.dict(cfg.INSTANCE_TO_GPU, {
+                     "g6e.12xlarge": "L40S",
+                     "p4de.24xlarge": "A100-80GB",
+                 }, clear=False), \
+                 patch("orca_server.launcher.generate_job_dirname", return_value="test-jobdir"), \
+                 patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()), \
+                 patch("orca_server.launcher.get_job_tracker", return_value=jt), \
+                 patch("orca_server.launcher.get_cluster_manager", return_value=cm), \
+                 patch("orca_server.launcher._launch_chunked_replica", new=fake_launch_replica), \
+                 patch("orca_server.launcher._notify_koi_config_attempted") as notify_attempted, \
+                 patch("orca_server.launcher.sky_down_with_retry"), \
+                 patch("orca_server.launcher.threading.Thread", InlineThread):
+                ok = asyncio.run(
+                    launcher.launch_chunked_replicas(
+                        request=request,
+                        configs=configs,
+                        num_replicas=1,
+                    )
+                )
+
+            assert ok is True
+            assert notify_attempted.call_count == 2
+            assert notify_attempted.call_args_list[0].kwargs["launched"] is False
+            assert notify_attempted.call_args_list[0].args[2] == "g6e.12xlarge"
+            assert notify_attempted.call_args_list[1].kwargs["launched"] is True
+            assert notify_attempted.call_args_list[1].args[2] == "p4de.24xlarge"
+
+            deploy_ts = cm.get_replica_states("parent-job")["parent-job-r0"]["koi_webhook_info"]["deploy_timestamp"]
+            with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+                 patch.dict(cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False), \
+                 patch("time.time", return_value=deploy_ts + 1800), \
+                 patch("requests.post") as post:
+                server._notify_koi_replica_ready("parent-job", "parent-job-r0")
+
+            post.assert_called_once()
+            assert post.call_args.args[0] == "http://koi:8090/job/started"
+            payload = post.call_args.kwargs["json"]
+            assert payload["job_id"] == "parent-job-r0"
+            assert payload["group_id"] == "parent-job"
+            assert payload["decision_id"] == "dec-123"
+            assert payload["gpu_type"] == "A100-80GB"
+            assert payload["instance_type"] == "p4de.24xlarge"
+            assert payload["tp"] == 8
+            assert payload["pp"] == 1
+            assert payload["is_fallback"] is True
+        finally:
+            if old_cm is None:
+                delattr(server.app.state, "cluster_manager")
+            else:
+                server.app.state.cluster_manager = old_cm
+
     def test_notify_koi_config_attempted_sends_failure_payload(self):
         """Launch-attempt webhook should send config failure details to Koi."""
         import orca_server.config as cfg
