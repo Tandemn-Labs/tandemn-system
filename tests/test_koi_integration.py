@@ -203,6 +203,19 @@ class TestKoiHelpers:
         finally:
             orca_mod.KOI_SERVICE_URL = original
 
+    def test_call_koi_returns_none_on_malformed_json(self, orca_mod):
+        """call_koi should fail closed if Koi returns invalid JSON."""
+        original = orca_mod.KOI_SERVICE_URL
+        orca_mod.KOI_SERVICE_URL = "http://koi:8090"
+        bad_response = MagicMock(status_code=200)
+        bad_response.json.side_effect = ValueError("invalid json")
+        try:
+            with patch.object(orca_mod.requests, "post", return_value=bad_response):
+                result = orca_mod.call_koi({"model_name": "test"}, {"resources": []}, timeout=1)
+            assert result is None
+        finally:
+            orca_mod.KOI_SERVICE_URL = original
+
     def test_koi_summary_lines_basic(self, orca_mod):
         """_koi_summary_lines produces display lines from Koi response."""
         koi_data = {
