@@ -113,10 +113,10 @@ async def test_placement_user_specified(client):
     assert "feasible" in p
 
 
-# ---- /test/placement (invalid solver) ----
+# ---- /test/placement (llm solver) ----
 
 @pytest.mark.asyncio
-async def test_placement_invalid_solver(client):
+async def test_placement_llm_solver(client):
     payload = {
         "user_id": "test-user",
         "input_file": "examples/workloads/demo_batch.jsonl",
@@ -134,8 +134,10 @@ async def test_placement_invalid_solver(client):
     resp = await client.post("/test/placement", json=payload)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["status"] == "error"
-    assert data["error_type"] == "invalid_solver"
+    assert data["status"] == "ok"
+    assert data["solver"] == "llm"
+    assert "placements" in data
+    assert len(data["placements"]) >= 1
 
 
 # ---- /submit/batch (invalid solver) ----

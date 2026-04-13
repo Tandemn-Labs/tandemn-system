@@ -206,19 +206,17 @@ class TestKoiHelpers:
     def test_koi_summary_lines_basic(self, orca_mod):
         """_koi_summary_lines produces display lines from Koi response."""
         koi_data = {
-            "recommendation": {
+            "config": {
                 "gpu_type": "L40S",
                 "instance_type": "g6e.12xlarge",
                 "tp": 4, "pp": 1, "dp": 2,
                 "num_instances": 2,
                 "engine_config": {"max_model_len": 8192, "max_num_seqs": 64},
             },
-            "predicted_metrics": {
-                "throughput_tokens_per_sec": 2500.0,
-                "cost_per_hour_usd": 9.36,
-                "estimated_runtime_hours": 3.2,
-                "total_cost_usd": 29.95,
-            },
+            "predicted_tps": 2500.0,
+            "predicted_cost_per_hour": 9.36,
+            "predicted_runtime_hours": 3.2,
+            "predicted_total_cost": 29.95,
             "confidence": 0.78,
         }
         lines = orca_mod._koi_summary_lines(koi_data)
@@ -232,10 +230,9 @@ class TestKoiHelpers:
     def test_koi_summary_lines_minimal(self, orca_mod):
         """_koi_summary_lines handles minimal Koi response."""
         koi_data = {
-            "recommendation": {"gpu_type": "A100", "instance_type": "p4d.24xlarge",
-                               "tp": 8, "pp": 1, "dp": 1, "num_instances": 1,
-                               "engine_config": {}},
-            "predicted_metrics": {},
+            "config": {"gpu_type": "A100", "instance_type": "p4d.24xlarge",
+                       "tp": 8, "pp": 1, "dp": 1, "num_instances": 1,
+                       "engine_config": {}},
         }
         lines = orca_mod._koi_summary_lines(koi_data)
         assert len(lines) >= 3  # instance, GPU, parallelism lines at minimum
