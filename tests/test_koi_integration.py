@@ -263,6 +263,99 @@ class TestKoiHelpers:
 
 
 class TestKoiWebhookNotifications:
+    def test_submit_batch_chunked_passes_koi_alternatives_to_launcher(self):
+        """Chunked submit should preserve Koi alternatives as ordered fallbacks."""
+        import asyncio
+        import server
+        from models.requests import BatchedRequest
+
+        captured = {}
+        chunk_manager = MagicMock()
+        job_tracker = MagicMock()
+
+        async def fake_launch_chunked_replicas(request, configs, num_replicas, **kwargs):
+            captured["request"] = request
+            captured["configs"] = configs
+            captured["num_replicas"] = num_replicas
+            captured["kwargs"] = kwargs
+            return True
+
+        def fake_resolve_gpu_type_to_instance(gpu_type, tp):
+            mapping = {
+                ("L40S", 4): ("g6e.12xlarge", 4),
+                ("A100", 8): ("p4de.24xlarge", 8),
+            }
+            return mapping[(gpu_type, tp)]
+
+        request = BatchedRequest(
+            user_id="test-user",
+            input_file="s3://bucket/input.jsonl",
+            output_file="output.jsonl",
+            num_lines=1000,
+            avg_input_tokens=953,
+            max_input_tokens=2048,
+            avg_output_tokens=1024,
+            max_output_tokens=2048,
+            description="test",
+            task_type="batch",
+            task_priority="low",
+            model_name="Qwen/Qwen2.5-72B-Instruct",
+            engine="vllm",
+            slo_mode="throughput",
+            slo_deadline_hours=8.0,
+            placement="auto",
+            placement_solver="user_specified",
+            gpu_type="L40S",
+            tp_size=4,
+            pp_size=1,
+            replicas=1,
+            chunks=[{
+                "chunk_id": 0,
+                "s3_input_path": "s3://bucket/job/chunk-0.jsonl",
+                "num_lines": 1000,
+            }],
+            koi_alternatives=[{"gpu_type": "A100", "tp": 8, "pp": 1}],
+        )
+
+        feasibility = {
+            "feasible": True,
+            "reason": "",
+            "max_model_len": 8192,
+            "solution": {
+                "throughput_tokens_per_sec": 1234.0,
+                "cost_per_hour": 9.36,
+            },
+        }
+
+        old_redis = getattr(server.app.state, "redis_available", False)
+        server.app.state.redis_available = True
+        try:
+            with patch.object(server, "_make_job_id", return_value="job-123"), \
+                 patch.object(server, "resolve_gpu_type_to_instance", side_effect=fake_resolve_gpu_type_to_instance), \
+                 patch.object(server, "check_user_specified_feasibility", return_value=feasibility), \
+                 patch.object(server, "get_cached_quotas", return_value=[]), \
+                 patch.object(server, "get_ordered_regions", return_value=[object()]), \
+                 patch.object(server, "get_chunk_manager", return_value=chunk_manager), \
+                 patch.object(server, "get_job_tracker", return_value=job_tracker), \
+                 patch.object(server, "get_quota_tracker", return_value=MagicMock()), \
+                 patch.object(server, "launch_chunked_replicas", new=fake_launch_chunked_replicas):
+                data = asyncio.run(server.submit_batch(request))
+        finally:
+            server.app.state.redis_available = old_redis
+
+        assert data["status"] == "launched"
+        assert data["job_id"] == "job-123"
+        assert captured["num_replicas"] == 1
+        assert [cfg.instance_type for cfg in captured["configs"]] == [
+            "g6e.12xlarge",
+            "p4de.24xlarge",
+        ]
+        assert [cfg.tp_size for cfg in captured["configs"]] == [4, 8]
+        assert [cfg.pp_size for cfg in captured["configs"]] == [1, 1]
+        assert all(cfg.decision_id == "job-123" for cfg in captured["configs"])
+        chunk_manager.create_job_queue.assert_called_once()
+        job_tracker.set_chunked_info.assert_called_once_with("job-123", 1, 1)
+
     def test_notify_koi_replica_ready_sends_actual_fallback_payload(self):
         """model_ready webhook should report actual launched config to Koi."""
         import server
