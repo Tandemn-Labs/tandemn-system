@@ -7,6 +7,7 @@ import logging
 import subprocess
 import threading
 import time
+from threading import Event, Lock, Thread
 
 logger = logging.getLogger(__name__)
 from pathlib import Path
@@ -41,6 +42,9 @@ from utils.utils import split_uri, update_template, update_yaml_file
 # EFA-capable instance families (NVSwitch/NVLink, multi-NIC).
 # network_tier=best enables EFA, DLAMI, NCCL auto-config on AWS.
 EFA_PREFIXES = ('p3.', 'p3dn.', 'p4d.', 'p4de.', 'p5.', 'p5e.')
+_KOI_LAUNCH_HEARTBEAT_INTERVAL_SECONDS = 45.0
+_koi_launch_heartbeats = {}
+_koi_launch_heartbeat_lock = Lock()
 
 
 def _needs_efa(instance_type: str) -> bool:
@@ -80,6 +84,127 @@ def _notify_koi_config_attempted(
         "time_to_launch": time_to_launch,
         "attempt_index": attempt_index,
     }, "config-attempted")
+
+
+def _notify_koi_launch_heartbeat(
+    *,
+    replica_id,
+    parent_job_id,
+    koi_webhook_info,
+    instance_type,
+    tp,
+    pp,
+    attempt_index,
+    phase,
+    message,
+    region="unknown",
+    market="unknown",
+):
+    """Fire-and-forget: tell Koi a chunked launch is still alive."""
+    from orca_server.config import INSTANCE_TO_GPU
+    if not koi_webhook_info:
+        return
+    _post_koi_webhook("/job/launch-heartbeat", {
+        "job_id": replica_id,
+        "decision_id": koi_webhook_info.get("decision_id"),
+        "group_id": parent_job_id,
+        "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
+        "instance_type": instance_type,
+        "tp": tp,
+        "pp": pp,
+        "region": region,
+        "market": market,
+        "attempt_index": attempt_index,
+        "phase": phase,
+        "message": message,
+        "timestamp": time.time(),
+    }, "launch-heartbeat")
+
+
+def _run_koi_launch_heartbeat(replica_id: str) -> None:
+    while True:
+        with _koi_launch_heartbeat_lock:
+            entry = _koi_launch_heartbeats.get(replica_id)
+            if not entry:
+                return
+            stop_event = entry["stop_event"]
+            payload = dict(entry["payload"])
+        _notify_koi_launch_heartbeat(**payload)
+        if stop_event.wait(_KOI_LAUNCH_HEARTBEAT_INTERVAL_SECONDS):
+            return
+
+
+def _start_koi_launch_heartbeat(
+    *,
+    replica_id,
+    parent_job_id,
+    koi_webhook_info,
+    instance_type,
+    tp,
+    pp,
+    attempt_index=0,
+    phase="searching_capacity",
+    message="Searching for capacity",
+    region="unknown",
+    market="unknown",
+):
+    """Start a lightweight launch heartbeat loop for one chunked replica."""
+    from orca_server.config import KOI_SERVICE_URL
+    if not KOI_SERVICE_URL or not koi_webhook_info:
+        return False
+
+    _stop_koi_launch_heartbeat(replica_id)
+    stop_event = Event()
+    thread = Thread(
+        target=_run_koi_launch_heartbeat,
+        args=(replica_id,),
+        daemon=True,
+        name=f"koi-heartbeat-{replica_id[:12]}",
+    )
+    payload = {
+        "replica_id": replica_id,
+        "parent_job_id": parent_job_id,
+        "koi_webhook_info": koi_webhook_info,
+        "instance_type": instance_type,
+        "tp": tp,
+        "pp": pp,
+        "attempt_index": attempt_index,
+        "phase": phase,
+        "message": message,
+        "region": region,
+        "market": market,
+    }
+    with _koi_launch_heartbeat_lock:
+        _koi_launch_heartbeats[replica_id] = {
+            "stop_event": stop_event,
+            "thread": thread,
+            "payload": payload,
+        }
+    thread.start()
+    return True
+
+
+def _update_koi_launch_heartbeat(replica_id: str, **kwargs) -> bool:
+    with _koi_launch_heartbeat_lock:
+        entry = _koi_launch_heartbeats.get(replica_id)
+        if not entry:
+            return False
+        for key, value in kwargs.items():
+            if value is not None:
+                entry["payload"][key] = value
+    return True
+
+
+def _stop_koi_launch_heartbeat(replica_id: str) -> bool:
+    with _koi_launch_heartbeat_lock:
+        entry = _koi_launch_heartbeats.pop(replica_id, None)
+    if not entry:
+        return False
+    entry["stop_event"].set()
+    thread = entry.get("thread")
+    if thread and thread.is_alive() and thread is not threading.current_thread():
+        thread.join(timeout=1)
+    return True
 
 
 async def sp_launch_vllm_batch_with_fallback(
@@ -619,6 +744,7 @@ async def launch_chunked_replicas(
                 loop.close()
                 return  # success — stop trying alternatives
             except Exception as e:
+                _stop_koi_launch_heartbeat(replica_id)
                 # Notify Koi: this config attempt failed
                 _notify_koi_config_attempted(
                     parent_job_id, koi_webhook_info, cfg.instance_type,
@@ -774,52 +900,90 @@ async def _launch_chunked_replica(
 
     update_yaml_file("templates/vllm_chunked.yaml", replace_yaml, yaml_output)
 
-    task = sky.Task.from_yaml(yaml_output)
-    result_id = sky.launch(task, cluster_name=replica_id, down=True)
-    job_id_sky, handle = sky.stream_and_get(result_id, follow=True)
-
-    actual_region = handle.launched_resources.region
-    actual_market = "spot" if handle.launched_resources.use_spot else "on_demand"
-    if quota_tracker is not None:
-        quota_tracker.reserve_cluster(
-            cluster_name=replica_id,
-            region=actual_region,
-            market=actual_market,
-            instance_type=config.instance_type,
-            num_instances=num_nodes,
-        )
-
-    cm = get_cluster_manager()
-    cm.register(replica_id, parent_job_id,
-                region=actual_region, market=actual_market,
-                instance_type=config.instance_type, num_instances=num_nodes)
-    cm.set_replica_state(parent_job_id, replica_id,
-                         phase="provisioned", region=actual_region,
-                         market=actual_market, instance_type=config.instance_type,
-                         koi_webhook_info=koi_webhook_info,
-                         tp=config.tp_size, pp=config.pp_size,
-                         config_index=config_index)
-
-    # Notify Koi: this config attempt succeeded
-    _notify_koi_config_attempted(
-        parent_job_id, koi_webhook_info, config.instance_type,
-        region=actual_region, market=actual_market,
-        launched=True, attempt_index=config_index,
-        time_to_launch=round(time.time() - _launch_start, 2),
+    _start_koi_launch_heartbeat(
+        replica_id=replica_id,
+        parent_job_id=parent_job_id,
+        koi_webhook_info=koi_webhook_info,
+        instance_type=config.instance_type,
+        tp=config.tp_size,
+        pp=config.pp_size,
+        attempt_index=config_index,
+        phase="searching_capacity",
+        message="Searching for capacity",
     )
 
-    # Notify Koi: replica is provisioned (pre-model_ready visibility)
-    from orca_server.config import INSTANCE_TO_GPU
-    _post_koi_webhook("/job/launching", {
-        "job_id": replica_id,
-        "group_id": parent_job_id,
-        "gpu_type": INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
-        "instance_type": config.instance_type,
-        "tp": config.tp_size,
-        "pp": config.pp_size,
-        "region": actual_region,
-        "market": actual_market,
-    }, "launching")
+    try:
+        task = sky.Task.from_yaml(yaml_output)
+        result_id = sky.launch(task, cluster_name=replica_id, down=True)
+        _update_koi_launch_heartbeat(
+            replica_id,
+            phase="provisioning",
+            message="Provisioning cluster",
+        )
+        job_id_sky, handle = sky.stream_and_get(result_id, follow=True)
+
+        actual_region = handle.launched_resources.region
+        actual_market = "spot" if handle.launched_resources.use_spot else "on_demand"
+        _update_koi_launch_heartbeat(
+            replica_id,
+            phase="bootstrapping",
+            message="Cluster provisioned, bootstrapping runtime",
+            region=actual_region,
+            market=actual_market,
+        )
+        if quota_tracker is not None:
+            quota_tracker.reserve_cluster(
+                cluster_name=replica_id,
+                region=actual_region,
+                market=actual_market,
+                instance_type=config.instance_type,
+                num_instances=num_nodes,
+            )
+
+        cm = get_cluster_manager()
+        cm.register(replica_id, parent_job_id,
+                    region=actual_region, market=actual_market,
+                    instance_type=config.instance_type, num_instances=num_nodes)
+        cm.set_replica_state(parent_job_id, replica_id,
+                             phase="provisioned", region=actual_region,
+                             market=actual_market, instance_type=config.instance_type,
+                             koi_webhook_info=koi_webhook_info,
+                             tp=config.tp_size, pp=config.pp_size,
+                             config_index=config_index)
+
+        # Notify Koi: this config attempt succeeded
+        _notify_koi_config_attempted(
+            parent_job_id, koi_webhook_info, config.instance_type,
+            region=actual_region, market=actual_market,
+            launched=True, attempt_index=config_index,
+            time_to_launch=round(time.time() - _launch_start, 2),
+        )
+
+        _update_koi_launch_heartbeat(
+            replica_id,
+            phase="waiting_model_ready",
+            message="Replica provisioned, waiting for model_ready",
+            region=actual_region,
+            market=actual_market,
+        )
+
+        # Notify Koi: replica is provisioned (pre-model_ready visibility)
+        from orca_server.config import INSTANCE_TO_GPU
+        _post_koi_webhook("/job/launching", {
+            "job_id": replica_id,
+            "decision_id": koi_webhook_info.get("decision_id") if koi_webhook_info else None,
+            "group_id": parent_job_id,
+            "gpu_type": INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
+            "instance_type": config.instance_type,
+            "tp": config.tp_size,
+            "pp": config.pp_size,
+            "region": actual_region,
+            "market": actual_market,
+            "attempt_index": config_index,
+        }, "launching")
+    except Exception:
+        _stop_koi_launch_heartbeat(replica_id)
+        raise
 
     # NOTE: Koi webhook (/job/started) is now fired from server.py when the
     # in-cluster runner reports "model_ready" phase, NOT here. This ensures
@@ -888,6 +1052,7 @@ async def _launch_chunked_replica(
                     "reason": str(e)[:200],
                 }, "replica-failed")
         finally:
+            _stop_koi_launch_heartbeat(replica_id)
             if quota_tracker is not None:
                 quota_tracker.release_cluster(replica_id)
             cm.unregister(replica_id)

@@ -756,8 +756,10 @@ async def update_job_phase(
 def _notify_koi_replica_ready(job_id: str, replica_id: str):
     """Fire /job/started webhook to Koi when vLLM is ready to serve."""
     from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
+    from orca_server.launcher import _stop_koi_launch_heartbeat
     if not KOI_SERVICE_URL:
         return
+    _stop_koi_launch_heartbeat(replica_id)
     cm = app.state.cluster_manager
     state = cm.get_replica_states(job_id).get(replica_id, {})
     koi_info = state.get("koi_webhook_info")
