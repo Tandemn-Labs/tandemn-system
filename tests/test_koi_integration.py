@@ -12,6 +12,7 @@ import importlib
 import importlib.machinery
 import importlib.util
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -722,6 +723,28 @@ class TestKoiWebhookNotifications:
         assert payload["failure_reason"] == "InsufficientCapacity"
         assert payload["attempt_index"] == 1
 
+    def test_notify_koi_config_attempted_logs_warning_on_failure(self, caplog):
+        """Launch-attempt webhook failures should be visible in logs."""
+        import orca_server.config as cfg
+        from orca_server.launcher import _notify_koi_config_attempted
+
+        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+             patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False), \
+             patch("requests.post", side_effect=RuntimeError("boom")), \
+             caplog.at_level(logging.WARNING, logger="orca_server.launcher"):
+            _notify_koi_config_attempted(
+                parent_job_id="parent-job",
+                koi_webhook_info={"decision_id": "dec-123"},
+                instance_type="g6e.12xlarge",
+                region="us-east-1",
+                market="spot",
+                launched=False,
+                attempt_index=1,
+                failure_reason="InsufficientCapacity",
+            )
+
+        assert "Failed to notify config-attempted" in caplog.text
+
     def test_launch_chunked_replicas_notifies_koi_when_all_configs_fail(self):
         """All failed chunked launch attempts should emit one /job/launch-failed webhook."""
         import asyncio
@@ -837,6 +860,109 @@ class TestKoiWebhookNotifications:
             "p4de.24xlarge failed",
         ]
         assert payload["total_time_seconds"] >= 0
+
+    def test_launch_chunked_replicas_logs_warning_when_launch_failed_webhook_errors(self, caplog):
+        """All-failed launch webhook errors should log a warning instead of disappearing silently."""
+        import asyncio
+        import threading as real_threading
+        import orca_server.config as cfg
+        import orca_server.launcher as launcher
+        from models.requests import BatchedRequest
+        from models.resources import MagicOutput
+
+        RealThread = real_threading.Thread
+
+        class InlineThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+                self._thread = RealThread(
+                    target=target,
+                    args=args,
+                    kwargs=kwargs or {},
+                    daemon=daemon,
+                    name=name,
+                )
+
+            def start(self):
+                self._thread.start()
+                self._thread.join()
+
+        async def fail_launch(*args, **_kwargs):
+            config = args[1]
+            raise RuntimeError(f"{config.instance_type} failed")
+
+        jt = MagicMock()
+        jt.build_job_state_batched.return_value = MagicMock()
+        jt.get.return_value = MagicMock(status="launching")
+        cm = MagicMock()
+        cm.get_replica_states.return_value = {
+            "parent-job-r0": {"phase": "failed"},
+        }
+        request = BatchedRequest(
+            user_id="test-user",
+            input_file="s3://bucket/input.jsonl",
+            output_file="output.jsonl",
+            num_lines=1000,
+            avg_input_tokens=953,
+            avg_output_tokens=1024,
+            description="test",
+            task_type="batch",
+            task_priority="low",
+            model_name="Qwen/Qwen2.5-72B-Instruct",
+            engine="vllm",
+            slo_mode="throughput",
+            slo_deadline_hours=8.0,
+            placement="auto",
+            replicas=1,
+            chunks=[{"chunk_id": 0}],
+            koi_decision_id="dec-123",
+        )
+        configs = [
+            MagicOutput(
+                decision_id="parent-job",
+                engine="vllm",
+                instance_type="g6e.12xlarge",
+                tp_size=4,
+                pp_size=1,
+                replicas=1,
+                num_instances=1,
+            ),
+            MagicOutput(
+                decision_id="parent-job",
+                engine="vllm",
+                instance_type="p4de.24xlarge",
+                tp_size=8,
+                pp_size=1,
+                replicas=1,
+                num_instances=1,
+            ),
+        ]
+
+        with patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"), \
+             patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
+             patch.dict(cfg.INSTANCE_TO_GPU, {
+                 "g6e.12xlarge": "L40S",
+                 "p4de.24xlarge": "A100-80GB",
+             }, clear=False), \
+             patch("orca_server.launcher.generate_job_dirname", return_value="test-jobdir"), \
+             patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()), \
+             patch("orca_server.launcher.get_job_tracker", return_value=jt), \
+             patch("orca_server.launcher.get_cluster_manager", return_value=cm), \
+             patch("orca_server.launcher._launch_chunked_replica", new=fail_launch), \
+             patch("orca_server.launcher._notify_koi_config_attempted"), \
+             patch("orca_server.launcher.sky_down_with_retry"), \
+             patch("orca_server.launcher.threading.Thread", InlineThread), \
+             patch("requests.post", side_effect=RuntimeError("boom")), \
+             caplog.at_level(logging.WARNING, logger="orca_server.launcher"):
+            ok = asyncio.run(
+                launcher.launch_chunked_replicas(
+                    request=request,
+                    configs=configs,
+                    num_replicas=1,
+                )
+            )
+
+        assert ok is True
+        assert "Failed to notify launch-failed" in caplog.text
 
 
 # ──────────────────────────────────────────────────────────────────────────────
