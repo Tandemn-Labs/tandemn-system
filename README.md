@@ -8,6 +8,8 @@ Tandemn System (sometimes referenced in this repository as `orca`) is a self-hos
 
 > **Deployment model:** Tandemn System is fully open-source and self-hosted. You run it on your own AWS account. There is no managed tier or external data plane.
 
+> **Important:** Orca still runs **standalone**. Koi is optional. If `KOI_SERVICE_URL` is unset, Orca uses its built-in placement and lifecycle path as usual.
+
 ---
 
 ## Table of Contents
@@ -15,6 +17,7 @@ Tandemn System (sometimes referenced in this repository as `orca`) is a self-hos
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Naming](#naming)
+- [Standalone vs Optional Koi](#standalone-vs-optional-koi)
 - [Supported Models](#supported-models)
 - [Supported Hardware](#supported-hardware)
 - [Quick Start](#quick-start)
@@ -94,8 +97,9 @@ Create a `.env` file in the project root:
 ```bash
 S3_UPLOAD_BUCKET=your-s3-bucket       # Must exist in your AWS account
 HF_TOKEN=hf_your_token_here           # Required for gated models
-TD_API_KEY=your-secret-key          # Recommended; see Security section
+TD_API_KEY=your-secret-key            # Recommended; see Security section
 ANTHROPIC_API_KEY=sk-ant-...          # Required for LLM placement advisor
+KOI_SERVICE_URL=http://localhost:8090 # Optional; only if using Koi
 ```
 
 </details>
@@ -114,6 +118,42 @@ Over time, repository naming may be updated for consistency, but current command
 
 ---
 
+## Standalone vs Optional Koi
+
+### Orca standalone
+
+This is still the default and fully supported mode.
+
+- Leave `KOI_SERVICE_URL` unset
+- Orca still handles:
+  - placement
+  - launch
+  - chunked execution
+  - monitoring
+  - watchdog / recovery
+  - output assembly
+
+### Orca with Koi enabled
+
+If you set `KOI_SERVICE_URL`, Orca can use Koi as an **optional intelligence layer** on top of the normal Orca control plane.
+
+Current `koi-v2` integration:
+
+- CLI can call Koi `POST /decide` for an additional recommendation
+- chunked launch path carries Koi decision metadata and fallback alternatives
+- Orca sends chunked lifecycle callbacks back to Koi:
+  - `/job/config-attempted`
+  - `/job/launching`
+  - `/job/launch-heartbeat`
+  - `/job/started`
+  - `/job/launch-failed`
+  - `/job/replica-failed`
+  - `/job/complete`
+
+If Koi is unset, unavailable, times out, or returns bad data, Orca still continues with its standalone path.
+
+---
+
 ## Supported Models
 
 Tandemn System supports **any HuggingFace model compatible with vLLM**. Specify `--gpu` and `--tp` manually to run any model:
@@ -128,6 +168,8 @@ tandemn deploy <any-hf-model> input.jsonl --gpu A10G --tp 1
 2. **Roofline solver** — deterministic analytical model based on GPU bandwidth, TFLOPS, and memory constraints. No API key required.
 
 Both recommendations are shown side by side. For deploy, a prompt lets you choose between them (`--skip-dangerously` auto-picks the advisor). Falls back to roofline if the advisor is unavailable.
+
+If `KOI_SERVICE_URL` is set and you are using automatic placement, Orca also queries Koi and shows the Koi recommendation alongside the built-in solvers. That path is optional.
 
 The performance database covers 16 models across 6 GPU types:
 
@@ -184,6 +226,10 @@ tandemn deploy Qwen/Qwen2.5-7B-Instruct examples/workloads/demo_batch.jsonl --sl
 
 Tandemn System parses the input file, runs the placement solver, and launches on the cheapest viable spot configuration. No GPU selection required.
 
+If `KOI_SERVICE_URL` is unset, this is pure Orca standalone behavior.
+
+If `KOI_SERVICE_URL` is set, Orca may also show a Koi recommendation for comparison.
+
 ### Step 3 — Monitor progress
 
 ```bash
@@ -196,6 +242,24 @@ tandemn web               # Open real-time web dashboard in browser
 ```bash
 tandemn deploy Qwen/Qwen2.5-7B-Instruct input.jsonl --gpu A10G --tp 1 --replicas 2 --chunk-size 100
 ```
+
+### Optional Koi service
+
+If you want the extra Koi recommendation / runtime feedback loop:
+
+```bash
+# terminal 1: Koi
+cd ../koi
+export ORCA_URL=http://localhost:26336
+python -m koi.server
+
+# terminal 2: Orca
+cd ../Tandemn-orca
+export KOI_SERVICE_URL=http://localhost:8090
+python server.py --tunnel
+```
+
+This is optional. Orca still runs without it.
 
 ---
 
