@@ -212,7 +212,7 @@ async def sp_launch_vllm_batch(
         yaml_data["resources"] = resources_config
         yaml_data["file_mounts"]["/data"]["source"] = s3_base
         yaml_data["envs"]["HF_TOKEN"] = hf_token
-        yaml_data["envs"]["ORCA_SERVER_URL"] = _cfg.ORCA_SERVER_URL
+        yaml_data["envs"]["TD_SERVER_URL"] = _cfg.TD_SERVER_URL
         yaml_data["envs"]["JOB_ID"] = config.decision_id
         yaml_data["envs"]["ORCA_API_KEY"] = _cfg.ORCA_API_KEY
 
@@ -244,7 +244,7 @@ async def sp_launch_vllm_batch(
             "run": run_string,
             "file_mounts./data.source": s3_base,
             "envs.HF_TOKEN": hf_token,
-            "envs.ORCA_SERVER_URL": _cfg.ORCA_SERVER_URL,
+            "envs.TD_SERVER_URL": _cfg.TD_SERVER_URL,
             "envs.JOB_ID": config.decision_id,
             "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,
             "envs.VLLM_USE_V1": "1" if _cfg.supports_vllm_v1(config.instance_type) else "0",
@@ -445,11 +445,11 @@ async def launch_chunked_replicas(
     Each replica is an independent cluster that pulls chunks from the Redis queue
     via HTTP endpoints on the control plane.
     """
-    if not _cfg.ORCA_SERVER_URL:
+    if not _cfg.TD_SERVER_URL:
         raise ValueError(
-            "ORCA_SERVER_URL is not set. Chunked replicas need the control plane URL "
-            "to pull chunks. Start the server with --url or --tunnel, or set the "
-            "ORCA_SERVER_URL environment variable."
+            "TD_SERVER_URL is not set. Chunked replicas need the control plane URL "
+            "to pull chunks. Start the server with --url or set the "
+            "TD_SERVER_URL environment variable."
         )
 
     if early_messages is None:
@@ -596,7 +596,7 @@ async def _launch_chunked_replica(
         "resources": resources_config,
         "run": run_string,
         "envs.HF_TOKEN": hf_token,
-        "envs.ORCA_SERVER_URL": _cfg.ORCA_SERVER_URL,
+        "envs.TD_SERVER_URL": _cfg.TD_SERVER_URL,
         "envs.JOB_ID": parent_job_id,
         "envs.REPLICA_ID": replica_id,
         "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,

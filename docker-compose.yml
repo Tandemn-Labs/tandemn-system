@@ -1,8 +1,22 @@
 services:
+  orca:
+    image: ghcr.io/tandemn-labs/orca:0.0.1
+    build: .
+    ports:
+      - "26336:26336"
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - sky_state:/home/orca/.sky
+      - ./outputs:/app/outputs:Z # :Z relabels for SELinux hosts
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
-    ports:
-      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -11,5 +25,12 @@ services:
       interval: 5s
       retries: 5
     restart: unless-stopped
+
+  # Placeholder for the future intelligence service
+  # koi:
+  #   image: ghcr.io/tandemn-labs/koi:latest
+  #   restart: unless-stopped
+
 volumes:
   redis_data:
+  sky_state:

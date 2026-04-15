@@ -11,7 +11,8 @@ files/
 !examples/workloads/demo_batch.jsonl
 *.log
 solver.log
-outputs/
+outputs/*
+!outputs/.gitkeep
 
 # Audit/planning docs (local only)
 AUDIT.md
@@ -20,6 +21,7 @@ docs/throughput-measurement.md
 
 # Editor
 *.code-workspace
+.claude/
+.codex
 .vscode/
 .cursor/
-cloudflared

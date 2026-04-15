@@ -6,10 +6,7 @@ requests
 
 # Placement (AWS allocation, LLM advisors)
 pandas
-openai
-tabulate
-termcolor
-torch
+anthropic
 transformers
 
 # Cloud / job launch
@@ -28,5 +25,8 @@ redis>=5.0
 matplotlib
 numpy
 
+# RAG / vector search (performance advisor)
+faiss-cpu>=1.7
+
 # Solver dependencies (swap this line to use a different solver)
--r LLM_placement_solver/requirements.txtfaiss-cpu>=1.7
+-r LLM_placement_solver/requirements.txt

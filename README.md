@@ -1,10 +1,10 @@
 # Tandemn System
 
-**Automated batch inference orchestration for large language models on AWS spot infrastructure.**
+**Automated inference orchestration for large language models on your GPU-compute infrastructure.**
 
-Tandemn System (currently referenced in this repository as `orca`) is a self-hosted batch inference orchestration system that takes a model name, a JSONL workload, and a deadline — and handles everything else. A placement solver selects the optimal GPU type, tensor and pipeline parallelism configuration, and AWS region based on your SLO. Jobs launch on spot instances via SkyPilot, with chunked multi-replica execution, real-time observability, and output delivered to your S3 bucket. Your data never leaves your infrastructure.
+Tandemn System (sometimes referenced in this repository as `orca`) is a self-hosted inference orchestration system that takes a model name, a JSONL workload, and a deadline — and handles everything else. A placement solver selects the optimal GPU type, tensor and pipeline parallelism configuration, and AWS region based on your SLO. Jobs launch on spot/on-demand instances via SkyPilot, with chunked multi-replica execution, real-time observability, and output delivered to your S3 bucket. Your data never leaves your infrastructure.
 
-> **Naming note:** The product is called **Tandemn System**, while parts of this repository, CLI, and internal code use the codename **Orca**. In this README, **Tandemn System** refers to the platform, and **`orca`** refers to the current CLI / implementation.
+> **Naming note:** The product is called **Tandemn System**, while parts of this repository, CLI, and internal code might still use the legacy codename **Orca**.
 
 > **Deployment model:** Tandemn System is fully open-source and self-hosted. You run it on your own AWS account. There is no managed tier or external data plane.
 
@@ -33,16 +33,16 @@ Tandemn System (currently referenced in this repository as `orca`) is a self-hos
 
 Before installing, ensure the following are in place:
 
-| Requirement | Notes |
-|-------------|-------|
-| Python 3.12+ | Required for the control plane |
-| [uv](https://docs.astral.sh/uv/) | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| [SkyPilot](https://skypilot.readthedocs.io/) | Installed automatically by `setup.sh`; run `sky check` to verify cloud access |
-| AWS credentials | `aws configure` or `~/.aws/credentials` — **AWS only at this time** |
-| AWS IAM permissions | EC2 (launch/terminate), S3 (read/write to your bucket), service quota read access |
-| S3 bucket | Must exist in your AWS account; set as `S3_UPLOAD_BUCKET` in `.env` |
-| Redis | Required for multi-replica chunked jobs: `docker run -d -p 6379:6379 redis` |
-| HuggingFace token | Required for gated models (Llama, Gemma, etc.); set as `HF_TOKEN` in `.env` |
+| Requirement                                  | Notes                                                                             |
+| -------------------------------------------- | --------------------------------------------------------------------------------- |
+| Python 3.12+                                 | Required for the control plane                                                    |
+| [uv](https://docs.astral.sh/uv/)             | `curl -LsSf https://astral.sh/uv/install.sh \| sh`                                |
+| [SkyPilot](https://skypilot.readthedocs.io/) | Installed automatically by `setup.sh`; run `sky check` to verify cloud access     |
+| AWS credentials                              | `aws configure` or `~/.aws/credentials` — **AWS only at this time**               |
+| AWS IAM permissions                          | EC2 (launch/terminate), S3 (read/write to your bucket), service quota read access |
+| S3 bucket                                    | Must exist in your AWS account; set as `S3_UPLOAD_BUCKET` in `.env`               |
+| Redis                                        | Required for multi-replica chunked jobs: `docker run -d -p 6379:6379 redis`       |
+| HuggingFace token                            | Required for gated models (Llama, Gemma, etc.); set as `HF_TOKEN` in `.env`       |
 
 > **AWS IAM note:** At minimum, your credentials need `ec2:*` on the instance types you plan to use, `s3:GetObject` / `s3:PutObject` on your bucket, and `servicequotas:GetServiceQuota` for quota tracking. A least-privilege IAM policy example is available in [`docs/iam-policy.json`](docs/iam-policy.json).
 
@@ -51,12 +51,22 @@ Before installing, ensure the following are in place:
 ## Installation
 
 ```bash
-git clone --recurse-submodules https://github.com/Tandemn-Labs/Tandemn-orca.git
-cd Tandemn-orca
+git clone --recurse-submodules https://github.com/Tandemn-Labs/Tandemn-server.git
+cd Tandemn-server
 bash setup.sh
 ```
 
 `setup.sh` installs Python dependencies, verifies AWS and Redis connectivity, and creates your `.env` file.
+
+### Installing the CLI
+
+For most users, the right way to interface with tandemn-system is through the CLI.
+
+```bash
+# Use whichever python venv setup you currently have
+# This installs a `tandemn` executable to your PATH
+pip install tandemn
+```
 
 ### Performance Database
 
@@ -67,7 +77,7 @@ curl -L https://github.com/Tandemn-Labs/LLM_placement_solver/releases/download/a
   -o LLM_placement_solver/llm_advisor/data/aiconfigurator/data.csv
 ```
 
-This dataset contains 103K profiled vLLM runs across A100, H100, H200, B200, GB200, and L40S GPUs, sourced from [NVIDIA Dynamo AIConfigurator](https://github.com/ai-dynamo/aiconfigurator). Without it, `orca plan` falls back to the roofline solver only.
+This dataset contains 103K profiled vLLM runs across A100, H100, H200, B200, GB200, and L40S GPUs, sourced from [NVIDIA Dynamo AIConfigurator](https://github.com/ai-dynamo/aiconfigurator). Without it, `tandemn plan` falls back to the roofline solver only.
 
 <details>
 <summary>Manual installation</summary>
@@ -84,7 +94,7 @@ Create a `.env` file in the project root:
 ```bash
 S3_UPLOAD_BUCKET=your-s3-bucket       # Must exist in your AWS account
 HF_TOKEN=hf_your_token_here           # Required for gated models
-ORCA_API_KEY=your-secret-key          # Recommended; see Security section
+TD_API_KEY=your-secret-key          # Recommended; see Security section
 ANTHROPIC_API_KEY=sk-ant-...          # Required for LLM placement advisor
 ```
 
@@ -97,7 +107,7 @@ ANTHROPIC_API_KEY=sk-ant-...          # Required for LLM placement advisor
 This repository currently uses the legacy name `orca` in parts of the codebase, CLI, environment variables, and examples.
 
 - **Product name:** Tandemn System
-- **Current CLI:** `orca`
+- **Current CLI:** `tandemn`
 - **Repo internals / env vars:** may still reference `orca`
 
 Over time, repository naming may be updated for consistency, but current commands and interfaces remain unchanged.
@@ -109,10 +119,10 @@ Over time, repository naming may be updated for consistency, but current command
 Tandemn System supports **any HuggingFace model compatible with vLLM**. Specify `--gpu` and `--tp` manually to run any model:
 
 ```bash
-./orca deploy <any-hf-model> input.jsonl --gpu A10G --tp 1
+tandemn deploy <any-hf-model> input.jsonl --gpu A10G --tp 1
 ```
 
-**Two placement solvers** run in parallel when you call `orca plan` or `orca deploy`:
+**Two placement solvers** run in parallel when you call `tandemn plan` or `tandemn deploy`:
 
 1. **LLM Advisor** — architecture-aware RAG over a 103K-row performance database, with an LLM reasoning layer (Claude) that ranks candidates by cost, throughput, and SLO feasibility. Requires `ANTHROPIC_API_KEY` and the performance database (see [Installation](#performance-database)).
 2. **Roofline solver** — deterministic analytical model based on GPU bandwidth, TFLOPS, and memory constraints. No API key required.
@@ -121,23 +131,23 @@ Both recommendations are shown side by side. For deploy, a prompt lets you choos
 
 The performance database covers 16 models across 6 GPU types:
 
-| Model | Params | Type | Profiled GPUs |
-|-------|--------|------|---------------|
-| Meta-Llama-3.1-8B | 8B | Dense | A100, H100, H200, B200, GB200, L40S |
-| Meta-Llama-3.1-70B | 70B | Dense | A100, H100, H200, B200, GB200, L40S |
-| Llama-3.1-70B-Instruct-FP8 | 70B | Dense (FP8) | A100, H100, H200, B200, GB200, L40S |
-| Meta-Llama-3.1-405B | 405B | Dense | A100, H100, H200, B200, GB200 |
-| Nemotron-Super-49B | 49B | Dense | A100, H100, H200, B200, GB200, L40S |
-| Nemotron-H-56B | 56B | Dense | A100, H100, H200, B200, GB200, L40S |
-| Qwen3-8B | 8B | Dense | A100, H100, H200, B200, GB200, L40S |
-| Qwen3-32B | 32B | Dense | A100, H100, H200, B200, GB200, L40S |
-| Qwen3-32B-FP8 | 32B | Dense (FP8) | A100, H100, H200, B200, GB200, L40S |
-| Qwen3-30B-A3B | 30B | MoE (3B active) | A100, H100, H200, B200, GB200, L40S |
-| Qwen3-235B-A22B | 235B | MoE (22B active) | A100, H100, H200, B200, GB200 |
-| Qwen3-235B-A22B-FP8 | 235B | MoE (22B active, FP8) | A100, H100, H200, B200, GB200 |
-| Qwen3-235B-A22B-NVFP4 | 235B | MoE (22B active, FP4) | A100, H100, H200, B200, GB200 |
-| Qwen3-Coder-480B-A35B | 480B | MoE (35B active) | H100, H200, B200, GB200 |
-| Nemotron-3-Nano-30B-A3B | 30B | MoE (3B active) | A100, H100, H200, B200, GB200, L40S |
+| Model                      | Params | Type                  | Profiled GPUs                       |
+| -------------------------- | ------ | --------------------- | ----------------------------------- |
+| Meta-Llama-3.1-8B          | 8B     | Dense                 | A100, H100, H200, B200, GB200, L40S |
+| Meta-Llama-3.1-70B         | 70B    | Dense                 | A100, H100, H200, B200, GB200, L40S |
+| Llama-3.1-70B-Instruct-FP8 | 70B    | Dense (FP8)           | A100, H100, H200, B200, GB200, L40S |
+| Meta-Llama-3.1-405B        | 405B   | Dense                 | A100, H100, H200, B200, GB200       |
+| Nemotron-Super-49B         | 49B    | Dense                 | A100, H100, H200, B200, GB200, L40S |
+| Nemotron-H-56B             | 56B    | Dense                 | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-8B                   | 8B     | Dense                 | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-32B                  | 32B    | Dense                 | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-32B-FP8              | 32B    | Dense (FP8)           | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-30B-A3B              | 30B    | MoE (3B active)       | A100, H100, H200, B200, GB200, L40S |
+| Qwen3-235B-A22B            | 235B   | MoE (22B active)      | A100, H100, H200, B200, GB200       |
+| Qwen3-235B-A22B-FP8        | 235B   | MoE (22B active, FP8) | A100, H100, H200, B200, GB200       |
+| Qwen3-235B-A22B-NVFP4      | 235B   | MoE (22B active, FP4) | A100, H100, H200, B200, GB200       |
+| Qwen3-Coder-480B-A35B      | 480B   | MoE (35B active)      | H100, H200, B200, GB200             |
+| Nemotron-3-Nano-30B-A3B    | 30B    | MoE (3B active)       | A100, H100, H200, B200, GB200, L40S |
 
 For models not in the database, the advisor uses architecture-aware interpolation (matching by model family, size, and I/O profile) to estimate throughput. Use `--gpu` and `--tp` to override manually.
 
@@ -145,12 +155,12 @@ For models not in the database, the advisor uses architecture-aware interpolatio
 
 ## Supported Hardware
 
-| GPU | AWS Instance | VRAM |
-|-----|-------------|------|
-| A100 80GB | p4d.24xlarge, p4de.24xlarge | 8× 80GB |
-| H100 80GB | p5.48xlarge | 8× 80GB |
+| GPU       | AWS Instance                       | VRAM              |
+| --------- | ---------------------------------- | ----------------- |
+| A100 80GB | p4d.24xlarge, p4de.24xlarge        | 8× 80GB           |
+| H100 80GB | p5.48xlarge                        | 8× 80GB           |
 | L40S 48GB | g6e.12xlarge / 24xlarge / 48xlarge | 4× / 4× / 8× 48GB |
-| A10G 24GB | g5.12xlarge / 48xlarge | 4× / 8× 24GB |
+| A10G 24GB | g5.12xlarge / 48xlarge             | 4× / 8× 24GB      |
 
 The solver searches across all GPU types and parallelism configurations (TP 1–8, PP 1–4) to find the cheapest placement that fits your model in memory and meets your deadline.
 
@@ -160,18 +170,16 @@ The solver searches across all GPU types and parallelism configurations (TP 1–
 
 ### Step 1 — Start the control plane
 
-The Tandemn System control plane must be reachable by EC2 replicas. The `--tunnel` flag opens a free Cloudflare tunnel automatically (no account required):
+The Tandemn System control plane must be reachable by EC2 replicas. Set `TD_SERVER_URL` to your server's public address before starting:
 
 ```bash
-python server.py --tunnel
+python server.py --url https://your-public-url.example.com
 ```
-
-This starts the server at `http://localhost:26336` and prints a public tunnel URL, which is automatically set as `ORCA_SERVER_URL`.
 
 ### Step 2 — Run a batch job
 
 ```bash
-./orca deploy Qwen/Qwen2.5-7B-Instruct examples/workloads/demo_batch.jsonl --slo 4
+tandemn deploy Qwen/Qwen2.5-7B-Instruct examples/workloads/demo_batch.jsonl --slo 4
 ```
 
 Tandemn System parses the input file, runs the placement solver, and launches on the cheapest viable spot configuration. No GPU selection required.
@@ -179,14 +187,14 @@ Tandemn System parses the input file, runs the placement solver, and launches on
 ### Step 3 — Monitor progress
 
 ```bash
-./orca progress          # Live progress bar with throughput and queue depth
-./orca web               # Open real-time web dashboard in browser
+tandemn progress          # Live progress bar with throughput and queue depth
+tandemn web               # Open real-time web dashboard in browser
 ```
 
 ### Multi-replica with chunking
 
 ```bash
-./orca deploy Qwen/Qwen2.5-7B-Instruct input.jsonl --gpu A10G --tp 1 --replicas 2 --chunk-size 100
+tandemn deploy Qwen/Qwen2.5-7B-Instruct input.jsonl --gpu A10G --tp 1 --replicas 2 --chunk-size 100
 ```
 
 ---
@@ -196,24 +204,24 @@ Tandemn System parses the input file, runs the placement solver, and launches on
 ### Deployment
 
 ```bash
-./orca deploy <model> <input>     Run a batch job (solver picks GPU automatically)
-./orca plan   <model> <input>     Show placement plan without launching
+tandemn deploy <model> <input>     Run a batch job (solver picks GPU automatically)
+tandemn plan   <model> <input>     Show placement plan without launching
 ```
 
 **Options for `deploy` and `plan`:**
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--slo <hours>` | Deadline: plain hours (`4`), fractional (`0.5h`), or minutes (`30m`) | `4` |
-| `--max-output-tokens N` | Max tokens per response | `1024` |
-| `--gpu <type>` | Override GPU type (e.g. `A100`, `L40S`, `H100`) | solver |
-| `--tp / --pp` | Override tensor / pipeline parallelism | solver |
-| `--replicas N` | Number of replica clusters | `1` |
-| `--chunk-size N` | Lines per chunk | `1000` |
-| `--no-advisor` | Skip LLM advisor, use roofline solver only | — |
-| `--force` | Skip feasibility check and launch anyway | — |
-| `--persist` | Keep cluster alive after job completes | — |
-| `--on-demand` | Use on-demand instances instead of spot | — |
+| Flag                    | Description                                                          | Default |
+| ----------------------- | -------------------------------------------------------------------- | ------- |
+| `--slo <hours>`         | Deadline: plain hours (`4`), fractional (`0.5h`), or minutes (`30m`) | `4`     |
+| `--max-output-tokens N` | Max tokens per response                                              | `1024`  |
+| `--gpu <type>`          | Override GPU type (e.g. `A100`, `L40S`, `H100`)                      | solver  |
+| `--tp / --pp`           | Override tensor / pipeline parallelism                               | solver  |
+| `--replicas N`          | Number of replica clusters                                           | `1`     |
+| `--chunk-size N`        | Lines per chunk                                                      | `1000`  |
+| `--no-advisor`          | Skip LLM advisor, use roofline solver only                           | —       |
+| `--force`               | Skip feasibility check and launch anyway                             | —       |
+| `--persist`             | Keep cluster alive after job completes                               | —       |
+| `--on-demand`           | Use on-demand instances instead of spot                              | —       |
 
 ---
 
@@ -222,10 +230,10 @@ Tandemn System parses the input file, runs the placement solver, and launches on
 Add or remove replicas from a running job:
 
 ```bash
-./orca add <job_id> 2                           # Add 2 replicas (inherit GPU config)
-./orca add <job_id> 3 --gpu L40S --tp 4         # Add 3 L40S replicas (heterogeneous fleet)
-./orca kill <job_id> --replica <rid>            # Kill a specific replica
-./orca kill <job_id> --replica r0 --replica r1  # Kill multiple replicas
+tandemn add <job_id> 2                           # Add 2 replicas (inherit GPU config)
+tandemn add <job_id> 3 --gpu L40S --tp 4         # Add 3 L40S replicas (heterogeneous fleet)
+tandemn kill <job_id> --replica <rid>            # Kill a specific replica
+tandemn kill <job_id> --replica r0 --replica r1  # Kill multiple replicas
 ```
 
 New replicas join the same Redis chunk queue. Killed replicas' in-flight chunks are reclaimed and returned to pending.
@@ -237,8 +245,8 @@ New replicas join the same Redis chunk queue. Killed replicas' in-flight chunks 
 Replace all replicas with a new GPU configuration mid-job. New replicas launch first; old replicas are torn down only after the new ones begin processing:
 
 ```bash
-./orca swap <job_id> --gpu A100 --tp 4 --replicas 2
-./orca swap <job_id> --gpu L40S --tp 1 --ready-threshold 2 --on-demand
+tandemn swap <job_id> --gpu A100 --tp 4 --replicas 2
+tandemn swap <job_id> --gpu L40S --tp 1 --ready-threshold 2 --on-demand
 ```
 
 Zero chunks are lost during a swap.
@@ -248,18 +256,18 @@ Zero chunks are lost during a swap.
 ### Monitoring
 
 ```bash
-./orca web                                     # Open real-time web dashboard
-./orca progress [job_id]                       # Live progress bar with throughput and queue depth
-./orca status                                  # List all jobs
-./orca metrics <job_id> [-w]                   # Latest vLLM metrics snapshot (--watch for 2s refresh)
-./orca metrics <job_id> --replica <rid>        # Per-replica metrics
-./orca metrics <job_id> --compare              # Aggregated + per-replica side by side
-./orca stream <job_id>                         # Stream live metrics table (1 event/sec via SSE)
-./orca logs [cluster]                          # Stream logs from a SkyPilot cluster
-./orca clusters                                # Show active clusters
+tandemn web                                     # Open real-time web dashboard
+tandemn progress [job_id]                       # Live progress bar with throughput and queue depth
+tandemn status                                  # List all jobs
+tandemn metrics <job_id> [-w]                   # Latest vLLM metrics snapshot (--watch for 2s refresh)
+tandemn metrics <job_id> --replica <rid>        # Per-replica metrics
+tandemn metrics <job_id> --compare              # Aggregated + per-replica side by side
+tandemn stream <job_id>                         # Stream live metrics table (1 event/sec via SSE)
+tandemn logs [cluster]                          # Stream logs from a SkyPilot cluster
+tandemn clusters                                # Show active clusters
 ```
 
-**Web dashboard** (`./orca web`) provides a real-time single-page UI including:
+**Web dashboard** (`tandemn web`) provides a real-time single-page UI including:
 
 - **Workload panel** — model, prompts, status, chunk progress
 - **Chain visualization** — SVG replica nodes with phase colors and animated data flow
@@ -268,15 +276,15 @@ Zero chunks are lost during a swap.
 - **Event log** — job status changes, chunk milestones, replica phase transitions
 - **Charts** (toggle) — throughput, KV cache, scheduler, GPU utilization, latency, and completions with linked crosshairs
 
-The dashboard uses SSE for real-time updates with automatic polling fallback for environments that buffer SSE (e.g., Cloudflare tunnels). Panels are resizable via drag splitters.
+The dashboard uses SSE for real-time updates with automatic polling fallback for environments that buffer SSE. Panels are resizable via drag splitters.
 
 ---
 
 ### Operations
 
 ```bash
-./orca destroy <job_id>     # Tear down clusters and Redis state for a job
-./orca destroy --all        # Tear down ALL `orca` clusters
+tandemn destroy <job_id>     # Tear down clusters and Redis state for a job
+tandemn destroy --all        # Tear down ALL `tandemn` clusters
 ```
 
 Clusters are destroyed by default after job completion. Use `--persist` to keep them alive.
@@ -286,38 +294,37 @@ Clusters are destroyed by default after job completion. Use `--persist` to keep 
 ### Analytics
 
 ```bash
-./orca history [--model X] [--gpu Y]    # Browse completed runs
-./orca inspect <run_id>                 # Full run report: latency, throughput, cost, GPU utilization
-./orca inspect <run_id> --replicas      # Per-replica summaries side by side
-./orca timeseries <run_id>              # Scheduler timeseries for a completed run
+tandemn history [--model X] [--gpu Y]    # Browse completed runs
+tandemn inspect <run_id>                 # Full run report: latency, throughput, cost, GPU utilization
+tandemn inspect <run_id> --replicas      # Per-replica summaries side by side
+tandemn timeseries <run_id>              # Scheduler timeseries for a completed run
 ```
 
 ---
 
 ## Security
 
-The Tandemn System control plane accepts connections from EC2 replicas over the network. In local development with a Cloudflare tunnel, this means your endpoint is publicly reachable. **We strongly recommend setting an API key in all environments.**
+The Tandemn System control plane accepts connections from EC2 replicas over the network. When exposed via a tunnel or public URL, your endpoint is publicly reachable. **We strongly recommend setting an API key in all environments.**
 
 ### API Key Authentication
 
-Set `ORCA_API_KEY` in your `.env`:
+Set `TD_API_KEY` in your `.env`:
 
 ```bash
-ORCA_API_KEY=your-secret-key
+TD_API_KEY=your-secret-key
 ```
 
 All replica-to-server communication will require this token. The key is distributed to replicas automatically at launch.
 
-### Tunnel Options
+### Network Access Options
 
-| Option | Use case |
-|--------|----------|
-| `python server.py --tunnel` | Local development; ephemeral URL via Cloudflare (no account required) |
-| Manual Cloudflare tunnel | Persistent or custom URL |
-| Tailscale | Stable mesh VPN; recommended for teams |
-| Same-VPC EC2 | Production; no public exposure |
+| Option                  | Use case                                               |
+| ----------------------- | ------------------------------------------------------ |
+| Cloudflare Quick Tunnel | Local development; ephemeral URL (no account required) |
+| Tailscale               | Stable mesh VPN; recommended for teams                 |
+| Same-VPC EC2            | Production; no public exposure                         |
 
-**Manual Cloudflare tunnel:**
+**Cloudflare Quick Tunnel:**
 
 ```bash
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
@@ -325,10 +332,10 @@ chmod +x cloudflared
 ./cloudflared tunnel --url http://localhost:26336
 ```
 
-Then set in `.env`:
+Then pass the resulting URL via `--url` or set it in `.env`:
 
 ```bash
-ORCA_SERVER_URL=https://your-tunnel.trycloudflare.com
+TD_SERVER_URL=https://your-tunnel.trycloudflare.com
 ```
 
 **Production recommendation:** Deploy the control plane on a small EC2 instance in the same VPC as your inference replicas. This avoids public exposure entirely and eliminates tunnel latency.
@@ -338,7 +345,7 @@ ORCA_SERVER_URL=https://your-tunnel.trycloudflare.com
 ## Architecture
 
 ```bash
-$ ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
+$ tandemn deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
 
                                  ┌──────────────────────────────────────┐
                                  │             Control Plane            │
@@ -381,7 +388,7 @@ $ ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
 
 **Chunked multi-replica execution.** Input is split into chunks (default: 1,000 lines each) and queued in Redis. Independent replicas pull chunks, process them via vLLM, and upload outputs to S3. Lease-based fault tolerance ensures that if a replica dies, its in-flight chunks are reclaimed and re-queued within 45 seconds via a ReplicaWatchdog heartbeat.
 
-**Hot-swap.** `orca swap` launches replacement replicas with a different GPU/TP/PP configuration on the same Redis queue. Old replicas are torn down only after the new replicas begin processing. Zero chunks are lost.
+**Hot-swap.** `tandemn swap` launches replacement replicas with a different GPU/TP/PP configuration on the same Redis queue. Old replicas are torn down only after the new replicas begin processing. Zero chunks are lost.
 
 **Quota tracking.** Real-time GPU quota usage is tracked across AWS regions. Tandemn System will not attempt to launch where you have insufficient capacity.
 
@@ -394,18 +401,27 @@ $ ./orca deploy Qwen/Qwen2.5-72B batch.jsonl --slo 4 --replicas 2
 Standard OpenAI batch JSONL format:
 
 ```json
-{"custom_id": "req-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "placeholder", "messages": [{"role": "user", "content": "Your prompt here"}], "max_tokens": 256}}
+{
+  "custom_id": "req-1",
+  "method": "POST",
+  "url": "/v1/chat/completions",
+  "body": {
+    "model": "placeholder",
+    "messages": [{ "role": "user", "content": "Your prompt here" }],
+    "max_tokens": 256
+  }
+}
 ```
 
 Local files are uploaded to S3 automatically. S3 URIs (`s3://...`) are passed through directly.
 
 **Sample workloads** are included in `examples/workloads/`:
 
-| File | Size | Purpose |
-|------|------|---------|
-| `demo_batch.jsonl` | 30 requests | Quick smoke test |
-| `sharegpt-numreq_200-*.jsonl` | 200 requests | Realistic ShareGPT conversations |
-| `stress_5000.jsonl` | 5,000 requests | Load and stress testing |
+| File                          | Size           | Purpose                          |
+| ----------------------------- | -------------- | -------------------------------- |
+| `demo_batch.jsonl`            | 30 requests    | Quick smoke test                 |
+| `sharegpt-numreq_200-*.jsonl` | 200 requests   | Realistic ShareGPT conversations |
+| `stress_5000.jsonl`           | 5,000 requests | Load and stress testing          |
 
 Generate larger workloads:
 
@@ -423,41 +439,41 @@ The control plane exposes a REST API at `http://localhost:26336`.
 
 ### Endpoint Reference
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| **Jobs** | | |
-| `/submit/batch` | POST | Submit a batch inference job |
-| `/test/placement` | POST | Run solver only (no launch) |
-| `/jobs` | GET | List all jobs |
-| `/job/{id}` | GET | Job status and progress |
-| `/job/{id}/phase` | POST | Update job lifecycle phase |
-| **Metrics** | | |
-| `/job/{id}/metrics` | GET | Latest aggregated metrics snapshot |
-| `/job/{id}/metrics/stream` | GET | SSE metrics stream |
-| `/job/{id}/metrics/ingest` | POST | Sidecar metrics ingest (replica → server) |
-| `/job/{id}/metrics/summary` | POST | Per-replica build_metrics summary |
-| `/job/{id}/throughput` | GET | Sustained throughput (rolling window) |
-| **Replicas** | | |
-| `/job/{id}/replicas` | GET | Per-replica state (phase, region, metrics) |
-| `/job/{id}/replicas/{rid}/metrics` | GET | Metrics for a specific replica |
-| `/job/{id}/replicas/summaries` | GET | Per-replica completion summaries |
-| `/job/{id}/scale` | POST | Add replicas to a running job |
-| `/job/{id}/kill` | POST | Kill specific replicas |
-| `/job/{id}/swap` | POST | Hot-swap replicas to new GPU config |
-| **Chunks** | | |
-| `/job/{id}/chunks/progress` | GET | Chunk-level progress (pending/inflight/completed/failed) |
-| `/job/{id}/chunks/pull` | POST | Pull next chunk (replica-facing) |
-| `/job/{id}/chunks/complete` | POST | Mark chunk completed |
-| `/job/{id}/chunks/renew` | POST | Renew chunk lease |
-| **Dashboard** | | |
-| `/dashboard` | GET | Web dashboard (HTML) |
-| `/dashboard/poll` | GET | Dashboard data (JSON, polling fallback) |
-| `/dashboard/stream` | GET | Dashboard data (SSE, real-time) |
-| **Analytics** | | |
-| `/analytics/runs` | GET | List completed runs |
-| `/analytics/runs/{id}` | GET | Full run report |
-| `/analytics/runs/{id}/timeseries` | GET | Scheduler timeseries |
-| `/quota/status` | GET | Quota usage across regions |
+| Endpoint                           | Method | Description                                              |
+| ---------------------------------- | ------ | -------------------------------------------------------- |
+| **Jobs**                           |        |                                                          |
+| `/submit/batch`                    | POST   | Submit a batch inference job                             |
+| `/test/placement`                  | POST   | Run solver only (no launch)                              |
+| `/jobs`                            | GET    | List all jobs                                            |
+| `/job/{id}`                        | GET    | Job status and progress                                  |
+| `/job/{id}/phase`                  | POST   | Update job lifecycle phase                               |
+| **Metrics**                        |        |                                                          |
+| `/job/{id}/metrics`                | GET    | Latest aggregated metrics snapshot                       |
+| `/job/{id}/metrics/stream`         | GET    | SSE metrics stream                                       |
+| `/job/{id}/metrics/ingest`         | POST   | Sidecar metrics ingest (replica → server)                |
+| `/job/{id}/metrics/summary`        | POST   | Per-replica build_metrics summary                        |
+| `/job/{id}/throughput`             | GET    | Sustained throughput (rolling window)                    |
+| **Replicas**                       |        |                                                          |
+| `/job/{id}/replicas`               | GET    | Per-replica state (phase, region, metrics)               |
+| `/job/{id}/replicas/{rid}/metrics` | GET    | Metrics for a specific replica                           |
+| `/job/{id}/replicas/summaries`     | GET    | Per-replica completion summaries                         |
+| `/job/{id}/scale`                  | POST   | Add replicas to a running job                            |
+| `/job/{id}/kill`                   | POST   | Kill specific replicas                                   |
+| `/job/{id}/swap`                   | POST   | Hot-swap replicas to new GPU config                      |
+| **Chunks**                         |        |                                                          |
+| `/job/{id}/chunks/progress`        | GET    | Chunk-level progress (pending/inflight/completed/failed) |
+| `/job/{id}/chunks/pull`            | POST   | Pull next chunk (replica-facing)                         |
+| `/job/{id}/chunks/complete`        | POST   | Mark chunk completed                                     |
+| `/job/{id}/chunks/renew`           | POST   | Renew chunk lease                                        |
+| **Dashboard**                      |        |                                                          |
+| `/dashboard`                       | GET    | Web dashboard (HTML)                                     |
+| `/dashboard/poll`                  | GET    | Dashboard data (JSON, polling fallback)                  |
+| `/dashboard/stream`                | GET    | Dashboard data (SSE, real-time)                          |
+| **Analytics**                      |        |                                                          |
+| `/analytics/runs`                  | GET    | List completed runs                                      |
+| `/analytics/runs/{id}`             | GET    | Full run report                                          |
+| `/analytics/runs/{id}/timeseries`  | GET    | Scheduler timeseries                                     |
+| `/quota/status`                    | GET    | Quota usage across regions                               |
 
 ---
 
@@ -488,6 +504,7 @@ The control plane exposes a REST API at `http://localhost:26336`.
   "tpot_ms_p95": 15.0
 }
 ```
+
 </details>
 
 <details>
@@ -509,6 +526,7 @@ The control plane exposes a REST API at `http://localhost:26336`.
 ```
 
 Replica phases: `launching` → `running` → `completed` | `failed` | `killed` | `swapped_out`
+
 </details>
 
 <details>
@@ -524,12 +542,14 @@ Replica phases: `launching` → `running` → `completed` | `failed` | `killed` 
   "all_done": false
 }
 ```
+
 </details>
 
 <details>
 <summary><strong>POST /job/{id}/scale</strong> — Add replicas to a running job</summary>
 
 **Request:**
+
 ```json
 {
   "count": 2,
@@ -544,6 +564,7 @@ Replica phases: `launching` → `running` → `completed` | `failed` | `killed` 
 `gpu_type`, `tp_size`, and `pp_size` are optional — inherited from the existing job if omitted.
 
 **Response:**
+
 ```json
 {
   "status": "scaling",
@@ -551,12 +572,14 @@ Replica phases: `launching` → `running` → `completed` | `failed` | `killed` 
   "version": 2
 }
 ```
+
 </details>
 
 <details>
 <summary><strong>POST /job/{id}/kill</strong> — Kill specific replicas</summary>
 
 **Request:**
+
 ```json
 {
   "replica_ids": ["mo-qwen7b-a1b2-r0"]
@@ -564,6 +587,7 @@ Replica phases: `launching` → `running` → `completed` | `failed` | `killed` 
 ```
 
 **Response:**
+
 ```json
 {
   "status": "killing",
@@ -574,12 +598,14 @@ Replica phases: `launching` → `running` → `completed` | `failed` | `killed` 
 ```
 
 In-flight chunks are reclaimed to the pending queue. Clusters tear down in the background.
+
 </details>
 
 <details>
 <summary><strong>POST /job/{id}/swap</strong> — Hot-swap replicas</summary>
 
 **Request:**
+
 ```json
 {
   "gpu_type": "H100",
@@ -591,6 +617,7 @@ In-flight chunks are reclaimed to the pending queue. Clusters tear down in the b
 ```
 
 **Response:**
+
 ```json
 {
   "status": "swapping",
@@ -602,6 +629,7 @@ In-flight chunks are reclaimed to the pending queue. Clusters tear down in the b
 ```
 
 New replicas launch first. Old replicas are killed after `ready_threshold` new replicas start inferring.
+
 </details>
 
 <details>
@@ -609,22 +637,48 @@ New replicas launch first. Old replicas are killed after `ready_threshold` new r
 
 ```json
 {
-  "jobs": [{ "job_id": "...", "status": "...", "model_name": "...", "progress": 0.5 }],
+  "jobs": [
+    { "job_id": "...", "status": "...", "model_name": "...", "progress": 0.5 }
+  ],
   "metrics": { "job_id": { "avg_generation_throughput_toks_per_s": 1450.5 } },
   "chunks": { "job_id": { "total": 10, "completed": 5, "inflight": 2 } },
-  "replicas": { "job_id": [{ "replica_id": "...", "phase": "running", "region": "us-east-2" }] },
-  "cost": { "job_id": { "accrued_usd": 0.15, "projected_total_usd": 0.43, "eta_sec": 2482 } },
+  "replicas": {
+    "job_id": [
+      { "replica_id": "...", "phase": "running", "region": "us-east-2" }
+    ]
+  },
+  "cost": {
+    "job_id": {
+      "accrued_usd": 0.15,
+      "projected_total_usd": 0.43,
+      "eta_sec": 2482
+    }
+  },
   "events": [{ "ts": 1711612800.0, "level": "info", "message": "..." }],
-  "timeseries": { "job_id": [{ "timestamp": "...", "avg_generation_throughput_toks_per_s": "..." }] },
-  "quota": [{ "Region": "us-east-2", "Family": "G", "Market": "spot", "Used": 4, "Baseline": 128 }]
+  "timeseries": {
+    "job_id": [
+      { "timestamp": "...", "avg_generation_throughput_toks_per_s": "..." }
+    ]
+  },
+  "quota": [
+    {
+      "Region": "us-east-2",
+      "Family": "G",
+      "Market": "spot",
+      "Used": 4,
+      "Baseline": 128
+    }
+  ]
 }
 ```
+
 </details>
 
 <details>
 <summary><strong>GET /resources</strong> — Instance catalog + quota pools</summary>
 
 **Response:**
+
 ```json
 {
   "vpc_id": "orca-cluster",
@@ -652,6 +706,7 @@ New replicas launch first. Old replicas are killed after `ready_threshold` new r
   ]
 }
 ```
+
 - **instances**: Multi-GPU instance types with GPU specs and SkyPilot pricing.
 - **quotas**: Raw per-(family, region, market) vCPU limits from AWS. The advisor's Oracle joins instances to quotas via `quota_family` to compute how many instances of each type can be launched.
 </details>
@@ -668,7 +723,7 @@ See [ROADMAP.md](ROADMAP.md) for planned features and known limitations.
 
 Tandemn System is developed and maintained by [Tandemn Labs](https://tandemn.com).
 
-For bugs and feature requests, open an issue on [GitHub](https://github.com/Tandemn-Labs/Tandemn-orca/issues). For enterprise inquiries or support agreements, contact us directly at admin@tandemn.com.
+For bugs and feature requests, open an issue on [GitHub](https://github.com/Tandemn-Labs/Tandemn-server/issues). For enterprise inquiries or support agreements, contact us directly at admin@tandemn.com.
 
 ---
 

@@ -37,7 +37,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 CHUNK_SIZE_BYTES = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024
 
 # Control plane URL reachable from EC2 clusters (empty = local dev, sidecar disabled)
-ORCA_SERVER_URL = os.getenv("ORCA_SERVER_URL", "")
+TD_SERVER_URL = os.getenv("TD_SERVER_URL", "")
 ORCA_API_KEY    = os.getenv("ORCA_API_KEY", "")
 
 # Redis (for chunked distributed batch)

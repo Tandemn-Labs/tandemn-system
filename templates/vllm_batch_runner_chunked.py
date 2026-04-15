@@ -50,7 +50,7 @@ SIDECAR_INTERVAL_SEC = 5
 PROGRESS_FILE = "/tmp/vllm_progress.json"
 
 # Control plane config
-ORCA_URL = os.getenv("ORCA_SERVER_URL", "")
+ORCA_URL = os.getenv("TD_SERVER_URL", "")
 ORCA_KEY = os.getenv("ORCA_API_KEY", "")
 JOB_ID = os.getenv("JOB_ID", "")
 REPLICA_ID = os.getenv("REPLICA_ID", "")
