@@ -486,10 +486,9 @@ class RooflineAWSAllocation(VPCMagic):
         )
         logger.info(f"  Max context: {result.max_supported_context} tokens")
 
-        # Convert to MagicOutput
-        # Note: solver's num_instances is TOTAL nodes (already includes PP stages)
-        # replicas = num_instances / pp_stages = number of data-parallel pipeline replicas
-        # num_nodes = num_instances * replicas (solver computes instances_needed correctly)
+        # Convert to MagicOutput.
+        # num_instances is the solver-selected node count for the chosen topology.
+        # That count may already include PP packing on larger fixed-size nodes.
         data_parallel_replicas = max(1, result.num_instances // result.pp_stages)
         return MagicOutput(
             decision_id=_make_job_id(req.model_name),

@@ -406,11 +406,9 @@ class TestProvisionedPhase:
 
 class TestPPValidation:
     def test_pp_exceeds_num_nodes_raises(self):
-        """PP=2 with num_nodes=1 should be caught before sky.launch, not crash vLLM."""
-        import asyncio
+        """PP must span enough nodes when only one PP stage fits per node."""
         from models.resources import MagicOutput
-        from models.requests import BatchedRequest
-        from orca_server.launcher import _launch_chunked_replica
+        from orca_server.launcher import _validate_parallelism_topology
 
         config = MagicOutput(
             decision_id="test-r0", engine="vllm",
@@ -418,33 +416,35 @@ class TestPPValidation:
             tp_size=4, pp_size=2,
             replicas=1, num_instances=1,  # 1 node but PP=2 needs 2
         )
-        request = BatchedRequest(
-            user_id="test", model_name="test-model",
-            input_file="s3://b/in.jsonl", output_file="out.jsonl",
-            description="test", task_type="batch", task_priority="normal",
-            engine="vllm", slo_mode="cost_first", placement="user_specified",
-            avg_output_tokens=1024,
-        )
         with pytest.raises(ValueError, match="PP=2 requires 2 nodes but config has 1"):
-            asyncio.run(
-                _launch_chunked_replica(
-                    request, config, "test-r0",
-                    parent_job_id="test-job",
-                    job_dirname="test",
-                )
-            )
+            _validate_parallelism_topology(config)
 
-    def test_pp1_single_node_ok(self):
-        """PP=1 with num_nodes=1 should NOT raise (validation passes)."""
+    def test_packed_pp_single_node_ok(self):
+        """Multiple PP stages may pack onto one 8-GPU node when TP is smaller."""
         from models.resources import MagicOutput
+        from orca_server.launcher import _validate_parallelism_topology
+
         config = MagicOutput(
             decision_id="test-r0", engine="vllm",
-            instance_type="g6e.12xlarge",
-            tp_size=4, pp_size=1,
+            instance_type="p4d.24xlarge",
+            tp_size=2, pp_size=4,
             replicas=1, num_instances=1,
         )
-        # No error expected for PP=1, just verify the condition
-        assert not (config.pp_size > 1 and config.num_nodes < config.pp_size)
+        _validate_parallelism_topology(config)
+
+    def test_tp_cannot_span_nodes(self):
+        """TP must fit within the GPU count of a single node."""
+        from models.resources import MagicOutput
+        from orca_server.launcher import _validate_parallelism_topology
+
+        config = MagicOutput(
+            decision_id="test-r0", engine="vllm",
+            instance_type="g5.xlarge",
+            tp_size=2, pp_size=1,
+            replicas=1, num_instances=2,
+        )
+        with pytest.raises(ValueError, match="TP=2 requires at least 2 GPUs per node"):
+            _validate_parallelism_topology(config)
 
 
 # ---------------------------------------------------------------------------
