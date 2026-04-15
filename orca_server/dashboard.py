@@ -34,6 +34,7 @@ _prev_chunk_progress: dict[str, dict] = {}
 _prev_replica_phases: dict[str, dict[str, str]] = {}
 
 ACTIVE_PHASES = {"launching", "loading_model", "model_ready", "generating", "running"}
+TERMINAL_REPLICA_PHASES = {"completed", "failed", "dead", "killed", "swapped_out"}
 
 
 def _get_cached_price(instance_type: str, region: str, market: str) -> float | None:
@@ -236,17 +237,23 @@ def _build_dashboard_payload(app_state) -> dict:
                 total_hours = 0.0
                 num_running = 0
                 try:
-                    if cluster_mgr:
+                    if cluster_mgr and rec.status in ACTIVE_PHASES:
                         for _rid, rs in cluster_mgr.get_replica_states(job_id).items():
-                            rs_since = rs.get("running_since")
-                            if rs_since and rs.get("phase") in ACTIVE_PHASES:
-                                total_hours += (now - rs_since) / 3600
-                                num_running += 1
+                            if rs.get("phase") in TERMINAL_REPLICA_PHASES:
+                                continue
+                            start_ts = (
+                                rs.get("launched_at")
+                                or rs.get("running_since")
+                                or rec.state.submitted_at
+                            )
+                            elapsed_hours = max(0.0, now - start_ts) / 3600
+                            total_hours += elapsed_hours * max(1, rs.get("num_instances") or 1)
+                            num_running += 1
                 except Exception:
                     pass
                 if total_hours == 0 and rec.status in ACTIVE_PHASES:
-                    total_hours = (now - rec.state.submitted_at) / 3600
                     num_running = getattr(rec, "num_replicas", 1) or 1
+                    total_hours = (now - rec.state.submitted_at) / 3600 * num_running
                 accrued = price * total_hours
                 progress = _enriched_progress.get(job_id, rec.state.progress_frac)
                 projected = accrued / progress if progress > 0.01 else None
