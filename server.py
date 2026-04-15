@@ -1194,15 +1194,6 @@ def _do_scale(job_id: str, count: int, gpu_type: str, tp_size: int, pp_size: int
     if not instance_type:
         instance_type, _ = resolve_gpu_type_to_instance(gpu_type, tp_size)
 
-    # Generate versioned replica names
-    version = cm.next_swap_version(job_id)
-    new_replicas = [f"{job_id}-v{version}-r{i}" for i in range(count)]
-
-    # Pre-register
-    for rid in new_replicas:
-        cm.set_replica_state(job_id, rid, phase="launching")
-        cm.register_for_job(job_id, rid)
-
     # Build config
     new_config = MagicOutput(
         decision_id=job_id,
@@ -1213,6 +1204,24 @@ def _do_scale(job_id: str, count: int, gpu_type: str, tp_size: int, pp_size: int
         replicas=count,
         num_instances=pp_size,
     )
+
+    # Generate versioned replica names
+    version = cm.next_swap_version(job_id)
+    new_replicas = [f"{job_id}-v{version}-r{i}" for i in range(count)]
+
+    # Pre-register
+    for rid in new_replicas:
+        cm.set_replica_state(
+            job_id,
+            rid,
+            phase="launching",
+            launched_at=time.time(),
+            instance_type=instance_type,
+            tp=tp_size,
+            pp=pp_size,
+            num_instances=new_config.num_nodes,
+        )
+        cm.register_for_job(job_id, rid)
 
     # Build BatchedRequest from job metadata
     meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")

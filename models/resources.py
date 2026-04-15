@@ -23,10 +23,12 @@ class MagicOutput(BaseModel):
 
     @property
     def num_nodes(self) -> int:
-        """SkyPilot nodes needed per replica.
-        TP stays intra-node, PP crosses node boundaries.
-        Uses solver's num_instances when available (accounts for multi-PP-per-node
-        on fixed-size instances like p4d.24xlarge where gpus > tp_degree)."""
+        """Configured node count for this launch topology.
+
+        TP is assumed to stay within a node. PP may either span nodes or pack
+        multiple stages onto one node when an instance has more GPUs than TP
+        requires (for example TP=2, PP=4 on an 8-GPU p4d).
+        """
         if self.num_instances is not None:
             return self.num_instances
         return self.pp_size

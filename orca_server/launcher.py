@@ -52,6 +52,33 @@ def _needs_efa(instance_type: str) -> bool:
     return any(instance_type.startswith(p) for p in EFA_PREFIXES)
 
 
+def _validate_parallelism_topology(config: MagicOutput) -> None:
+    """Validate that TP stays intra-node and PP fits across the configured nodes."""
+    instance_info = _cfg.AWS_INSTANCES.get(config.instance_type)
+    if instance_info is None:
+        logger.warning(
+            "[Topology] Unknown instance type %s; skipping TP/PP validation",
+            config.instance_type,
+        )
+        return
+
+    _gpu_name, gpus_per_node, _vcpus, _vram_gb = instance_info
+    if config.tp_size > gpus_per_node:
+        raise ValueError(
+            f"TP={config.tp_size} requires at least {config.tp_size} GPUs per node, "
+            f"but {config.instance_type} only has {gpus_per_node}."
+        )
+
+    stages_per_node = max(1, gpus_per_node // config.tp_size)
+    min_nodes = (config.pp_size + stages_per_node - 1) // stages_per_node
+    if config.num_nodes < min_nodes:
+        raise ValueError(
+            f"PP={config.pp_size} requires {min_nodes} nodes but config has {config.num_nodes}. "
+            f"Instance {config.instance_type} with TP={config.tp_size} fits "
+            f"{stages_per_node} PP stages per node ({gpus_per_node} GPUs/node)."
+        )
+
+
 def _post_koi_webhook(path: str, payload: dict, event: str) -> None:
     """Best-effort Koi callback with warning-level visibility on failures."""
     try:
@@ -314,6 +341,7 @@ async def sp_launch_vllm_batch(
             job_logger.info(f"[S3] Verified model exists at {s3_model_path}")
 
     hf_token = request.hf_token or HF_TOKEN or ""
+    _validate_parallelism_topology(config)
     num_nodes = config.num_nodes
 
     # Select per-config template or fall back to generic
@@ -711,7 +739,7 @@ async def launch_chunked_replicas(
     # Pre-register all replicas as "launching"
     for i in range(num_replicas):
         rid = f"{parent_job_id}-r{i}"
-        cm.set_replica_state(parent_job_id, rid, phase="launching")
+        cm.set_replica_state(parent_job_id, rid, phase="launching", launched_at=time.time())
         cm.register_for_job(parent_job_id, rid)
 
     def _launch_replica_thread(i):
@@ -725,6 +753,17 @@ async def launch_chunked_replicas(
                 "replicas": 1,
                 "num_instances": cfg.num_nodes,
             })
+            cm.set_replica_state(
+                parent_job_id,
+                replica_id,
+                phase="launching",
+                launched_at=time.time(),
+                instance_type=cfg.instance_type,
+                tp=cfg.tp_size,
+                pp=cfg.pp_size,
+                num_instances=cfg.num_nodes,
+                config_index=j,
+            )
             job_logger.info(
                 f"[Chunked] Replica {i} trying config {j + 1}/{len(configs)}: "
                 f"{cfg.instance_type} TP={cfg.tp_size} PP={cfg.pp_size}"
@@ -826,14 +865,8 @@ async def _launch_chunked_replica(
     from pathlib import Path
 
     hf_token = request.hf_token or HF_TOKEN or ""
+    _validate_parallelism_topology(config)
     num_nodes = config.num_nodes
-
-    # Validate: PP requires enough nodes (catches broken fallback configs early)
-    if config.pp_size > 1 and num_nodes < config.pp_size:
-        raise ValueError(
-            f"PP={config.pp_size} requires {config.pp_size} nodes but config has {num_nodes}. "
-            f"Instance {config.instance_type} with TP={config.tp_size} cannot satisfy this."
-        )
 
     # Get quota-aware ordered regions
     instance_family = get_instance_family(config.instance_type)
@@ -941,12 +974,15 @@ async def _launch_chunked_replica(
             )
 
         cm = get_cluster_manager()
+        current_state = cm.get_replica_states(parent_job_id).get(replica_id, {})
         cm.register(replica_id, parent_job_id,
                     region=actual_region, market=actual_market,
                     instance_type=config.instance_type, num_instances=num_nodes)
         cm.set_replica_state(parent_job_id, replica_id,
                              phase="provisioned", region=actual_region,
                              market=actual_market, instance_type=config.instance_type,
+                             launched_at=current_state.get("launched_at", _launch_start),
+                             num_instances=num_nodes,
                              koi_webhook_info=koi_webhook_info,
                              tp=config.tp_size, pp=config.pp_size,
                              config_index=config_index)
@@ -1084,6 +1120,7 @@ async def _launch_chunked_replica(
 
 async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutput):
     """Launch persistent vllm online deployment"""
+    _validate_parallelism_topology(config)
     replace_run_dict = replace_run_vllm_online(request, config)
     run_string = update_template("templates/vllm_run_online", replace_run_dict)
 
