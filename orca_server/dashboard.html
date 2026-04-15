@@ -423,7 +423,8 @@ button,input,textarea,select{font:inherit}
   overflow-x:auto;
   border:1px solid var(--line);
   border-radius:var(--radius-12);
-  background:var(--surface);
+  background:#fbfbf9;
+  box-shadow:0 14px 36px rgba(17,17,17,.04);
 }
 .replica-tbl{
   width:100%;
@@ -901,6 +902,9 @@ button,input,textarea,select{font:inherit}
   font-size:.8rem;
   color:var(--muted);
 }
+.quota-item.inactive{
+  opacity:.38;
+}
 .event-row{
   display:grid;
   grid-template-columns:4.5rem 1fr;
@@ -1043,6 +1047,116 @@ button,input,textarea,select{font:inherit}
   }
   .header-run-meta{justify-items:start;text-align:left;white-space:normal}
 }
+
+.projects-page{
+  min-height:100vh;
+  padding:48px 24px;
+}
+.projects-inner{
+  max-width:1480px;
+  margin:0 auto;
+}
+.projects-header{
+  margin-bottom:48px;
+}
+.projects-title{
+  font-size:clamp(2.2rem,5vw,3.2rem);
+  font-weight:700;
+  letter-spacing:-.06em;
+  line-height:1;
+  color:var(--text);
+}
+.projects-subtitle{
+  margin-top:14px;
+  font-size:1.02rem;
+  line-height:1.6;
+  color:var(--muted);
+  max-width:560px;
+}
+.projects-grid{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:18px;
+}
+.project-card{
+  position:relative;
+  padding:32px;
+  border:1px solid var(--line);
+  border-radius:var(--radius-12);
+  background:#fbfbf9;
+  box-shadow:0 14px 36px rgba(17,17,17,.04);
+  display:flex;
+  flex-direction:column;
+  gap:20px;
+  min-height:320px;
+  transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease;
+}
+.project-card.clickable{
+  cursor:pointer;
+}
+.project-card.clickable:hover{
+  border-color:#c8c6c0;
+}
+.project-card.disabled{
+  opacity:.45;
+  pointer-events:none;
+}
+.project-card-status{
+  font-size:.72rem;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  color:var(--muted);
+}
+.project-card-name{
+  font-size:1.35rem;
+  font-weight:700;
+  letter-spacing:-.04em;
+  line-height:1.15;
+  color:var(--text);
+}
+.project-card-desc{
+  font-size:.88rem;
+  line-height:1.55;
+  color:var(--muted);
+  flex:1;
+}
+.project-card-footer{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  margin-top:auto;
+}
+.project-card-jobs{
+  font-size:.82rem;
+  color:var(--muted);
+}
+.project-card-arrow{
+  font-size:1.1rem;
+  color:var(--muted);
+}
+.dashboard-back{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:0;
+  border:0;
+  background:transparent;
+  color:var(--muted);
+  font-size:.82rem;
+  font-weight:500;
+  cursor:pointer;
+  transition:color .15s ease;
+}
+.dashboard-back:hover{
+  color:var(--text);
+}
+@media (max-width:900px){
+  .projects-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:600px){
+  .projects-page{padding:32px 16px}
+  .projects-grid{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
@@ -1061,6 +1175,7 @@ const chartHeight = 220;
 const chartWidth = 420;
 const chartPadding = { top: 14, right: 14, bottom: 20, left: 14 };
 const state = {
+  view: "projects",
   activeJobId: null,
   activeChartKey: "throughput",
   activeReplicaId: null,
@@ -1447,8 +1562,32 @@ function renderJobRow(job, jobs) {
     + '</div>';
 }
 
+function renderProjectsPage() {
+  const projects = [
+    { id: "content-moderation", name: "Content Moderation Pipeline", desc: "Classifies user-generated content across trust and safety categories at ingest time.", status: "Active", jobs: 2, replicas: 2 },
+    { id: "search-reranking", name: "Search Reranking", desc: "Second-pass reranker that scores candidate results before serving to improve relevance.", status: "Paused", jobs: 1, replicas: 0 },
+    { id: "customer-support", name: "Support Ticket Routing", desc: "Triages inbound support tickets and routes them to the appropriate team based on intent.", status: "Idle", jobs: 0, replicas: 0 }
+  ];
+  const cards = projects.map(function(p, i) {
+    const clickable = i === 0;
+    return '<div class="project-card' + (clickable ? ' clickable' : ' disabled') + '"' + (clickable ? ' data-project="' + esc(p.id) + '"' : '') + '>'
+      + '<div class="project-card-status">' + esc(p.status) + '</div>'
+      + '<div class="project-card-name">' + esc(p.name) + '</div>'
+      + '<div class="project-card-desc">' + esc(p.desc) + '</div>'
+      + '<div class="project-card-footer">'
+      + '<span class="project-card-jobs">' + p.jobs + ' job' + (p.jobs !== 1 ? 's' : '') + '</span>'
+      + '<span class="project-card-arrow">\u2192</span>'
+      + '</div>'
+      + '</div>';
+  }).join("");
+  return '<div class="projects-page"><div class="projects-inner">'
+    + '<div class="projects-header"><div class="projects-title">Projects</div><div class="projects-subtitle">Select a project to view its deployment dashboard, job status, and infrastructure details.</div></div>'
+    + '<div class="projects-grid">' + cards + '</div>'
+    + '</div></div>';
+}
+
 function renderStickyHeader(job, jobs, chain, metricsSummary) {
-  return '<header class="app-header-bar">' + renderJobRow(job, jobs) + '</header>';
+  return '<header class="app-header-bar" style="align-items:flex-end"><div style="display:flex;flex-direction:column;gap:8px;min-width:0"><button class="dashboard-back" type="button" id="back-to-projects">\u2190 Projects</button>' + renderJobRow(job, jobs) + '</div><div class="header-run-meta"><span class="header-run-updated">' + esc(fmtLastRefreshed()) + '</span></div></header>';
 }
 
 function seriesSafe(value) {
@@ -1463,11 +1602,11 @@ function renderVisualChartCard(definition, allDefinitions) {
     return '<line x1="' + chartPadding.left + '" y1="' + y + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + y + '" stroke="#e4e7df" stroke-width="1"></line>';
   }).join("");
   const paths = definition.series.map((item) => '<path d="' + buildLinePath(item.values, definition.maxY) + '" fill="none" stroke="' + item.color + '" stroke-opacity="0.24" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
-  return '<section class="bento-card chart"><div class="chart-card-head"><div><div class="bento-kicker">Performance</div><div class="chart-card-title">' + esc(definition.title) + '</div></div><div class="chart-card-controls">' + filters + '</div></div><div class="chart-legend visual">' + legend + '</div><div class="chart-panel visual"><div class="chart-wrap visual" data-chart=\'' + esc(JSON.stringify(definition)) + '\'><svg class="chart-svg" viewBox="0 0 ' + chartWidth + ' ' + chartHeight + '" preserveAspectRatio="none">' + gridLines + '<line x1="' + chartPadding.left + '" y1="' + (chartHeight - chartPadding.bottom) + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="#cfd6e4" stroke-width="1"></line>' + paths + '<g class="hover-series"></g><line class="hover-line" x1="0" y1="' + chartPadding.top + '" x2="0" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="rgba(16,20,24,.18)" stroke-dasharray="4 4" stroke-width="1" style="display:none"></line><g class="hover-points"></g><rect class="hover-hit" x="' + chartPadding.left + '" y="' + chartPadding.top + '" width="' + (chartWidth - chartPadding.left - chartPadding.right) + '" height="' + (chartHeight - chartPadding.top - chartPadding.bottom) + '" fill="transparent"></rect></svg>' + (definition.leftLabel ? '<span class="chart-axis left">' + esc(definition.leftLabel) + '</span>' : '') + (definition.rightLabel ? '<span class="chart-axis right">' + esc(definition.rightLabel) + '</span>' : '') + (definition.topTick ? '<span class="chart-top">' + esc(definition.topTick) + '</span>' : '') + '</div><div class="chart-footer"><div class="tooltip-title">Hover a point</div><div class="tooltip-rows"></div></div></div></section>';
+  return '<section class="bento-card chart"><div class="chart-card-head"><div><div class="bento-kicker">Performance</div></div><div class="chart-card-controls">' + filters + '</div></div><div class="chart-legend visual">' + legend + '</div><div class="chart-panel visual"><div class="chart-wrap visual" data-chart=\'' + esc(JSON.stringify(definition)) + '\'><svg class="chart-svg" viewBox="0 0 ' + chartWidth + ' ' + chartHeight + '" preserveAspectRatio="none">' + gridLines + '<line x1="' + chartPadding.left + '" y1="' + (chartHeight - chartPadding.bottom) + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="#cfd6e4" stroke-width="1"></line>' + paths + '<g class="hover-series"></g><line class="hover-line" x1="0" y1="' + chartPadding.top + '" x2="0" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="rgba(16,20,24,.18)" stroke-dasharray="4 4" stroke-width="1" style="display:none"></line><g class="hover-points"></g><rect class="hover-hit" x="' + chartPadding.left + '" y="' + chartPadding.top + '" width="' + (chartWidth - chartPadding.left - chartPadding.right) + '" height="' + (chartHeight - chartPadding.top - chartPadding.bottom) + '" fill="transparent"></rect></svg>' + (definition.leftLabel ? '<span class="chart-axis left">' + esc(definition.leftLabel) + '</span>' : '') + (definition.rightLabel ? '<span class="chart-axis right">' + esc(definition.rightLabel) + '</span>' : '') + (definition.topTick ? '<span class="chart-top">' + esc(definition.topTick) + '</span>' : '') + '</div><div class="chart-footer"><div class="tooltip-title">Hover a point</div><div class="tooltip-rows"></div></div></div></section>';
 }
 
 function renderChartSkeletonCard() {
-  return '<section class="bento-card chart"><div class="chart-card-head"><div><div class="bento-kicker">Performance</div><div class="chart-card-title">Throughput</div></div></div><div class="chart-panel visual"><div class="chart-empty"><div class="chart-empty-title">No data yet</div><div class="chart-empty-body">Performance metrics will appear once your deployment starts streaming data.</div></div></div></section>';
+  return '<section class="bento-card chart"><div class="chart-card-head"><div><div class="bento-kicker">Performance</div></div></div><div class="chart-panel visual"><div class="chart-empty"><div class="chart-empty-title">No data yet</div><div class="chart-empty-body">Performance metrics will appear once your deployment starts streaming data.</div></div></div></section>';
 }
 
 function renderBentoDashboard(job, jobs, workload, chain, metricsSummary, events, series, quotaRows) {
@@ -1526,23 +1665,29 @@ function renderBentoDashboard(job, jobs, workload, chain, metricsSummary, events
     + '<section class="bento-card metric"><div class="metric-label">ETA</div><div class="metric-big">' + esc(chain && chain.eta_label ? chain.eta_label : '\u2014') + '</div><div class="metric-note">Against an SLO of ' + esc(job.slo_hours != null ? job.slo_hours + 'h' : '\u2014') + '.</div></section>'
     + '<section class="bento-card metric"><div class="metric-label">Tok/s</div><div class="metric-big">' + esc(metricsSummary && metricsSummary.throughput_tok_per_s != null ? fmtNumber(metricsSummary.throughput_tok_per_s) : '\u2014') + '</div><div class="metric-note">10 second rolling generation throughput.</div></section>'
     + (function() {
-        const activeQuota = (quotaRows || []).filter((item) => (item.Used || 0) > 0);
-        activeQuota.sort((a, b) => ((b.Used || 0) / (b.Baseline || 1)) - ((a.Used || 0) / (a.Baseline || 1)));
-        const quotaItems = activeQuota.length
-          ? activeQuota.map((item) => {
+        const allQuota = (quotaRows || []).slice();
+        allQuota.sort((a, b) => {
+          const aUsed = a.Used || 0, bUsed = b.Used || 0;
+          if (bUsed > 0 && aUsed === 0) return 1;
+          if (aUsed > 0 && bUsed === 0) return -1;
+          return ((bUsed) / (b.Baseline || 1)) - ((aUsed) / (a.Baseline || 1));
+        });
+        const quotaItems = allQuota.length
+          ? allQuota.map((item) => {
               const used = item.Used || 0;
               const total = item.Baseline || 0;
               const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+              const inactive = used === 0;
               const sub = (item.GPU || 'GPU') + (item.Market ? ' \u00b7 ' + String(item.Market).replace(/_/g, ' ') : '');
-              return '<div class="quota-item">'
+              return '<div class="quota-item' + (inactive ? ' inactive' : '') + '">'
                 + '<div class="quota-item-header"><span class="quota-item-title">' + esc(item.Region || '\u2014') + '</span><span class="quota-item-count">' + used + '/' + total + '</span></div>'
                 + '<div class="quota-item-sub">' + esc(sub) + '</div>'
                 + '<div class="quota-bar-track"><div class="quota-bar-fill" style="width:' + pct + '%"></div></div>'
                 + '</div>';
             }).join("")
           : '<div class="quota-empty">No active resources</div>';
-        return '<section class="bento-card events">'
-          + '<div class="bento-kicker">Resources</div>'
+        return '<section class="bento-card events" style="display:flex;flex-direction:column">'
+          + '<div class="bento-kicker" style="flex-shrink:0">Resources</div>'
           + '<div class="quota-list" style="margin-top:16px">' + quotaItems + '</div>'
           + '</section>';
       })()
@@ -1725,6 +1870,16 @@ function installChartInteractions() {
 }
 
 function render() {
+  if (state.view === "projects") {
+    document.getElementById("app").innerHTML = renderProjectsPage();
+    document.querySelectorAll("[data-project]").forEach(function(card) {
+      card.onclick = function () {
+        state.view = "dashboard";
+        render();
+      };
+    });
+    return;
+  }
   const data = state.lastData || {};
   const jobs = getJobs(data);
   const job = getActiveJob(data);
@@ -1745,6 +1900,13 @@ function render() {
     + renderStickyHeader(job, jobs, chain || { replicas: 0, eta_label: "\u2014" }, metricsSummary || {})
     + renderBentoDashboard(job, jobs, workload, chain || { progress_pct: 0, replicas: 0, eta_label: "\u2014", replicas_detail: [] }, metricsSummary || { throughput_avg_window_s: 10 }, events, series, quotaRows)
     + '</div></div>';
+  var backBtn = document.getElementById("back-to-projects");
+  if (backBtn) {
+    backBtn.onclick = function () {
+      state.view = "projects";
+      render();
+    };
+  }
   const selectorBtn = document.getElementById("job-selector-btn");
   if (selectorBtn) {
     selectorBtn.onclick = function (e) {
