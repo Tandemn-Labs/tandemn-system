@@ -162,7 +162,10 @@ button,input,textarea,select{font:inherit}
 .chart-panel-header{display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;gap:10px;margin-bottom:18px}
 .chart-panel-title{font-size:1rem;font-weight:600;letter-spacing:-.03em}
 .chart-wrap{position:relative;padding:6px 0 0;background-image:radial-gradient(rgba(17,17,17,.08) .8px, transparent .8px);background-size:18px 18px;background-position:0 16px;background-color:transparent}
-.chart-svg{display:block;width:100%;height:auto;aspect-ratio:420 / 220}
+.chart-svg{display:block;width:100%;height:100%}
+.chart-svg path{transition:d .5s ease,opacity .3s ease}
+.chart-svg circle{transition:cx .15s ease,cy .15s ease}
+.chart-svg .hover-line{transition:x1 .15s ease,x2 .15s ease}
 .chart-axis{position:absolute;top:50%;pointer-events:none}
 .chart-axis.left{left:0;transform:translate(-24px,-50%) rotate(-90deg)}
 .chart-axis.right{right:0;transform:translate(24px,-50%) rotate(90deg)}
@@ -768,6 +771,7 @@ button,input,textarea,select{font:inherit}
   min-height:0;
   padding-top:24px;
   background-position:0 28px;
+  overflow:hidden;
 }
 .chart-skeleton{
   position:relative;
@@ -837,51 +841,61 @@ button,input,textarea,select{font:inherit}
   letter-spacing:.12em;
   color:var(--muted);
 }
-.quota-grid{
-  display:grid;
-  grid-template-columns:repeat(2,1fr);
-  gap:8px;
-  overflow-y:auto;
-  max-height:230px;
-  padding-right:2px;
-}
-.quota-grid{scrollbar-width:none}
-.quota-grid::-webkit-scrollbar{display:none}
-.quota-cell{
+.quota-list{
   display:flex;
   flex-direction:column;
-  align-items:center;
-  gap:6px;
-  padding:14px 8px 12px;
-  border:0;
-  border-radius:var(--radius-12);
-  background:transparent;
-  text-align:center;
+  gap:14px;
+  overflow-y:auto;
+  scrollbar-width:none;
+  flex:1;
+  min-height:0;
 }
-.quota-cell-title{
-  font-size:.75rem;
+.quota-list::-webkit-scrollbar{display:none}
+.quota-item{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.quota-item-header{
+  display:flex;
+  align-items:baseline;
+  justify-content:space-between;
+  gap:8px;
+}
+.quota-item-title{
+  font-size:.8rem;
   font-weight:600;
   letter-spacing:-.01em;
   color:var(--text);
-  line-height:1.25;
-  word-break:break-word;
+  line-height:1.2;
 }
-.quota-cell-sub{
+.quota-item-count{
+  font-size:.75rem;
+  font-weight:600;
+  letter-spacing:-.02em;
+  color:var(--text);
+  white-space:nowrap;
+}
+.quota-item-sub{
   font-size:.63rem;
   color:var(--muted);
   text-transform:uppercase;
   letter-spacing:.06em;
-  line-height:1.3;
 }
-.quota-cell-count{
-  font-size:.82rem;
-  font-weight:600;
-  letter-spacing:-.02em;
-  color:var(--text);
-  margin-top:2px;
+.quota-bar-track{
+  height:14px;
+  width:100%;
+  border-radius:3px;
+  background:#ebebea;
+  overflow:hidden;
+}
+.quota-bar-fill{
+  height:100%;
+  border-radius:3px;
+  background:#111111;
+  transition:width .3s ease;
 }
 .quota-empty{
-  grid-column:span 2;
   padding:24px 0;
   text-align:center;
   font-size:.8rem;
@@ -1240,10 +1254,24 @@ function chartPoint(index, pointCount, value, maxY) {
 }
 
 function buildLinePath(values, maxY) {
-  return values.map((value, index) => {
-    const point = chartPoint(index, values.length, value, maxY);
-    return (index === 0 ? "M " : "L ") + point.x.toFixed(2) + " " + point.y.toFixed(2);
-  }).join(" ");
+  if (values.length < 2) {
+    var p = chartPoint(0, values.length, values[0] || 0, maxY);
+    return "M " + p.x.toFixed(2) + " " + p.y.toFixed(2);
+  }
+  var pts = values.map(function(v, i) { return chartPoint(i, values.length, v, maxY); });
+  var d = "M " + pts[0].x.toFixed(2) + " " + pts[0].y.toFixed(2);
+  for (var i = 0; i < pts.length - 1; i++) {
+    var p0 = pts[Math.max(i - 1, 0)];
+    var p1 = pts[i];
+    var p2 = pts[i + 1];
+    var p3 = pts[Math.min(i + 2, pts.length - 1)];
+    var cp1x = p1.x + (p2.x - p0.x) / 6;
+    var cp1y = p1.y + (p2.y - p0.y) / 6;
+    var cp2x = p2.x - (p3.x - p1.x) / 6;
+    var cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += " C " + cp1x.toFixed(2) + " " + cp1y.toFixed(2) + ", " + cp2x.toFixed(2) + " " + cp2y.toFixed(2) + ", " + p2.x.toFixed(2) + " " + p2.y.toFixed(2);
+  }
+  return d;
 }
 
 function buildAreaPath(values, maxY) {
@@ -1256,13 +1284,22 @@ function buildAreaPath(values, maxY) {
 
 function buildPartialLinePath(values, maxY, endIndex) {
   if (!values.length) return "";
-  return values
-    .slice(0, Math.max(1, endIndex + 1))
-    .map((value, index) => {
-      const point = chartPoint(index, values.length, value, maxY);
-      return (index === 0 ? "M " : "L ") + point.x.toFixed(2) + " " + point.y.toFixed(2);
-    })
-    .join(" ");
+  var end = Math.max(1, endIndex + 1);
+  var pts = values.slice(0, end).map(function(v, i) { return chartPoint(i, values.length, v, maxY); });
+  if (pts.length < 2) return "M " + pts[0].x.toFixed(2) + " " + pts[0].y.toFixed(2);
+  var d = "M " + pts[0].x.toFixed(2) + " " + pts[0].y.toFixed(2);
+  for (var i = 0; i < pts.length - 1; i++) {
+    var p0 = pts[Math.max(i - 1, 0)];
+    var p1 = pts[i];
+    var p2 = pts[i + 1];
+    var p3 = pts[Math.min(i + 2, pts.length - 1)];
+    var cp1x = p1.x + (p2.x - p0.x) / 6;
+    var cp1y = p1.y + (p2.y - p0.y) / 6;
+    var cp2x = p2.x - (p3.x - p1.x) / 6;
+    var cp2y = p2.y - (p3.y - p1.y) / 6;
+    d += " C " + cp1x.toFixed(2) + " " + cp1y.toFixed(2) + ", " + cp2x.toFixed(2) + " " + cp2y.toFixed(2) + ", " + p2.x.toFixed(2) + " " + p2.y.toFixed(2);
+  }
+  return d;
 }
 
 function normalizeTimeseries(data, job) {
@@ -1343,19 +1380,6 @@ function chartDefinitions(series) {
       series: [
         { label: "SM %", values: series.map((point) => point.gpu_sm_util_pct || 0), color: "#111111", fill: "rgba(17,17,17,.06)", valueSuffix: "%" },
         { label: "MemBW %", values: series.map((point) => point.gpu_mem_bw_util_pct || 0), color: "#7a7a7a", fill: "rgba(122,122,122,.05)", valueSuffix: "%" }
-      ]
-    },
-    {
-      key: "latency",
-      title: "Latency (ms)",
-      fields: ["ttft_ms_p50", "ttft_ms_p95", "tpot_ms_p50", "tpot_ms_p95"],
-      topTick: fmtNumber(Math.max(80000, ...series.map((point) => Math.max(point.ttft_ms_p95 || 0, point.ttft_ms_p50 || 0, point.tpot_ms_p95 || 0, point.tpot_ms_p50 || 0)))),
-      maxY: Math.max(80000, ...series.map((point) => Math.max(point.ttft_ms_p95 || 0, point.ttft_ms_p50 || 0, point.tpot_ms_p95 || 0, point.tpot_ms_p50 || 0))),
-      series: [
-        { label: "TTFT p50", values: series.map((point) => point.ttft_ms_p50 || 0), color: "#111111", valueSuffix: " ms" },
-        { label: "TTFT p95", values: series.map((point) => point.ttft_ms_p95 || 0), color: "#555555", dashed: true, valueSuffix: " ms" },
-        { label: "TPOT p50", values: series.map((point) => point.tpot_ms_p50 || 0), color: "#8a8a8a", valueSuffix: " ms" },
-        { label: "TPOT p95", values: series.map((point) => point.tpot_ms_p95 || 0), color: "#6b7280", dashed: true, valueSuffix: " ms" }
       ]
     }
   ];
@@ -1438,8 +1462,8 @@ function renderVisualChartCard(definition, allDefinitions) {
     const y = chartHeight - chartPadding.bottom - (chartHeight - chartPadding.top - chartPadding.bottom) * ratio;
     return '<line x1="' + chartPadding.left + '" y1="' + y + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + y + '" stroke="#e4e7df" stroke-width="1"></line>';
   }).join("");
-  const paths = definition.series.map((item) => '<path d="' + buildLinePath(item.values, definition.maxY) + '" fill="none" stroke="' + item.color + '" stroke-opacity="0.24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
-  return '<section class="bento-card chart"><div class="chart-card-head"><div><div class="bento-kicker">Performance</div><div class="chart-card-title">' + esc(definition.title) + '</div></div><div class="chart-card-controls">' + filters + '</div></div><div class="chart-legend visual">' + legend + '</div><div class="chart-panel visual"><div class="chart-wrap visual" data-chart=\'' + esc(JSON.stringify(definition)) + '\'><svg class="chart-svg" viewBox="0 0 ' + chartWidth + ' ' + chartHeight + '" preserveAspectRatio="xMidYMid meet">' + gridLines + '<line x1="' + chartPadding.left + '" y1="' + (chartHeight - chartPadding.bottom) + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="#cfd6e4" stroke-width="1"></line>' + paths + '<g class="hover-series"></g><line class="hover-line" x1="0" y1="' + chartPadding.top + '" x2="0" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="rgba(16,20,24,.18)" stroke-dasharray="4 4" stroke-width="1" style="display:none"></line><g class="hover-points"></g><rect class="hover-hit" x="' + chartPadding.left + '" y="' + chartPadding.top + '" width="' + (chartWidth - chartPadding.left - chartPadding.right) + '" height="' + (chartHeight - chartPadding.top - chartPadding.bottom) + '" fill="transparent"></rect></svg>' + (definition.leftLabel ? '<span class="chart-axis left">' + esc(definition.leftLabel) + '</span>' : '') + (definition.rightLabel ? '<span class="chart-axis right">' + esc(definition.rightLabel) + '</span>' : '') + (definition.topTick ? '<span class="chart-top">' + esc(definition.topTick) + '</span>' : '') + '</div><div class="chart-footer"><div class="tooltip-title">Hover a point</div><div class="tooltip-rows"></div></div></div></section>';
+  const paths = definition.series.map((item) => '<path d="' + buildLinePath(item.values, definition.maxY) + '" fill="none" stroke="' + item.color + '" stroke-opacity="0.24" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
+  return '<section class="bento-card chart"><div class="chart-card-head"><div><div class="bento-kicker">Performance</div><div class="chart-card-title">' + esc(definition.title) + '</div></div><div class="chart-card-controls">' + filters + '</div></div><div class="chart-legend visual">' + legend + '</div><div class="chart-panel visual"><div class="chart-wrap visual" data-chart=\'' + esc(JSON.stringify(definition)) + '\'><svg class="chart-svg" viewBox="0 0 ' + chartWidth + ' ' + chartHeight + '" preserveAspectRatio="none">' + gridLines + '<line x1="' + chartPadding.left + '" y1="' + (chartHeight - chartPadding.bottom) + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="#cfd6e4" stroke-width="1"></line>' + paths + '<g class="hover-series"></g><line class="hover-line" x1="0" y1="' + chartPadding.top + '" x2="0" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="rgba(16,20,24,.18)" stroke-dasharray="4 4" stroke-width="1" style="display:none"></line><g class="hover-points"></g><rect class="hover-hit" x="' + chartPadding.left + '" y="' + chartPadding.top + '" width="' + (chartWidth - chartPadding.left - chartPadding.right) + '" height="' + (chartHeight - chartPadding.top - chartPadding.bottom) + '" fill="transparent"></rect></svg>' + (definition.leftLabel ? '<span class="chart-axis left">' + esc(definition.leftLabel) + '</span>' : '') + (definition.rightLabel ? '<span class="chart-axis right">' + esc(definition.rightLabel) + '</span>' : '') + (definition.topTick ? '<span class="chart-top">' + esc(definition.topTick) + '</span>' : '') + '</div><div class="chart-footer"><div class="tooltip-title">Hover a point</div><div class="tooltip-rows"></div></div></div></section>';
 }
 
 function renderChartSkeletonCard() {
@@ -1502,22 +1526,24 @@ function renderBentoDashboard(job, jobs, workload, chain, metricsSummary, events
     + '<section class="bento-card metric"><div class="metric-label">ETA</div><div class="metric-big">' + esc(chain && chain.eta_label ? chain.eta_label : '\u2014') + '</div><div class="metric-note">Against an SLO of ' + esc(job.slo_hours != null ? job.slo_hours + 'h' : '\u2014') + '.</div></section>'
     + '<section class="bento-card metric"><div class="metric-label">Tok/s</div><div class="metric-big">' + esc(metricsSummary && metricsSummary.throughput_tok_per_s != null ? fmtNumber(metricsSummary.throughput_tok_per_s) : '\u2014') + '</div><div class="metric-note">10 second rolling generation throughput.</div></section>'
     + (function() {
-        const quotaCells = quotaRows && quotaRows.length
-          ? quotaRows.map((item) => {
+        const activeQuota = (quotaRows || []).filter((item) => (item.Used || 0) > 0);
+        activeQuota.sort((a, b) => ((b.Used || 0) / (b.Baseline || 1)) - ((a.Used || 0) / (a.Baseline || 1)));
+        const quotaItems = activeQuota.length
+          ? activeQuota.map((item) => {
               const used = item.Used || 0;
               const total = item.Baseline || 0;
-              const sub = (item.GPU || 'GPU') + (item.Market ? ' · ' + String(item.Market).replace(/_/g, ' ') : '');
-              return '<div class="quota-cell">'
-                + '<div class="quota-cell-title">' + esc(item.Region || '—') + '</div>'
-                + '<div class="quota-cell-sub">' + esc(sub) + '</div>'
-                + renderDonut(used, total)
-                + '<div class="quota-cell-count">' + used + '/' + total + '</div>'
+              const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+              const sub = (item.GPU || 'GPU') + (item.Market ? ' \u00b7 ' + String(item.Market).replace(/_/g, ' ') : '');
+              return '<div class="quota-item">'
+                + '<div class="quota-item-header"><span class="quota-item-title">' + esc(item.Region || '\u2014') + '</span><span class="quota-item-count">' + used + '/' + total + '</span></div>'
+                + '<div class="quota-item-sub">' + esc(sub) + '</div>'
+                + '<div class="quota-bar-track"><div class="quota-bar-fill" style="width:' + pct + '%"></div></div>'
                 + '</div>';
             }).join("")
-          : '<div class="quota-empty">No quota data</div>';
+          : '<div class="quota-empty">No active resources</div>';
         return '<section class="bento-card events">'
           + '<div class="bento-kicker">Resources</div>'
-          + '<div class="quota-grid" style="margin-top:16px;max-height:calc(100% - 32px)">' + quotaCells + '</div>'
+          + '<div class="quota-list" style="margin-top:16px">' + quotaItems + '</div>'
           + '</section>';
       })()
     + (primaryChart ? renderVisualChartCard(primaryChart, chartDefs) : renderChartSkeletonCard())
@@ -1567,7 +1593,7 @@ function renderChartCard(definition) {
     const y = chartHeight - chartPadding.bottom - (chartHeight - chartPadding.top - chartPadding.bottom) * ratio;
     return '<line x1="' + chartPadding.left + '" y1="' + y + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + y + '" stroke="#edf1f7" stroke-width="1"></line>';
   }).join("");
-  const paths = definition.series.map((item) => '<path d="' + buildLinePath(item.values, definition.maxY) + '" fill="none" stroke="' + item.color + '" stroke-opacity="0.18" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
+  const paths = definition.series.map((item) => '<path d="' + buildLinePath(item.values, definition.maxY) + '" fill="none" stroke="' + item.color + '" stroke-opacity="0.18" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
   return '<section class="chart-panel"><div class="chart-panel-header"><div class="chart-panel-title">' + esc(definition.title) + '</div><div class="chart-legend">' + legend + '</div></div><div class="chart-wrap" data-chart=\'' + esc(JSON.stringify(definition)) + '\'><svg class="chart-svg" viewBox="0 0 ' + chartWidth + ' ' + chartHeight + '" preserveAspectRatio="none">' + gridLines + '<line x1="' + chartPadding.left + '" y1="' + (chartHeight - chartPadding.bottom) + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="#cfd6e4" stroke-width="1"></line>' + paths + '<g class="hover-series"></g><line class="hover-line" x1="0" y1="' + chartPadding.top + '" x2="0" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="rgba(16,20,24,.18)" stroke-dasharray="4 4" stroke-width="1" style="display:none"></line><g class="hover-points"></g><rect class="hover-hit" x="' + chartPadding.left + '" y="' + chartPadding.top + '" width="' + (chartWidth - chartPadding.left - chartPadding.right) + '" height="' + (chartHeight - chartPadding.top - chartPadding.bottom) + '" fill="transparent"></rect></svg>' + (definition.leftLabel ? '<span class="chart-axis left">' + esc(definition.leftLabel) + '</span>' : '') + (definition.rightLabel ? '<span class="chart-axis right">' + esc(definition.rightLabel) + '</span>' : '') + (definition.topTick ? '<span class="chart-top">' + esc(definition.topTick) + '</span>' : '') + '</div><div class="chart-footer"><div class="tooltip-title">Hover a point</div><div class="tooltip-rows"></div></div></section>';
 }
 
@@ -1647,17 +1673,39 @@ function installChartInteractions() {
     const tooltipTitle = footer.querySelector(".tooltip-title");
     const tooltipRows = footer.querySelector(".tooltip-rows");
     const count = Math.max.apply(null, definition.series.map((item) => item.values.length));
+    // Pre-create persistent path + circle elements so CSS transitions work
+    var seriesPaths = definition.series.map((item) => {
+      var p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      p.setAttribute("fill", "none");
+      p.setAttribute("stroke", item.color);
+      p.setAttribute("stroke-width", "1.2");
+      p.setAttribute("stroke-linecap", "round");
+      p.setAttribute("stroke-linejoin", "round");
+      if (item.dashed) p.setAttribute("stroke-dasharray", "5 4");
+      activeSeries.appendChild(p);
+      return p;
+    });
+    var seriesDots = definition.series.map((item) => {
+      var c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      c.setAttribute("r", "2.5");
+      c.setAttribute("fill", item.color);
+      c.setAttribute("stroke", "#050607");
+      c.setAttribute("stroke-width", "1");
+      points.appendChild(c);
+      return c;
+    });
     function showIndex(index) {
-      const anchor = chartPoint(index, count, definition.maxY * 0.5, definition.maxY);
+      var anchor = chartPoint(index, count, definition.maxY * 0.5, definition.maxY);
       line.setAttribute("x1", anchor.x);
       line.setAttribute("x2", anchor.x);
       line.style.display = "";
-      activeSeries.innerHTML = definition.series.map((item) => '<path d="' + buildPartialLinePath(item.values, definition.maxY, index) + '" fill="none" stroke="' + item.color + '" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
-      points.innerHTML = definition.series.map((item) => {
-        const value = item.values[Math.min(index, item.values.length - 1)] || 0;
-        const point = chartPoint(index, count, value, definition.maxY);
-        return '<circle cx="' + point.x + '" cy="' + point.y + '" r="2.5" fill="' + item.color + '" stroke="#050607" stroke-width="1"></circle>';
-      }).join("");
+      definition.series.forEach(function(item, i) {
+        seriesPaths[i].setAttribute("d", buildPartialLinePath(item.values, definition.maxY, index));
+        var value = item.values[Math.min(index, item.values.length - 1)] || 0;
+        var pt = chartPoint(index, count, value, definition.maxY);
+        seriesDots[i].setAttribute("cx", pt.x);
+        seriesDots[i].setAttribute("cy", pt.y);
+      });
       tooltipTitle.textContent = "Sample " + String(index + 1).padStart(2, "0");
       tooltipRows.innerHTML = definition.series.map((item) => {
         const values = item.tooltipValues || item.values;
@@ -1683,6 +1731,9 @@ function render() {
   const metrics = job && data.metrics ? (data.metrics[job.job_id] || {}) : {};
   const chunks = job && data.chunks ? (data.chunks[job.job_id] || null) : null;
   const replicas = getLiveReplicas(data, job);
+  if (!state.activeReplicaId && replicas.length) {
+    state.activeReplicaId = replicas[0].replica_id;
+  }
   const cost = job && data.cost ? (data.cost[job.job_id] || null) : null;
   const quotaRows = getQuotaRows(data);
   const events = getEvents(data);
