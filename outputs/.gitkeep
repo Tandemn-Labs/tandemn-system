@@ -1,0 +1,1 @@
+# Keep this directory in git so Docker bind mounts do not auto-create it as root.

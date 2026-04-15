@@ -56,7 +56,7 @@ def write_progress(done: int, total: int, status: str = "running"):
 
 def _report_phase(phase: str):
     """Report job lifecycle phase to orca control plane."""
-    url = os.getenv("ORCA_SERVER_URL", "")
+    url = os.getenv("TD_SERVER_URL", "")
     key = os.getenv("ORCA_API_KEY", "")
     job_id = os.getenv("JOB_ID", "")
     if not url or not job_id:
@@ -1184,7 +1184,7 @@ def main():
         _report_phase("model_ready")
 
         # 3. Start sidecar (bonus push to control plane)
-        orca_url = os.getenv("ORCA_SERVER_URL", "")
+        orca_url = os.getenv("TD_SERVER_URL", "")
         orca_key = os.getenv("ORCA_API_KEY", "")
         job_id = os.getenv("JOB_ID", "unknown")
         live_counter = LiveTokenCounter()

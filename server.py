@@ -117,15 +117,15 @@ async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Validate critical env vars ──
-    from orca_server.config import ORCA_SERVER_URL, HF_TOKEN
-    if not ORCA_SERVER_URL or ORCA_SERVER_URL == "placeholder":
+    from orca_server.config import TD_SERVER_URL, HF_TOKEN
+    if not TD_SERVER_URL or TD_SERVER_URL == "placeholder":
         logger.error(
-            "[Startup] ⚠ ORCA_SERVER_URL is not set! Replicas will not be able to "
-            "call back to the control plane. Set it in .env or pass --url/--tunnel. "
+            "[Startup] ⚠ TD_SERVER_URL is not set! Replicas will not be able to "
+            "call back to the control plane. Set it in .env or pass --url. "
             "Jobs WILL fail silently without this."
         )
     else:
-        logger.info(f"[Startup] ORCA_SERVER_URL = {ORCA_SERVER_URL}")
+        logger.info(f"[Startup] TD_SERVER_URL = {TD_SERVER_URL}")
     if not HF_TOKEN:
         logger.warning(
             "[Startup] HF_TOKEN not set — gated models (Llama, Gemma) will fail to download. "
@@ -2257,52 +2257,14 @@ if __name__ == "__main__":
     import uvicorn
 
     _parser = _ap.ArgumentParser(description="Orca control plane server")
-    _parser.add_argument("--url", help="Public URL for this server (e.g. Cloudflare tunnel URL). Overrides ORCA_SERVER_URL env var.")
+    _parser.add_argument("--url", help="Public URL for this server. Overrides TD_SERVER_URL env var.")
     _parser.add_argument("--port", type=int, default=26336)
-    _parser.add_argument("--tunnel", action="store_true", help="Auto-start a Cloudflare tunnel and use its URL")
     _args = _parser.parse_args()
-
-    if _args.tunnel:
-        import sys
-        import subprocess as _sp
-        import re as _re
-        import signal as _sig
-
-        import shutil as _sh
-        _cf_bin = _sh.which("cloudflared") or os.path.join(os.path.dirname(__file__), "cloudflared")
-        if not os.path.isfile(_cf_bin):
-            print("[Server] ERROR: cloudflared not found on PATH or in repo root")
-            sys.exit(1)
-        print(f"[Server] Starting Cloudflare tunnel on port {_args.port}...")
-        _tunnel_proc = _sp.Popen(
-            [_cf_bin, "tunnel", "--url", f"http://localhost:{_args.port}"],
-            stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
-        )
-        _tunnel_url = None
-        for _line in iter(_tunnel_proc.stdout.readline, ""):
-            _m = _re.search(r"(https://[a-z0-9-]+\.trycloudflare\.com)", _line)
-            if _m:
-                _tunnel_url = _m.group(1)
-                break
-        if not _tunnel_url:
-            print("[Server] ERROR: Could not detect Cloudflare tunnel URL")
-            _tunnel_proc.kill()
-            sys.exit(1)
-        _args.url = _tunnel_url
-        print(f"[Server] Tunnel ready: {_tunnel_url}")
-
-        def _cleanup_tunnel(*_a):
-            _tunnel_proc.terminate()
-            _tunnel_proc.wait(timeout=5)
-        import atexit
-        atexit.register(_cleanup_tunnel)
-        _sig.signal(_sig.SIGINT, lambda *_a: (atexit._run_exitfuncs(), sys.exit(0)))
-        _sig.signal(_sig.SIGTERM, lambda *_a: (atexit._run_exitfuncs(), sys.exit(0)))
 
     if _args.url:
         from orca_server import config as _cfg
-        _cfg.ORCA_SERVER_URL = _args.url
-        os.environ["ORCA_SERVER_URL"] = _args.url
-        print(f"[Server] ORCA_SERVER_URL set to {_args.url}")
+        _cfg.TD_SERVER_URL = _args.url
+        os.environ["TD_SERVER_URL"] = _args.url
+        print(f"[Server] TD_SERVER_URL set to {_args.url}")
 
     uvicorn.run(app, host="0.0.0.0", port=_args.port)

@@ -30,7 +30,7 @@ class S3BigStorageBackend(StorageBackend):
     """
 
     def __init__(self):
-        self.aws_region = os.getenv("AWS_REGION", "us-east-2")
+        self.aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-2")
         boto_config = Config(signature_version="s3v4")
         # print("running in region: ", self.aws_region)
         self.s3_client = boto3.client(
