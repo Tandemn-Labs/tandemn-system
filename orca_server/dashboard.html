@@ -1,0 +1,1820 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orca Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Miranda+Sans:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+:root{
+  --page:#f7f7f6;
+  --surface:#ffffff;
+  --surface-strong:#f1f1ef;
+  --text:#2a2a28;
+  --muted:#7a7a74;
+  --line:#e6e4df;
+  --accent:#355254;
+  --accent-strong:#294446;
+  --accent-deep:#233c3e;
+  --accent-soft:#e4ebea;
+  --accent-tint:#eff5f4;
+  --accent-contrast:#f3f8f7;
+  --radius-12:12px;
+  --panel-frame-height:720px;
+  --success:#111111;
+  --warn:#444444;
+  --danger:#111111;
+  --sidebar:#f4f3f1;
+  --sidebar-line:#e7e4de;
+  --sidebar-text:#111111;
+  --sidebar-muted:#7a7a7a;
+  --sidebar-active:#111111;
+}
+html{scroll-behavior:smooth}
+body{
+  margin:0;
+  min-width:320px;
+  min-height:100vh;
+  color:var(--text);
+  background:#f7f7f6;
+  font-family:"Miranda Sans", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+}
+button,input,textarea,select{font:inherit}
+.app-shell{min-height:100vh}
+.sidebar{display:none}
+.job-picker{position:relative}
+.job-picker-btn{display:inline-flex;align-items:center;justify-content:flex-start;gap:.45em;width:auto;padding:0;border:0;background:transparent;color:var(--sidebar-text);cursor:pointer;text-align:left;line-height:1}
+.job-picker-copy{min-width:0}
+.sidebar-title{font-size:1.05rem;font-weight:600;letter-spacing:-.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sidebar-sub{margin-top:4px;font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--sidebar-muted)}
+.job-picker-chevron{display:inline-flex;align-items:center;justify-content:center;width:1em;height:1em;font-size:1em;line-height:1;color:var(--muted);flex-shrink:0;transform:translateY(.02em);transition:transform .16s ease, color .16s ease}
+.job-picker-chevron::before{content:"⌄"}
+.job-picker.open .job-picker-chevron{transform:translateY(.02em) rotate(180deg)}
+.job-picker-menu{display:none;position:absolute;top:calc(100% + 14px);left:-14px;min-width:360px;padding:8px;background:rgba(255,255,255,.98);border:1px solid #d9d7d1;border-radius:var(--radius-12);box-shadow:0 14px 32px rgba(0,0,0,.08);z-index:20}
+.job-picker.open .job-picker-menu{display:grid;gap:4px}
+.job-option{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:14px 16px;border:0;border-radius:var(--radius-12);background:transparent;color:var(--text);cursor:pointer;text-align:left;transition:background .16s ease, transform .16s ease}
+.job-option:hover,.job-option:focus-visible{background:#f6f6f6;transform:translateX(2px);outline:none}
+.job-option.active{background:#f1f1ef;color:#20201e}
+.job-option-name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.job-option-meta{font-size:.72rem;color:inherit;opacity:.72;flex-shrink:0}
+.sidebar-nav{padding:14px 10px;display:grid;gap:2px;align-content:start}
+.side-tab{display:flex;align-items:center;gap:10px;width:100%;border:0;background:transparent;color:#3d3d39;padding:10px 12px;border-radius:var(--radius-12);cursor:pointer;text-align:left;transition:background .16s ease,color .16s ease}
+.side-tab:hover,.side-tab:focus-visible{background:#ecebe8;outline:none}
+.side-tab.active{background:#e7e5e1;color:#222220}
+.side-tab-kicker{display:none}
+.main{min-width:0}
+.topbar{padding:18px 22px 16px;border-bottom:1px solid var(--line);background:#f7f7f6;position:sticky;top:0;z-index:3}
+.topbar-inner{max-width:1480px;margin:0 auto;display:flex;justify-content:flex-start;align-items:center;gap:16px}
+.topbar-left{display:flex;align-items:center;gap:12px;min-width:0}
+.topbar-label{display:flex;align-items:center;gap:6px;padding:0;border:0;border-radius:0;background:transparent;color:#2a2a28;font-size:.98rem;font-weight:600;white-space:nowrap;line-height:1.1}
+.topbar-sep{color:#989892;font-size:1.2rem;line-height:1}
+.topbar-actions{display:none}
+.top-nav-link{font-size:.84rem;color:#595954;font-weight:500}
+.top-icon-btn{width:32px;height:32px;border:0;background:transparent;color:#4c4c47;border-radius:10px;display:grid;place-items:center;cursor:pointer}
+.top-avatar{width:28px;height:28px;border-radius:999px;background:#deddd8;color:#3a3a36;display:grid;place-items:center;font-size:.78rem;font-weight:600}
+.app{padding:28px}
+.app-inner{max-width:1480px;margin:0 auto}
+.content-stack{display:grid;gap:72px}
+.app-header{margin-bottom:0;padding:32px;border:1px solid var(--line);border-radius:var(--radius-12);background:linear-gradient(180deg,#ffffff 0%,#f6f5f2 100%);box-shadow:0 18px 48px rgba(17,17,17,.05)}
+.hero-title{font-size:clamp(2.6rem,6vw,3.4rem);line-height:1;letter-spacing:-.06em}
+.hero-summary{margin-top:18px}
+.hero-progress{margin-top:28px;max-width:520px}
+.hero-progress-meta{display:grid;gap:12px}
+.hero-progress-grid{display:grid;gap:12px}
+.hero-progress-track{height:10px;width:100%;overflow:hidden;border-radius:999px;background:#ecebe8;margin-top:12px}
+.hero-progress-fill{height:100%;border-radius:999px;background:#111111}
+.hero-summary-grid{display:grid;gap:12px;margin-top:32px}
+.hero-metrics{display:grid;gap:12px;margin-top:28px}
+.hero-metric{padding:18px 20px;border:1px solid var(--line);border-radius:var(--radius-12);background:rgba(255,255,255,.72)}
+.hero-metric-value{font-size:1.5rem;line-height:1;letter-spacing:-.04em}
+.hero-metric-detail{margin-top:6px;font-size:.8rem;color:var(--muted)}
+.inline-section{margin-top:0}
+.inline-section-title{font-size:1rem;font-weight:600;letter-spacing:-.03em}
+.inline-logs{display:grid;gap:12px}
+.inline-log{display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:flex-start;padding:14px 0;border-top:1px solid var(--line)}
+.inline-log:first-child{border-top:0;padding-top:0}
+.inline-log:last-child{padding-bottom:0}
+.inline-log-time{font-size:.74rem;color:var(--muted);white-space:nowrap}
+.inline-log-message{font-size:.92rem;line-height:1.45;color:var(--text)}
+.hero-subtitle{margin-top:8px;font-size:.95rem;color:var(--muted)}
+.hero-meta{margin-top:10px;font-size:.9rem;color:var(--muted)}
+.hero-refresh{margin-top:14px;font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.hero-refresh strong{color:var(--text);font-weight:500}
+.header-row{display:flex;justify-content:space-between;align-items:flex-start;gap:32px}
+.header-copy{min-width:0;flex:1}
+.header-cta{display:none}
+.conn{display:flex;align-items:center;gap:8px;font-size:.75rem;color:var(--muted)}
+.conn-dot{width:8px;height:8px;border-radius:999px;background:#9ca3af}
+.conn-dot.connected{background:#111111}
+.conn-dot.connecting{background:var(--warn);animation:pulse 1.1s infinite}
+.conn-dot.disconnected{background:#9ca3af}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.section{display:grid;gap:24px}
+.dashboard-section{display:grid;gap:24px;padding:28px;border:1px solid var(--line);border-radius:var(--radius-12);background:var(--surface);box-shadow:0 10px 28px rgba(17,17,17,.03)}
+.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.section-kicker{font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+.section-title{margin-top:6px;font-size:1.5rem;font-weight:600;letter-spacing:-.04em}
+.section-desc{max-width:760px;font-size:.92rem;line-height:1.6;color:var(--muted)}
+.section-body{display:grid;gap:24px}
+.overview-grid{grid-template-columns:1fr}
+.metric-grid,.chart-grid,.chain-metrics,.overview-grid,.chain-grid{display:grid;gap:16px}
+.metric-grid,.chain-metrics,.chart-grid{grid-template-columns:1fr}
+.card{border:1px solid var(--line);border-radius:var(--radius-12);background:var(--surface);overflow:hidden;box-shadow:0 10px 28px rgba(17,17,17,.03)}
+.card.accent{border-color:#dcdcdc;background:var(--surface-strong)}
+.card-header{padding:16px 20px;border-bottom:1px solid var(--line)}
+.card.no-divider .card-header{border-bottom:0;padding-bottom:0}
+.card-title{font-size:.875rem;font-weight:500}
+.card-desc{margin-top:4px;font-size:.75rem;line-height:1.6;color:var(--muted)}
+.card-body{padding:22px 20px}
+.metric-value{font-size:2rem;line-height:1;letter-spacing:-.04em}
+.metric-detail{margin-top:8px;font-size:.75rem;line-height:1.6;color:var(--muted)}
+.summary-value{font-size:2.2rem;line-height:1;letter-spacing:-.05em}
+.summary-grid{display:grid;gap:16px 24px;margin-top:20px}
+.tiny-label,.chart-top,.chart-axis,.table-head,.log-time{text-transform:uppercase;letter-spacing:.08em;font-size:.6875rem;color:var(--muted)}
+.summary-item-value,.info-value,.quota-count,.table-cell{font-size:.875rem}
+.events,.logs{display:grid;gap:10px;font-size:13px;line-height:1.8}
+.log-row{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.log-level-info,.log-level-ok,.log-level-success,.log-level-warn,.log-level-error{color:var(--text)}
+.quota-list,.info-list{display:grid}
+.quota-row,.info-row{display:grid;gap:12px;padding:16px 0;border-top:1px solid var(--line)}
+.quota-row:first-child,.info-row:first-child{border-top:0;padding-top:0}
+.quota-row:last-child,.info-row:last-child{padding-bottom:0}
+.quota-top,.quota-progress,.info-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.progress-track{height:8px;width:100%;overflow:hidden;border-radius:999px;background:#edf1f7}
+.progress-bar{height:100%;border-radius:999px;background:var(--accent)}
+.job-list{display:grid;gap:10px}
+.job-btn{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:var(--radius-12);background:transparent;color:var(--text);cursor:pointer;text-align:left}
+.job-btn.active{background:var(--accent-soft);border-color:#d6d6d6}
+.job-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.section-block{display:grid;gap:14px}
+.section-block + .section-block{border-top:1px solid var(--line);padding-top:20px}
+.section-block-title{font-size:.875rem;font-weight:500}
+.section-block-desc{font-size:.75rem;line-height:1.6;color:var(--muted)}
+.chart-legend{display:flex;flex-wrap:wrap;gap:12px;font-size:11px;color:var(--muted)}
+.chart-legend-item{display:inline-flex;align-items:center;gap:8px}
+.chart-line{width:24px;height:0;border-top-width:2px;border-top-style:solid}
+.chart-panel{padding:0}
+.chart-panel-header{display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;gap:10px;margin-bottom:18px}
+.chart-panel-title{font-size:1rem;font-weight:600;letter-spacing:-.03em}
+.chart-wrap{position:relative;padding:6px 0 0;background-image:radial-gradient(rgba(17,17,17,.08) .8px, transparent .8px);background-size:18px 18px;background-position:0 16px;background-color:transparent}
+.chart-svg{display:block;width:100%;height:auto;aspect-ratio:420 / 220}
+.chart-axis{position:absolute;top:50%;pointer-events:none}
+.chart-axis.left{left:0;transform:translate(-24px,-50%) rotate(-90deg)}
+.chart-axis.right{right:0;transform:translate(24px,-50%) rotate(90deg)}
+.chart-top{position:absolute;top:8px;left:0;pointer-events:none}
+.chart-footer{display:grid;gap:8px;margin-top:16px;min-height:54px;padding:0}
+.tooltip-title{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.tooltip-rows{display:flex;flex-wrap:wrap;gap:14px}
+.tooltip-row{display:flex;align-items:center;gap:8px}
+.tooltip-key{display:inline-flex;align-items:center;gap:8px;color:var(--muted)}
+.tooltip-dot{width:8px;height:8px;border-radius:999px}
+.table-wrap{overflow-x:auto}
+.data-table{width:100%;min-width:920px;border-collapse:separate;border-spacing:0}
+.data-table th,.data-table td{padding:12px;text-align:left;border-bottom:1px solid var(--line)}
+.data-table tbody tr:last-child td{border-bottom:0}
+.phase-pill{display:inline-flex;align-items:center;gap:8px}
+.phase-dot{width:8px;height:8px;border-radius:999px;background:#111111}
+.empty{padding:48px 20px;text-align:center;color:var(--muted);border:1px solid var(--line);border-radius:var(--radius-12);background:var(--surface)}
+@media (max-width: 980px){
+  .job-picker-menu{min-width:280px}
+}
+@media (max-width: 700px){
+  .topbar{padding:16px}
+  .app{padding:20px 16px 32px}
+  .app-header{padding:24px 20px}
+  .dashboard-section{padding:22px 20px}
+  .sidebar-nav{grid-template-columns:1fr}
+  .topbar-actions{flex-wrap:wrap;justify-content:flex-end}
+  .topbar-left{flex-wrap:wrap}
+  .topbar-label{max-width:100%}
+  .header-row{flex-direction:column}
+  .section-head{align-items:flex-start;flex-direction:column}
+}
+@media (min-width:700px){
+  .hero-progress-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .hero-summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .hero-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .summary-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .quota-row{grid-template-columns:1.2fr .8fr;gap:16px}
+  .chart-panel-header{flex-direction:row;align-items:center;gap:18px}
+}
+@media (min-width:768px){
+  .metric-grid,.chain-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .overview-grid{grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr)}
+}
+@media (min-width:1280px){
+  .metric-grid,.chain-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .chain-grid{grid-template-columns:minmax(0,.7fr) minmax(0,1.3fr)}
+}
+
+.workspace{
+  min-height:100vh;
+  display:grid;
+  gap:24px;
+  padding:24px;
+}
+.app-header-bar{
+  display:flex;
+  align-items:center;
+  gap:16px;
+  width:100%;
+  padding:18px 24px 16px;
+  border:0;
+  border-radius:0;
+  background:#f7f7f6;
+  position:sticky;
+  top:0;
+  z-index:10;
+}
+.header-job{
+  min-width:260px;
+}
+.header-job-label,
+.header-stat-label{
+  font-size:.68rem;
+  text-transform:uppercase;
+  letter-spacing:.12em;
+  color:var(--muted);
+}
+.header-job .job-picker-btn{
+  padding:0;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  color:var(--text);
+  font-weight:700;
+  font-size:1rem;
+}
+.header-job .job-picker-chevron{
+  color:var(--muted);
+}
+.header-job .job-picker-menu{
+  left:0;
+  right:auto;
+  top:calc(100% + 12px);
+}
+.header-run-meta{
+  display:grid;
+  gap:4px;
+  justify-items:end;
+  font-size:.82rem;
+  color:var(--muted);
+  text-align:right;
+  white-space:nowrap;
+  margin-left:auto;
+}
+.header-run-progress{
+  font-size:1rem;
+  font-weight:700;
+  letter-spacing:-.03em;
+  color:var(--text);
+}
+.header-run-updated{
+  font-size:.76rem;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  justify-content:flex-end;
+}
+.conn-dot{
+  width:6px;
+  height:6px;
+  border-radius:50%;
+  flex-shrink:0;
+  background:var(--muted);
+  opacity:.5;
+}
+.conn-dot.connected{background:#4ade80;opacity:1}
+.conn-dot.connecting{background:#facc15;opacity:1;animation:conn-pulse 1.2s ease-in-out infinite}
+.conn-dot.disconnected{background:#f87171;opacity:1}
+@keyframes conn-pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.workspace-main{
+  min-width:0;
+  display:grid;
+  gap:24px;
+}
+.dashboard-top{
+  display:grid;
+  gap:0;
+}
+.dashboard-job-row{
+  display:flex;
+  align-items:center;
+  gap:16px;
+}
+.job-name-display{
+  font-size:clamp(1.6rem,3.5vw,2.4rem);
+  font-weight:700;
+  letter-spacing:-.05em;
+  line-height:1;
+  color:var(--text);
+}
+.job-selector{
+  position:relative;
+  flex-shrink:0;
+}
+.job-selector-trigger{
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  padding:7px 12px;
+  border:1px solid var(--line);
+  border-radius:12px;
+  background:var(--surface);
+  color:var(--muted);
+  font-size:.78rem;
+  font-weight:500;
+  cursor:pointer;
+  white-space:nowrap;
+  transition:border-color .15s ease,color .15s ease,background .15s ease;
+}
+.job-selector-trigger:hover{
+  border-color:#c8c6c0;
+  color:var(--text);
+  background:#f4f3f1;
+}
+.job-selector.open .job-selector-trigger{
+  border-color:#c8c6c0;
+  color:var(--text);
+}
+.job-selector-chevron{
+  font-size:.7rem;
+  line-height:1;
+  transition:transform .16s ease;
+  display:inline-block;
+}
+.job-selector.open .job-selector-chevron{
+  transform:rotate(180deg);
+}
+.job-selector-menu{
+  display:none;
+  position:absolute;
+  top:calc(100% + 8px);
+  left:0;
+  min-width:300px;
+  padding:6px;
+  background:#fff;
+  border:1px solid #d9d7d1;
+  border-radius:var(--radius-12);
+  box-shadow:0 12px 28px rgba(0,0,0,.09);
+  z-index:20;
+}
+.job-selector.open .job-selector-menu{
+  display:grid;
+  gap:2px;
+}
+.job-selector-option{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  width:100%;
+  padding:11px 14px;
+  border:0;
+  border-radius:10px;
+  background:transparent;
+  color:var(--text);
+  font-size:.875rem;
+  cursor:pointer;
+  text-align:left;
+  transition:background .12s ease;
+}
+.job-selector-option:hover{
+  background:#f5f4f2;
+}
+.job-selector-option.active{
+  background:#f0efed;
+  font-weight:600;
+}
+.job-selector-option-left{
+  display:flex;
+  align-items:center;
+  gap:9px;
+  min-width:0;
+}
+.job-selector-option-dot{
+  width:7px;
+  height:7px;
+  border-radius:50%;
+  flex-shrink:0;
+}
+.job-selector-option-name{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.job-selector-option-meta{
+  font-size:.72rem;
+  color:var(--muted);
+  white-space:nowrap;
+  flex-shrink:0;
+}
+.replica-table-wrap{
+  overflow-x:auto;
+  border:1px solid var(--line);
+  border-radius:var(--radius-12);
+  background:var(--surface);
+}
+.replica-tbl{
+  width:100%;
+  border-collapse:collapse;
+  font-size:.8125rem;
+  white-space:nowrap;
+}
+.replica-tbl th{
+  padding:10px 14px;
+  text-align:left;
+  font-size:.6875rem;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  color:var(--muted);
+  border-bottom:1px solid var(--line);
+  font-weight:500;
+}
+.replica-tbl td{
+  padding:11px 14px;
+  border-bottom:1px solid var(--line);
+  color:var(--text);
+}
+.replica-tbl tbody tr:last-child td{
+  border-bottom:0;
+}
+.replica-row{
+  cursor:pointer;
+  transition:background .12s ease;
+}
+.replica-row:hover{
+  background:#f6f5f3;
+}
+.replica-row.active{
+  background:#111111;
+  color:#ffffff;
+}
+.replica-row.active td{
+  color:#ffffff;
+}
+.replica-phase-cell{
+  display:flex;
+  align-items:center;
+  gap:7px;
+}
+.replica-phase-dot{
+  width:7px;
+  height:7px;
+  border-radius:50%;
+  flex-shrink:0;
+}
+.replica-table-empty{
+  padding:48px 20px;
+  text-align:center;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:6px;
+}
+.infra-empty{
+  padding:4px 0;
+}
+.infra-empty-title{
+  font-size:.94rem;
+  font-weight:600;
+  letter-spacing:-.02em;
+  color:var(--text);
+  opacity:.55;
+}
+.infra-empty-body{
+  margin-top:6px;
+  font-size:.82rem;
+  line-height:1.55;
+  color:var(--muted);
+}
+.dashboard-subtitle{
+  margin-top:12px;
+  max-width:720px;
+  font-size:1.02rem;
+  line-height:1.6;
+  color:var(--muted);
+}
+.dashboard-status{
+  display:inline-flex;
+  align-items:center;
+  gap:10px;
+  padding:10px 14px;
+  border-radius:999px;
+  background:var(--accent-soft);
+  color:var(--accent-strong);
+  font-size:.82rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.status-dot{
+  width:8px;
+  height:8px;
+  border-radius:999px;
+  background:var(--accent);
+  box-shadow:0 0 0 6px rgba(53,82,84,.12);
+}
+.bento-grid{
+  display:grid;
+  grid-template-columns:repeat(12,minmax(0,1fr));
+  gap:18px;
+}
+.bento-card{
+  position:relative;
+  overflow:hidden;
+  padding:26px;
+  border:1px solid var(--line);
+  border-radius:var(--radius-12);
+  background:#fbfbf9;
+  box-shadow:0 14px 36px rgba(17,17,17,.04);
+}
+.bento-card.hero{
+  grid-column:span 7;
+  min-height:360px;
+  color:var(--accent-contrast);
+  background:var(--accent);
+}
+.bento-card.progress{
+  grid-column:span 5;
+  min-height:360px;
+  background:#f7f5f0;
+}
+.bento-card.metric{
+  grid-column:span 3;
+  min-height:180px;
+}
+.bento-card.chart{
+  grid-column:span 8;
+  height:var(--panel-frame-height);
+  display:flex;
+  flex-direction:column;
+}
+.bento-card.events{
+  grid-column:span 4;
+  height:var(--panel-frame-height);
+  display:flex;
+  flex-direction:column;
+}
+.bento-card.infra{
+  grid-column:span 12;
+}
+.infra-body{
+  display:flex;
+  gap:0;
+  align-items:flex-start;
+  margin-top:20px;
+}
+.infra-replicas{
+  flex:1;
+  display:flex;
+  gap:12px;
+  flex-wrap:wrap;
+}
+.infra-stats{
+  display:flex;
+  gap:28px;
+  padding-left:32px;
+  border-left:1px solid var(--line);
+  margin-left:32px;
+  flex-shrink:0;
+  align-items:flex-start;
+}
+.infra-stat{
+  display:grid;
+  gap:6px;
+}
+.bento-kicker{
+  font-size:.72rem;
+  text-transform:uppercase;
+  letter-spacing:.12em;
+  color:inherit;
+  opacity:.72;
+}
+.hero-name{
+  position:relative;
+  z-index:1;
+  margin-top:16px;
+  max-width:720px;
+  font-size:clamp(2.6rem,5vw,4rem);
+  line-height:.94;
+  letter-spacing:-.08em;
+}
+.hero-meta-grid{
+  position:relative;
+  z-index:1;
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:16px;
+  margin-top:28px;
+}
+.hero-big-number{
+  font-size:clamp(2.4rem,5vw,3.8rem);
+  line-height:.9;
+  letter-spacing:-.07em;
+}
+.hero-meta-label{
+  margin-top:8px;
+  font-size:.78rem;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  color:rgba(243,248,247,.68);
+}
+.hero-progress-shell{
+  position:relative;
+  z-index:1;
+  margin-top:28px;
+  padding-top:22px;
+  border-top:1px solid rgba(243,248,247,.18);
+}
+.hero-progress-track{
+  position:relative;
+  height:16px;
+  overflow:hidden;
+  border-radius:999px;
+  background:rgba(243,248,247,.14);
+}
+.hero-progress-fill{
+  position:relative;
+  height:100%;
+  border-radius:999px;
+  background:#c3d4d2;
+}
+.hero-progress-row{
+  display:flex;
+  align-items:flex-end;
+  justify-content:space-between;
+  gap:16px;
+  margin-top:12px;
+}
+.hero-progress-caption{
+  font-size:.92rem;
+  color:rgba(247,251,245,.72);
+}
+.progress-dial{
+  --p:0;
+  width:188px;
+  aspect-ratio:1;
+  border-radius:50%;
+  background:
+    radial-gradient(circle at center, #fbfbf9 0 58%, transparent 59% 100%),
+    conic-gradient(var(--accent) calc(var(--p) * 1%), #dfe5dd 0);
+  display:grid;
+  place-items:center;
+  margin-left:auto;
+}
+.progress-dial-inner{
+  width:116px;
+  height:116px;
+  border-radius:50%;
+  background:#fbfbf9;
+  display:grid;
+  place-items:center;
+  text-align:center;
+}
+.progress-dial-value{
+  font-size:2.8rem;
+  line-height:.9;
+  letter-spacing:-.08em;
+}
+.progress-dial-label{
+  margin-top:6px;
+  font-size:.78rem;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.metric-label{
+  font-size:.78rem;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  color:var(--muted);
+}
+.metric-big{
+  margin-top:18px;
+  font-size:clamp(2.4rem,4vw,3.6rem);
+  line-height:.92;
+  letter-spacing:-.08em;
+}
+.metric-note{
+  margin-top:12px;
+  font-size:.94rem;
+  color:var(--muted);
+}
+.chart-card-head,
+.card-split-head{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:16px;
+}
+.chart-card-controls{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  gap:8px;
+}
+.chart-filter-pill{
+  display:inline-flex;
+  align-items:center;
+  padding:10px 12px;
+  border:1px solid #c9ccc8;
+  border-radius:var(--radius-12);
+  background:transparent;
+  color:#5f6762;
+  font-size:.76rem;
+  font-weight:700;
+  letter-spacing:.04em;
+  cursor:pointer;
+  transition:background .16s ease, color .16s ease, border-color .16s ease;
+}
+.chart-filter-pill.active{
+  background:#000000;
+  border-color:#000000;
+  color:#f5f5f5;
+}
+.chart-card-title,
+.block-title{
+  font-size:1.45rem;
+  line-height:1;
+  letter-spacing:-.05em;
+}
+.block-copy{
+  margin-top:10px;
+  max-width:520px;
+  font-size:.94rem;
+  line-height:1.55;
+  color:var(--muted);
+}
+.chart-legend.visual{
+  margin-top:18px;
+}
+.chart-panel.visual{
+  padding:0;
+  display:flex;
+  flex:1;
+  flex-direction:column;
+  min-height:0;
+}
+.chart-wrap.visual{
+  flex:1;
+  min-height:0;
+  padding-top:24px;
+  background-position:0 28px;
+}
+.chart-skeleton{
+  position:relative;
+  flex:1;
+  min-height:0;
+  overflow:hidden;
+  background:
+    radial-gradient(rgba(17,17,17,.08) .8px, transparent .8px),
+    linear-gradient(180deg, rgba(255,255,255,.62), rgba(247,245,240,.92));
+  background-size:18px 18px, 100% 100%;
+  background-position:0 28px, 0 0;
+}
+.chart-skeleton .chart-svg{
+  opacity:.55;
+}
+.chart-skeleton .chart-axis,
+.chart-skeleton .chart-top{
+  color:rgba(122,122,116,.8);
+}
+.chart-empty{
+  flex:1;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  padding:48px 24px;
+  text-align:center;
+  background-image:radial-gradient(rgba(17,17,17,.07) .8px, transparent .8px);
+  background-size:18px 18px;
+}
+.chart-empty-title{
+  font-size:.94rem;
+  font-weight:600;
+  letter-spacing:-.02em;
+  color:var(--text);
+  opacity:.5;
+}
+.chart-empty-body{
+  max-width:240px;
+  font-size:.8rem;
+  line-height:1.55;
+  color:var(--muted);
+  opacity:.8;
+}
+.events-list-visual{
+  display:flex;
+  flex-direction:column;
+  margin-top:16px;
+  flex:1;
+  min-height:0;
+  overflow-y:auto;
+  padding-right:2px;
+}
+.quota-section{
+  margin-top:18px;
+  padding-top:18px;
+  border-top:1px solid var(--line);
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  flex-shrink:0;
+}
+.quota-section-kicker{
+  font-size:.69rem;
+  text-transform:uppercase;
+  letter-spacing:.12em;
+  color:var(--muted);
+}
+.quota-grid{
+  display:grid;
+  grid-template-columns:repeat(2,1fr);
+  gap:8px;
+  overflow-y:auto;
+  max-height:230px;
+  padding-right:2px;
+}
+.quota-grid{scrollbar-width:none}
+.quota-grid::-webkit-scrollbar{display:none}
+.quota-cell{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:6px;
+  padding:14px 8px 12px;
+  border:0;
+  border-radius:var(--radius-12);
+  background:transparent;
+  text-align:center;
+}
+.quota-cell-title{
+  font-size:.75rem;
+  font-weight:600;
+  letter-spacing:-.01em;
+  color:var(--text);
+  line-height:1.25;
+  word-break:break-word;
+}
+.quota-cell-sub{
+  font-size:.63rem;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:.06em;
+  line-height:1.3;
+}
+.quota-cell-count{
+  font-size:.82rem;
+  font-weight:600;
+  letter-spacing:-.02em;
+  color:var(--text);
+  margin-top:2px;
+}
+.quota-empty{
+  grid-column:span 2;
+  padding:24px 0;
+  text-align:center;
+  font-size:.8rem;
+  color:var(--muted);
+}
+.event-row{
+  display:grid;
+  grid-template-columns:4.5rem 1fr;
+  gap:0 12px;
+  align-items:baseline;
+  padding:10px 0;
+  border-top:1px solid var(--line);
+}
+.event-row:first-child{
+  border-top:none;
+  padding-top:0;
+}
+.events-list-visual::-webkit-scrollbar{
+  width:3px;
+}
+.events-list-visual::-webkit-scrollbar-thumb{
+  background:#d2d5d1;
+  border-radius:999px;
+}
+.events-list-visual::-webkit-scrollbar-track{
+  background:transparent;
+}
+.event-time{
+  font-size:.69rem;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  color:var(--muted);
+  padding-top:.15em;
+  white-space:nowrap;
+}
+.event-message{
+  font-size:.875rem;
+  line-height:1.5;
+  word-break:break-word;
+}
+.logs-card{
+  width:100%;
+  height:320px;
+  display:flex;
+  flex-direction:column;
+}
+.logs-list{
+  display:flex;
+  flex-direction:column;
+  margin-top:16px;
+  flex:1;
+  min-height:0;
+  overflow-y:auto;
+  scrollbar-width:none;
+}
+.logs-list::-webkit-scrollbar{display:none}
+.snapshot-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:18px 24px;
+  margin-top:20px;
+}
+.snapshot-row{
+  display:grid;
+  gap:6px;
+}
+.snapshot-label{
+  font-size:.72rem;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  color:var(--muted);
+}
+.snapshot-value{
+  font-size:1.35rem;
+  line-height:1.1;
+  letter-spacing:-.04em;
+}
+.replica-strip{
+  display:grid;
+  gap:12px;
+  margin-top:20px;
+}
+.replica-pill{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  padding:14px 16px;
+  border-radius:var(--radius-12);
+  background:#f3f3ee;
+}
+.replica-pill-main{
+  font-weight:700;
+}
+.replica-pill-meta{
+  font-size:.9rem;
+  color:var(--muted);
+}
+@media (max-width: 1100px){
+  .app-header-bar{flex-direction:column;align-items:flex-start;}
+  .bento-card.hero,
+  .bento-card.progress,
+  .bento-card.chart,
+  .bento-card.events,
+  .bento-card.infra,
+  .bento-card.metric{
+    grid-column:span 12;
+  }
+  .infra-body{
+    flex-direction:column;
+  }
+  .infra-stats{
+    border-left:none;
+    border-top:1px solid var(--line);
+    padding-left:0;
+    padding-top:24px;
+    margin-left:0;
+    margin-top:24px;
+    flex-wrap:wrap;
+  }
+}
+@media (max-width: 700px){
+  :root{
+    --panel-frame-height:560px;
+  }
+  .workspace{
+    padding:16px;
+    gap:16px;
+  }
+  .dashboard-top{
+    flex-direction:column;
+    align-items:flex-start;
+  }
+  .bento-card{
+    padding:22px 18px;
+    border-radius:var(--radius-12);
+  }
+  .hero-meta-grid,
+  .snapshot-grid{
+    grid-template-columns:1fr;
+  }
+  .progress-dial{
+    width:156px;
+    margin:24px 0 0;
+  }
+  .header-run-meta{justify-items:start;text-align:left;white-space:normal}
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+(function () {
+const ACTIVE_PHASES = new Set(["launching", "loading_model", "model_ready", "generating", "running"]);
+const SECTION_META = {
+  overview: { label: "Overview" },
+  charts: { label: "Charts" },
+  logs: { label: "Logs" },
+  chain: { label: "Chain" }
+};
+const MAX_TS = 300;
+const chartHeight = 220;
+const chartWidth = 420;
+const chartPadding = { top: 14, right: 14, bottom: 20, left: 14 };
+const state = {
+  activeJobId: null,
+  activeChartKey: "throughput",
+  activeReplicaId: null,
+  connection: "connecting",
+  lastData: {},
+  reconnectTimer: null,
+  eventSource: null,
+  pollTimer: null,
+  timeseries: {},
+  jobPickerOpen: false,
+  lastRefreshed: null
+};
+const mockConfig = window.__ORCA_DASHBOARD_MOCK__ || null;
+
+const INST_GPU = {
+  "p5.48xlarge":"H100","p4d.24xlarge":"A100","p4de.24xlarge":"A100",
+  "p3.2xlarge":"V100","p3.8xlarge":"V100","p3.16xlarge":"V100","p3dn.24xlarge":"V100",
+  "g6e.xlarge":"L40S","g6e.2xlarge":"L40S","g6e.4xlarge":"L40S","g6e.8xlarge":"L40S",
+  "g6e.12xlarge":"L40S","g6e.16xlarge":"L40S","g6e.24xlarge":"L40S","g6e.48xlarge":"L40S",
+  "g6.xlarge":"L4","g6.2xlarge":"L4","g6.4xlarge":"L4","g6.8xlarge":"L4",
+  "g6.12xlarge":"L4","g6.16xlarge":"L4","g6.24xlarge":"L4","g6.48xlarge":"L4",
+  "g5.xlarge":"A10G","g5.2xlarge":"A10G","g5.4xlarge":"A10G","g5.8xlarge":"A10G",
+  "g5.12xlarge":"A10G","g5.16xlarge":"A10G","g5.24xlarge":"A10G","g5.48xlarge":"A10G"
+};
+
+function esc(value) {
+  if (value == null) return "";
+  const div = document.createElement("div");
+  div.textContent = String(value);
+  return div.innerHTML;
+}
+
+function fmtNumber(value) {
+  if (value == null || Number.isNaN(value)) return "\u2014";
+  return new Intl.NumberFormat("en-US").format(Math.round(value * 10) / 10);
+}
+
+function fmtCurrency(value) {
+  if (value == null || Number.isNaN(value)) return "\u2014";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(value);
+}
+
+function fmtDuration(seconds) {
+  if (seconds == null || seconds <= 0) return "\u2014";
+  if (seconds < 60) return Math.round(seconds) + "s";
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return m + "m " + s + "s";
+  }
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h + "h " + m + "m";
+}
+
+function fmtProgress(progress) {
+  return Math.round((progress || 0) * 100);
+}
+
+function fmtStatus(value) {
+  if (!value) return "\u2014";
+  const text = String(value).replace(/_/g, " ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function fmtLastRefreshed() {
+  if (!state.lastRefreshed) return "—";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(state.lastRefreshed));
+}
+
+function fmtTimestamp(ts) {
+  if (!ts) return "\u2014";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(ts * 1000));
+}
+
+function gpuName(instanceType) {
+  return INST_GPU[instanceType] || instanceType || "\u2014";
+}
+
+function phaseColor(phase) {
+  const map = {
+    running:"#4ade80",generating:"#4ade80",succeeded:"#4ade80",completed:"#4ade80",
+    model_ready:"#60a5fa",loading_model:"#60a5fa",provisioned:"#60a5fa",
+    launching:"#facc15",
+    failed:"#f87171",dead:"#f87171",killed:"#f87171"
+  };
+  return map[phase] || "#9ca3af";
+}
+
+function getJobs(data) {
+  return (data.jobs || []).slice().sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+}
+
+function getActiveJob(data) {
+  const jobs = getJobs(data);
+  if (!jobs.length) return null;
+  const selected = jobs.find((job) => job.job_id === state.activeJobId) || jobs[0];
+  state.activeJobId = selected.job_id;
+  return selected;
+}
+
+function getReplicas(data, job) {
+  if (!job) return [];
+  return (data.replicas && data.replicas[job.job_id]) || [];
+}
+
+function getLiveReplicas(data, job) {
+  const dead = new Set(["failed", "dead", "killed", "swapped_out"]);
+  return getReplicas(data, job).filter((replica) => !dead.has(replica.phase));
+}
+
+function getQuotaRows(data) {
+  return (data.quota || []).filter((item) => (item.Baseline || 0) > 0);
+}
+
+function getEvents(data) {
+  return (data.events || []).slice().sort((a, b) => (a.ts || 0) - (b.ts || 0));
+}
+
+function pickWorkload(job, chunks) {
+  if (!job) return null;
+  return {
+    model: job.model_name,
+    prompts: job.num_lines,
+    avg_input_tokens: job.avg_input_tokens,
+    avg_output_tokens: job.avg_output_tokens,
+    slo_hours: job.slo_hours,
+    market: job.market,
+    status: job.status,
+    chunks: chunks
+  };
+}
+
+function pickChain(job, replicas, cost) {
+  if (!job) return null;
+  const progressPct = fmtProgress(job.progress);
+  const eta = cost && cost.eta_sec ? cost.eta_sec : null;
+  return {
+    status: ACTIVE_PHASES.has(job.status) ? "running" : job.status,
+    replicas: replicas.length,
+    progress_pct: progressPct,
+    eta_label: eta ? fmtDuration(eta) : job.status === "succeeded" ? "done" : "\u2014",
+    replicas_detail: replicas
+  };
+}
+
+function pickMetricsSummary(job, metrics, cost, replicas) {
+  if (!job) return null;
+  let throughput = metrics.avg_generation_throughput_toks_per_s;
+  if (state.activeReplicaId) {
+    const ar = replicas.find((r) => r.replica_id === state.activeReplicaId);
+    if (ar && ar.throughput_toks != null) throughput = ar.throughput_toks;
+  }
+  return {
+    projected_total_usd: cost && cost.projected_total_usd,
+    cost_accrued_usd: cost && cost.accrued_usd,
+    cost_rate_per_hour_usd: cost && cost.price_per_hour,
+    cost_rate_label: ((cost && cost.num_running_replicas) || 0) + " replica" + (((cost && cost.num_running_replicas) || 0) === 1 ? "" : "s"),
+    time_to_complete: cost && cost.eta_sec ? fmtDuration(cost.eta_sec) : job.status === "succeeded" ? "done" : "\u2014",
+    slo_hours: job.slo_hours,
+    throughput_tok_per_s: throughput,
+    throughput_avg_window_s: 10,
+    replicas: replicas.length
+  };
+}
+
+function chartPoint(index, pointCount, value, maxY) {
+  const usableWidth = chartWidth - chartPadding.left - chartPadding.right;
+  const usableHeight = chartHeight - chartPadding.top - chartPadding.bottom;
+  return {
+    x: chartPadding.left + (index / Math.max(pointCount - 1, 1)) * usableWidth,
+    y: chartHeight - chartPadding.bottom - (Math.max(value, 0) / Math.max(maxY, 1)) * usableHeight
+  };
+}
+
+function buildLinePath(values, maxY) {
+  return values.map((value, index) => {
+    const point = chartPoint(index, values.length, value, maxY);
+    return (index === 0 ? "M " : "L ") + point.x.toFixed(2) + " " + point.y.toFixed(2);
+  }).join(" ");
+}
+
+function buildAreaPath(values, maxY) {
+  const line = buildLinePath(values, maxY);
+  const baseY = chartHeight - chartPadding.bottom;
+  const usableWidth = chartWidth - chartPadding.left - chartPadding.right;
+  const lastX = chartPadding.left + usableWidth;
+  return line + " L " + lastX.toFixed(2) + " " + baseY.toFixed(2) + " L " + chartPadding.left + " " + baseY.toFixed(2) + " Z";
+}
+
+function buildPartialLinePath(values, maxY, endIndex) {
+  if (!values.length) return "";
+  return values
+    .slice(0, Math.max(1, endIndex + 1))
+    .map((value, index) => {
+      const point = chartPoint(index, values.length, value, maxY);
+      return (index === 0 ? "M " : "L ") + point.x.toFixed(2) + " " + point.y.toFixed(2);
+    })
+    .join(" ");
+}
+
+function normalizeTimeseries(data, job) {
+  if (!job) return [];
+  const server = (data.timeseries && data.timeseries[job.job_id]) || [];
+  if (server.length && (!state.timeseries[job.job_id] || state.timeseries[job.job_id].length < server.length)) {
+    state.timeseries[job.job_id] = server.slice(-MAX_TS);
+  }
+  const metrics = (data.metrics && data.metrics[job.job_id]) || {};
+  if (ACTIVE_PHASES.has(job.status) && Object.keys(metrics).length) {
+    if (!state.timeseries[job.job_id]) state.timeseries[job.job_id] = [];
+    const last = state.timeseries[job.job_id][state.timeseries[job.job_id].length - 1];
+    const nextTs = Date.now() / 1000;
+    if (!last || nextTs - last.timestamp >= 1.5) {
+      state.timeseries[job.job_id].push(Object.assign({ timestamp: nextTs }, metrics));
+      state.timeseries[job.job_id] = state.timeseries[job.job_id].slice(-MAX_TS);
+    }
+  }
+  const activeIds = new Set(getJobs(data).map((item) => item.job_id));
+  Object.keys(state.timeseries).forEach((jobId) => {
+    if (!activeIds.has(jobId)) delete state.timeseries[jobId];
+  });
+  return state.timeseries[job.job_id] || [];
+}
+
+function chartDefinitions(series) {
+  if (!series.length) return [];
+  const throughputMaxGen = Math.max(2000, ...series.map((point) => point.avg_generation_throughput_toks_per_s || 0));
+  const throughputMaxPromptRaw = Math.max(3000, ...series.map((point) => point.avg_prompt_throughput_toks_per_s || 0));
+  const defs = [
+    {
+      key: "throughput",
+      title: "Throughput",
+      fields: ["avg_generation_throughput_toks_per_s", "avg_prompt_throughput_toks_per_s"],
+      leftLabel: "Gen tok/s",
+      rightLabel: "Prompt tok/s",
+      topTick: fmtNumber(throughputMaxGen),
+      maxY: throughputMaxGen,
+      series: [
+        {
+          label: "Gen tok/s",
+          values: series.map((point) => point.avg_generation_throughput_toks_per_s || 0),
+          color: "#111111",
+          fill: "rgba(17,17,17,.06)",
+          valueSuffix: " tok/s"
+        },
+        {
+          label: "Prompt tok/s",
+          values: series.map((point) => {
+            const raw = point.avg_prompt_throughput_toks_per_s || 0;
+            return (raw / Math.max(throughputMaxPromptRaw, 1)) * throughputMaxGen;
+          }),
+          tooltipValues: series.map((point) => point.avg_prompt_throughput_toks_per_s || 0),
+          color: "#8a8a8a",
+          fill: "rgba(17,24,39,.05)",
+          valueSuffix: " tok/s"
+        }
+      ]
+    },
+    {
+      key: "scheduler",
+      title: "Scheduler",
+      fields: ["num_requests_running", "num_requests_waiting", "num_requests_swapped"],
+      topTick: fmtNumber(Math.max(500, ...series.map((point) => Math.max(point.num_requests_running || 0, point.num_requests_waiting || 0, point.num_requests_swapped || 0)))),
+      maxY: Math.max(500, ...series.map((point) => Math.max(point.num_requests_running || 0, point.num_requests_waiting || 0, point.num_requests_swapped || 0))),
+      series: [
+        { label: "Running", values: series.map((point) => point.num_requests_running || 0), color: "#111111", fill: "rgba(17,17,17,.06)" },
+        { label: "Waiting", values: series.map((point) => point.num_requests_waiting || 0), color: "#6f6f6f", fill: "rgba(120,120,120,.05)" },
+        { label: "Swapped", values: series.map((point) => point.num_requests_swapped || 0), color: "#b5b5b5", fill: "rgba(181,181,181,.10)" }
+      ]
+    },
+    {
+      key: "gpu",
+      title: "GPU Utilization",
+      fields: ["gpu_sm_util_pct", "gpu_mem_bw_util_pct"],
+      topTick: "100",
+      maxY: 100,
+      series: [
+        { label: "SM %", values: series.map((point) => point.gpu_sm_util_pct || 0), color: "#111111", fill: "rgba(17,17,17,.06)", valueSuffix: "%" },
+        { label: "MemBW %", values: series.map((point) => point.gpu_mem_bw_util_pct || 0), color: "#7a7a7a", fill: "rgba(122,122,122,.05)", valueSuffix: "%" }
+      ]
+    },
+    {
+      key: "latency",
+      title: "Latency (ms)",
+      fields: ["ttft_ms_p50", "ttft_ms_p95", "tpot_ms_p50", "tpot_ms_p95"],
+      topTick: fmtNumber(Math.max(80000, ...series.map((point) => Math.max(point.ttft_ms_p95 || 0, point.ttft_ms_p50 || 0, point.tpot_ms_p95 || 0, point.tpot_ms_p50 || 0)))),
+      maxY: Math.max(80000, ...series.map((point) => Math.max(point.ttft_ms_p95 || 0, point.ttft_ms_p50 || 0, point.tpot_ms_p95 || 0, point.tpot_ms_p50 || 0))),
+      series: [
+        { label: "TTFT p50", values: series.map((point) => point.ttft_ms_p50 || 0), color: "#111111", valueSuffix: " ms" },
+        { label: "TTFT p95", values: series.map((point) => point.ttft_ms_p95 || 0), color: "#555555", dashed: true, valueSuffix: " ms" },
+        { label: "TPOT p50", values: series.map((point) => point.tpot_ms_p50 || 0), color: "#8a8a8a", valueSuffix: " ms" },
+        { label: "TPOT p95", values: series.map((point) => point.tpot_ms_p95 || 0), color: "#6b7280", dashed: true, valueSuffix: " ms" }
+      ]
+    }
+  ];
+  return defs.filter((definition) => definition.fields.some((field) => series.some((point) => point[field] != null)));
+}
+
+function renderDonut(used, total) {
+  const r = 20, c = 28;
+  const circ = 2 * Math.PI * r;
+  const pct = total > 0 ? Math.min(used / total, 1) : 0;
+  const filled = pct * circ;
+  const trackColor = "#ebebea";
+  const fillColor = "#111111";
+  return '<svg width="56" height="56" viewBox="0 0 56 56">'
+    + '<circle cx="' + c + '" cy="' + c + '" r="' + r + '" fill="none" stroke="' + trackColor + '" stroke-width="9"></circle>'
+    + (pct > 0 ? '<circle cx="' + c + '" cy="' + c + '" r="' + r + '" fill="none" stroke="' + fillColor + '" stroke-width="9"'
+      + ' stroke-dasharray="' + filled.toFixed(2) + ' ' + (circ - filled).toFixed(2) + '"'
+      + ' stroke-linecap="round" transform="rotate(-90 ' + c + ' ' + c + ')"></circle>' : '')
+    + '</svg>';
+}
+
+function renderMetricCard(label, value, detail) {
+  return '<section class="card no-divider"><div class="card-header"><div class="card-title">' + esc(label) + '</div></div><div class="card-body"><div class="metric-value">' + esc(value) + '</div><div class="metric-detail">' + esc(detail) + '</div></div></section>';
+}
+
+function renderCard(title, desc, body, accent, noDivider) {
+  return '<section class="card' + (accent ? ' accent' : '') + (noDivider ? ' no-divider' : '') + '"><div class="card-header"><div class="card-title">' + esc(title) + '</div>' + (desc ? '<div class="card-desc">' + esc(desc) + '</div>' : '') + '</div><div class="card-body">' + body + '</div></section>';
+}
+
+function renderSectionShell(name, title, desc, body, kicker) {
+  return '<section class="dashboard-section" data-section="' + esc(name) + '"><div class="section-head"><div><div class="section-kicker">' + esc(kicker || "Dashboard Section") + '</div><div class="section-title">' + esc(title) + '</div></div><div class="section-desc">' + esc(desc) + '</div></div><div class="section-body">' + body + '</div></section>';
+}
+
+function renderSectionBlock(title, desc, body) {
+  return '<section class="section-block"><div><div class="section-block-title">' + esc(title) + '</div>' + (desc ? '<div class="section-block-desc">' + esc(desc) + '</div>' : '') + '</div>' + body + '</section>';
+}
+
+function renderSidebar(job, jobs, chain, metricsSummary) {
+  const picker = '<div class="job-picker' + (state.jobPickerOpen ? ' open' : '') + '" id="job-picker"><button class="job-picker-btn" type="button" id="job-picker-btn" aria-expanded="' + (state.jobPickerOpen ? 'true' : 'false') + '"><span>' + esc(job ? (job.model_name || job.job_id) : 'No active job') + '</span><span class="job-picker-chevron" aria-hidden="true"></span></button><div class="job-picker-menu">' + jobs.map((entry) => '<button class="job-option' + (entry.job_id === state.activeJobId ? ' active' : '') + '" type="button" data-job="' + esc(entry.job_id) + '"><span class="job-option-name">' + esc(entry.model_name || entry.job_id) + '</span><span class="job-option-meta">' + esc(entry.status === "succeeded" ? "done" : entry.status === "failed" ? "fail" : fmtProgress(entry.progress) + "%") + '</span></button>').join("") + '</div></div>';
+  return '<aside class="side-rail">'
+    + '<section class="rail-card"><div class="rail-job"><div class="rail-job-label">Select Job</div><div class="rail-job-name">' + picker + '</div><div class="rail-job-meta">' + esc(job ? fmtStatus(job.status) : 'Waiting for deployment') + '</div></div></section>'
+    + '<section class="rail-card"><div class="rail-section-label">Run Summary</div><div class="rail-summary" style="margin-top:14px"><div class="rail-summary-row"><div class="rail-summary-key">Projected</div><div class="rail-summary-value">' + esc(fmtCurrency(metricsSummary && metricsSummary.projected_total_usd)) + '</div></div><div class="rail-summary-row"><div class="rail-summary-key">ETA</div><div class="rail-summary-value">' + esc(chain && chain.eta_label ? chain.eta_label : '\u2014') + '</div></div><div class="rail-summary-row"><div class="rail-summary-key">Updated</div><div class="rail-summary-value">' + esc(fmtLastRefreshed()) + '</div></div></div></section>'
+    + '</aside>';
+}
+
+function renderJobRow(job, jobs) {
+  const jobName = job ? (job.model_name || job.job_id) : 'No active job';
+  const selectorOptions = jobs.map((entry) => {
+    const active = entry.job_id === state.activeJobId;
+    const pct = fmtProgress(entry.progress);
+    const color = phaseColor(entry.status);
+    const label = entry.status === "succeeded" ? "done" : entry.status === "failed" ? "failed" : pct + '%';
+    return '<button class="job-selector-option' + (active ? ' active' : '') + '" type="button" data-job="' + esc(entry.job_id) + '">'
+      + '<div class="job-selector-option-left"><span class="job-selector-option-name">' + esc(entry.model_name || entry.job_id) + '</span></div>'
+      + '<span class="job-selector-option-meta">' + esc(label) + '</span>'
+      + '</button>';
+  }).join("");
+  const selectorHtml = '<div class="job-selector' + (state.jobPickerOpen ? ' open' : '') + '" id="job-selector">'
+    + '<button class="job-selector-trigger" type="button" id="job-selector-btn">Switch job</button>'
+    + '<div class="job-selector-menu">' + selectorOptions + '</div>'
+    + '</div>';
+  return '<div class="dashboard-job-row">'
+    + '<div class="job-name-display">' + esc(jobName) + '</div>'
+    + (jobs.length ? selectorHtml : '')
+    + '</div>';
+}
+
+function renderStickyHeader(job, jobs, chain, metricsSummary) {
+  return '<header class="app-header-bar">' + renderJobRow(job, jobs) + '</header>';
+}
+
+function seriesSafe(value) {
+  return value == null ? "\u2014" : fmtNumber(value);
+}
+
+function renderVisualChartCard(definition, allDefinitions) {
+  const legend = definition.series.map((item) => '<span class="chart-legend-item"><span class="chart-line" style="border-top-color:' + item.color + ';border-top-style:' + (item.dashed ? "dashed" : "solid") + '"></span><span>' + esc(item.label) + '</span></span>').join("");
+  const filters = allDefinitions.map((item) => '<button class="chart-filter-pill' + (item.key === definition.key ? ' active' : '') + '" type="button" data-chart-filter="' + esc(item.key) + '">' + esc(item.title) + '</button>').join("");
+  const gridLines = [0.25, 0.5, 0.75, 1].map((ratio) => {
+    const y = chartHeight - chartPadding.bottom - (chartHeight - chartPadding.top - chartPadding.bottom) * ratio;
+    return '<line x1="' + chartPadding.left + '" y1="' + y + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + y + '" stroke="#e4e7df" stroke-width="1"></line>';
+  }).join("");
+  const paths = definition.series.map((item) => '<path d="' + buildLinePath(item.values, definition.maxY) + '" fill="none" stroke="' + item.color + '" stroke-opacity="0.24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
+  return '<section class="bento-card chart"><div class="chart-card-head"><div><div class="bento-kicker">Performance</div><div class="chart-card-title">' + esc(definition.title) + '</div></div><div class="chart-card-controls">' + filters + '</div></div><div class="chart-legend visual">' + legend + '</div><div class="chart-panel visual"><div class="chart-wrap visual" data-chart=\'' + esc(JSON.stringify(definition)) + '\'><svg class="chart-svg" viewBox="0 0 ' + chartWidth + ' ' + chartHeight + '" preserveAspectRatio="xMidYMid meet">' + gridLines + '<line x1="' + chartPadding.left + '" y1="' + (chartHeight - chartPadding.bottom) + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="#cfd6e4" stroke-width="1"></line>' + paths + '<g class="hover-series"></g><line class="hover-line" x1="0" y1="' + chartPadding.top + '" x2="0" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="rgba(16,20,24,.18)" stroke-dasharray="4 4" stroke-width="1" style="display:none"></line><g class="hover-points"></g><rect class="hover-hit" x="' + chartPadding.left + '" y="' + chartPadding.top + '" width="' + (chartWidth - chartPadding.left - chartPadding.right) + '" height="' + (chartHeight - chartPadding.top - chartPadding.bottom) + '" fill="transparent"></rect></svg>' + (definition.leftLabel ? '<span class="chart-axis left">' + esc(definition.leftLabel) + '</span>' : '') + (definition.rightLabel ? '<span class="chart-axis right">' + esc(definition.rightLabel) + '</span>' : '') + (definition.topTick ? '<span class="chart-top">' + esc(definition.topTick) + '</span>' : '') + '</div><div class="chart-footer"><div class="tooltip-title">Hover a point</div><div class="tooltip-rows"></div></div></div></section>';
+}
+
+function renderChartSkeletonCard() {
+  return '<section class="bento-card chart"><div class="chart-card-head"><div><div class="bento-kicker">Performance</div><div class="chart-card-title">Throughput</div></div></div><div class="chart-panel visual"><div class="chart-empty"><div class="chart-empty-title">No data yet</div><div class="chart-empty-body">Performance metrics will appear once your deployment starts streaming data.</div></div></div></section>';
+}
+
+function renderBentoDashboard(job, jobs, workload, chain, metricsSummary, events, series, quotaRows) {
+
+  // Replica table
+  const hasReplicas = chain && chain.replicas_detail && chain.replicas_detail.length;
+  let replicaTableHtml;
+  if (hasReplicas) {
+    const rows = chain.replicas_detail.map((r) => {
+      const active = r.replica_id === state.activeReplicaId;
+      return '<tr class="replica-row' + (active ? ' active' : '') + '" data-replica="' + esc(r.replica_id) + '">'
+        + '<td>' + esc(fmtStatus(r.phase)) + '</td>'
+        + '<td>' + esc(r.replica_id ? String(r.replica_id).slice(-8) : '\u2014') + '</td>'
+        + '<td>' + esc(r.cloud || '\u2014') + '</td>'
+        + '<td>' + esc(r.region || '\u2014') + '</td>'
+        + '<td>' + esc(r.instance_type || '\u2014') + '</td>'
+        + '<td>' + esc(gpuName(r.instance_type)) + '</td>'
+        + '<td>' + esc(r.market || '\u2014') + '</td>'
+        + '<td>' + esc(job && job.tp != null ? job.tp : '\u2014') + '</td>'
+        + '<td>' + esc(job && job.pp != null ? job.pp : '\u2014') + '</td>'
+        + '<td>' + esc(r.request_success_total != null ? fmtNumber(r.request_success_total) : '\u2014') + '</td>'
+        + '<td>' + esc(r.throughput_toks != null ? fmtNumber(r.throughput_toks) + ' tok/s' : '\u2014') + '</td>'
+        + '<td>' + esc(r.running_since ? fmtDuration((Date.now() / 1000) - r.running_since) : '\u2014') + '</td>'
+        + '</tr>';
+    }).join("");
+    replicaTableHtml = '<div class="replica-table-wrap"><table class="replica-tbl">'
+      + '<thead><tr>'
+      + '<th>Phase</th><th>Replica</th><th>Cloud</th><th>Region</th><th>Instance</th><th>GPU</th><th>Market</th><th>TP</th><th>PP</th><th>Reqs</th><th>Tok/s</th><th>Uptime</th>'
+      + '</tr></thead>'
+      + '<tbody>' + rows + '</tbody>'
+      + '</table></div>';
+  } else {
+    replicaTableHtml = '<div class="replica-table-wrap"><div class="replica-table-empty"><div class="chart-empty-title">No chain yet</div><div class="chart-empty-body">Chain placement and utilization will appear once your deployment provisions.</div></div></div>';
+  }
+
+  if (!job) {
+    return '<main class="workspace-main">'
+      + '<div class="dashboard-top">' + replicaTableHtml + '</div>'
+      + '<div class="bento-grid"><section class="bento-card hero" style="grid-column:span 12;min-height:260px"><div class="bento-kicker">Waiting</div><div class="hero-name">Start a deployment to light up the workspace.</div></section></div>'
+      + '</main>';
+  }
+
+  const progressPct = chain ? chain.progress_pct : 0;
+  const recent = events.filter((entry) => !entry.job_id || entry.job_id === job.job_id).slice().reverse().map((entry) => {
+    const time = new Date((entry.ts || 0) * 1000).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    return '<div class="event-row"><div class="event-time">' + esc(time) + '</div><div class="event-message">' + esc(entry.message) + '</div></div>';
+  }).join("") || '<div class="metric-note">No events yet.</div>';
+  const chartDefs = chartDefinitions(series);
+  const primaryChart = chartDefs.find((item) => item.key === state.activeChartKey) || chartDefs[0] || null;
+
+  return '<main class="workspace-main">'
+    + '<div class="dashboard-top">' + replicaTableHtml + '</div>'
+    + '<div class="bento-grid">'
+    + '<section class="bento-card metric"><div class="metric-label">Cost Accrued</div><div class="metric-big">' + esc(fmtCurrency(metricsSummary && metricsSummary.cost_accrued_usd)) + '</div><div class="metric-note">Projected total ' + esc(fmtCurrency(metricsSummary && metricsSummary.projected_total_usd)) + '.</div></section>'
+    + '<section class="bento-card metric"><div class="metric-label">Progress</div><div class="metric-big">' + esc(progressPct + '%') + '</div><div class="metric-note">' + esc(fmtStatus(job.status)) + ' across the active run.</div></section>'
+    + '<section class="bento-card metric"><div class="metric-label">ETA</div><div class="metric-big">' + esc(chain && chain.eta_label ? chain.eta_label : '\u2014') + '</div><div class="metric-note">Against an SLO of ' + esc(job.slo_hours != null ? job.slo_hours + 'h' : '\u2014') + '.</div></section>'
+    + '<section class="bento-card metric"><div class="metric-label">Tok/s</div><div class="metric-big">' + esc(metricsSummary && metricsSummary.throughput_tok_per_s != null ? fmtNumber(metricsSummary.throughput_tok_per_s) : '\u2014') + '</div><div class="metric-note">10 second rolling generation throughput.</div></section>'
+    + (function() {
+        const quotaCells = quotaRows && quotaRows.length
+          ? quotaRows.map((item) => {
+              const used = item.Used || 0;
+              const total = item.Baseline || 0;
+              const sub = (item.GPU || 'GPU') + (item.Market ? ' · ' + String(item.Market).replace(/_/g, ' ') : '');
+              return '<div class="quota-cell">'
+                + '<div class="quota-cell-title">' + esc(item.Region || '—') + '</div>'
+                + '<div class="quota-cell-sub">' + esc(sub) + '</div>'
+                + renderDonut(used, total)
+                + '<div class="quota-cell-count">' + used + '/' + total + '</div>'
+                + '</div>';
+            }).join("")
+          : '<div class="quota-empty">No quota data</div>';
+        return '<section class="bento-card events">'
+          + '<div class="bento-kicker">Resources</div>'
+          + '<div class="quota-grid" style="margin-top:16px;max-height:calc(100% - 32px)">' + quotaCells + '</div>'
+          + '</section>';
+      })()
+    + (primaryChart ? renderVisualChartCard(primaryChart, chartDefs) : renderChartSkeletonCard())
+    + '</div>'
+    + '<section class="bento-card logs-card"><div class="bento-kicker">Activity</div><div class="logs-list">' + recent + '</div></section>'
+    + '</main>';
+}
+
+function renderOverviewSection(data, job, workload, chain, metricsSummary, quotaRows, events) {
+  if (!job) {
+    return renderSectionShell(
+      "overview",
+      "Overview",
+      "High-level run status, progress, and recent activity for the selected job.",
+      '<div class="empty">No jobs yet. Deploy a model to get started.</div>',
+      "Run Summary"
+    );
+  }
+  const recentEvents = events.slice(-5).map((entry) => {
+    const time = new Date((entry.ts || 0) * 1000).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return '<div class="inline-log"><div class="inline-log-time">' + esc(time) + '</div><div class="inline-log-message">' + esc(entry.message) + '</div></div>';
+  }).join("");
+  const summaryRows = [
+    ["Status", fmtStatus(job.status)],
+    ["Progress", chain.progress_pct + '%'],
+    ["ETA", chain.eta_label],
+    ["Replicas", fmtNumber(chain.replicas)],
+    ["SLO", metricsSummary.slo_hours ? metricsSummary.slo_hours + 'h' : "\u2014"],
+    ["Projected Cost", fmtCurrency(metricsSummary.projected_total_usd)]
+  ].map((item) => '<div class="info-row"><span class="tiny-label">' + esc(item[0]) + '</span><span class="info-value">' + esc(item[1]) + '</span></div>').join("");
+  const body = '<div class="overview-grid">'
+    + renderSectionBlock("Recent Events", "Latest scheduler and service messages for this run", '<div class="inline-section"><div class="inline-logs">' + (recentEvents || '<div class="metric-detail">No events yet.</div>') + '</div></div>')
+    + renderSectionBlock("Run Snapshot", "Core execution signals grouped into one quick-read panel", '<div class="info-list">' + summaryRows + '</div>')
+    + '</div>';
+  return renderSectionShell(
+    "overview",
+    "Overview",
+    "Primary status and recent activity, separated from the deeper operational sections below.",
+    body,
+    "Run Summary"
+  );
+}
+
+function renderChartCard(definition) {
+  const legend = definition.series.map((item) => '<span class="chart-legend-item"><span class="chart-line" style="border-top-color:' + item.color + ';border-top-style:' + (item.dashed ? "dashed" : "solid") + '"></span><span>' + esc(item.label) + '</span></span>').join("");
+  const gridLines = [0.25, 0.5, 0.75, 1].map((ratio) => {
+    const y = chartHeight - chartPadding.bottom - (chartHeight - chartPadding.top - chartPadding.bottom) * ratio;
+    return '<line x1="' + chartPadding.left + '" y1="' + y + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + y + '" stroke="#edf1f7" stroke-width="1"></line>';
+  }).join("");
+  const paths = definition.series.map((item) => '<path d="' + buildLinePath(item.values, definition.maxY) + '" fill="none" stroke="' + item.color + '" stroke-opacity="0.18" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
+  return '<section class="chart-panel"><div class="chart-panel-header"><div class="chart-panel-title">' + esc(definition.title) + '</div><div class="chart-legend">' + legend + '</div></div><div class="chart-wrap" data-chart=\'' + esc(JSON.stringify(definition)) + '\'><svg class="chart-svg" viewBox="0 0 ' + chartWidth + ' ' + chartHeight + '" preserveAspectRatio="none">' + gridLines + '<line x1="' + chartPadding.left + '" y1="' + (chartHeight - chartPadding.bottom) + '" x2="' + (chartWidth - chartPadding.right) + '" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="#cfd6e4" stroke-width="1"></line>' + paths + '<g class="hover-series"></g><line class="hover-line" x1="0" y1="' + chartPadding.top + '" x2="0" y2="' + (chartHeight - chartPadding.bottom) + '" stroke="rgba(16,20,24,.18)" stroke-dasharray="4 4" stroke-width="1" style="display:none"></line><g class="hover-points"></g><rect class="hover-hit" x="' + chartPadding.left + '" y="' + chartPadding.top + '" width="' + (chartWidth - chartPadding.left - chartPadding.right) + '" height="' + (chartHeight - chartPadding.top - chartPadding.bottom) + '" fill="transparent"></rect></svg>' + (definition.leftLabel ? '<span class="chart-axis left">' + esc(definition.leftLabel) + '</span>' : '') + (definition.rightLabel ? '<span class="chart-axis right">' + esc(definition.rightLabel) + '</span>' : '') + (definition.topTick ? '<span class="chart-top">' + esc(definition.topTick) + '</span>' : '') + '</div><div class="chart-footer"><div class="tooltip-title">Hover a point</div><div class="tooltip-rows"></div></div></section>';
+}
+
+function renderChartsSection(series) {
+  if (!series.length) {
+    return renderSectionShell(
+      "charts",
+      "Charts",
+      "Time-series performance views for throughput, GPU utilization, and latency.",
+      '<div class="empty">Waiting for time-series data.</div>',
+      "Performance"
+    );
+  }
+  return renderSectionShell(
+    "charts",
+    "Charts",
+    "Performance trends are grouped here so the monitoring views read as one coherent section.",
+    '<div class="chart-grid">' + chartDefinitions(series).map(renderChartCard).join("") + '</div>',
+    "Performance"
+  );
+}
+
+function renderLogsSection(events) {
+  const body = events.length ? events.map((entry) => {
+    const time = new Date((entry.ts || 0) * 1000).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return '<p class="log-row"><span class="log-time">[' + esc(time) + '] </span><span class="log-level-' + esc(entry.level || "info") + '">' + esc(entry.message) + '</span></p>';
+  }).join("") : '<div class="metric-detail">No events yet.</div>';
+  return renderSectionShell(
+    "logs",
+    "Logs",
+    "A dedicated stream for chronological events, separated from the snapshot cards and charts.",
+    renderSectionBlock("Logs", "Chronological service and scheduler events", '<div class="logs">' + body + '</div>'),
+    "Event Stream"
+  );
+}
+
+function renderChainSection(job, chain) {
+  if (!job) {
+    return renderSectionShell(
+      "chain",
+      "Chain",
+      "Replica state, infrastructure placement, and execution details for the active job.",
+      '<div class="empty">No active chain.</div>',
+      "Infrastructure"
+    );
+  }
+  const primary = chain.replicas_detail[0] || {};
+  const infoRows = [
+    ["Primary Replica", primary.replica_id ? String(primary.replica_id).slice(-8) : "\u2014"],
+    ["Region", primary.region || "\u2014"],
+    ["GPU", gpuName(primary.instance_type)],
+    ["Reqs", primary.request_success_total != null ? fmtNumber(primary.request_success_total) : "\u2014"]
+  ].map((item) => '<div class="info-row"><span class="tiny-label">' + esc(item[0]) + '</span><span class="info-value">' + esc(item[1]) + '</span></div>').join("");
+  const rows = chain.replicas_detail.map((replica) => {
+    return '<tr><td class="table-cell"><span class="phase-pill"><span class="phase-dot"></span>' + esc(replica.phase || "\u2014") + '</span></td><td class="table-cell">' + esc(replica.replica_id ? String(replica.replica_id).slice(-8) : "\u2014") + '</td><td class="table-cell">' + esc(replica.region || "\u2014") + '</td><td class="table-cell">' + esc(replica.instance_type || "\u2014") + '</td><td class="table-cell">' + esc(gpuName(replica.instance_type)) + '</td><td class="table-cell">' + esc(replica.market || "\u2014") + '</td><td class="table-cell">' + esc(job.tp != null ? job.tp : "\u2014") + '</td><td class="table-cell">' + esc(job.pp != null ? job.pp : "\u2014") + '</td><td class="table-cell">' + esc(replica.request_success_total != null ? fmtNumber(replica.request_success_total) : "\u2014") + '</td><td class="table-cell">' + esc(replica.throughput_toks != null ? fmtNumber(replica.throughput_toks) : "\u2014") + '</td><td class="table-cell">' + esc(replica.running_since ? fmtDuration((Date.now() / 1000) - replica.running_since) : "\u2014") + '</td></tr>';
+  }).join("");
+  return renderSectionShell(
+    "chain",
+    "Chain",
+    "Replica health and hardware allocation live together here so infrastructure details stay separate from application metrics.",
+    '<div class="chain-grid">'
+      + renderSectionBlock("Execution", "", '<div class="info-list">' + infoRows + '</div><div style="margin-top:20px"><div class="progress-track"><div class="progress-bar" style="width:' + chain.progress_pct + '%"></div></div></div>')
+      + renderSectionBlock("Replicas", "", '<div class="table-wrap"><table class="data-table"><thead><tr><th class="table-head">Phase</th><th class="table-head">Replica</th><th class="table-head">Region</th><th class="table-head">Instance</th><th class="table-head">GPU</th><th class="table-head">Market</th><th class="table-head">TP</th><th class="table-head">PP</th><th class="table-head">Reqs</th><th class="table-head">Tok/s</th><th class="table-head">Uptime</th></tr></thead><tbody>' + rows + '</tbody></table></div>')
+      + '</div>',
+    "Infrastructure"
+  );
+}
+
+function installChartInteractions() {
+  document.querySelectorAll("[data-chart]").forEach((node) => {
+    const definition = JSON.parse(node.getAttribute("data-chart"));
+    const hit = node.querySelector(".hover-hit");
+    const line = node.querySelector(".hover-line");
+    const activeSeries = node.querySelector(".hover-series");
+    const points = node.querySelector(".hover-points");
+    const footer = node.parentElement.querySelector(".chart-footer");
+    const tooltipTitle = footer.querySelector(".tooltip-title");
+    const tooltipRows = footer.querySelector(".tooltip-rows");
+    const count = Math.max.apply(null, definition.series.map((item) => item.values.length));
+    function showIndex(index) {
+      const anchor = chartPoint(index, count, definition.maxY * 0.5, definition.maxY);
+      line.setAttribute("x1", anchor.x);
+      line.setAttribute("x2", anchor.x);
+      line.style.display = "";
+      activeSeries.innerHTML = definition.series.map((item) => '<path d="' + buildPartialLinePath(item.values, definition.maxY, index) + '" fill="none" stroke="' + item.color + '" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"' + (item.dashed ? ' stroke-dasharray="5 4"' : '') + '></path>').join("");
+      points.innerHTML = definition.series.map((item) => {
+        const value = item.values[Math.min(index, item.values.length - 1)] || 0;
+        const point = chartPoint(index, count, value, definition.maxY);
+        return '<circle cx="' + point.x + '" cy="' + point.y + '" r="2.5" fill="' + item.color + '" stroke="#050607" stroke-width="1"></circle>';
+      }).join("");
+      tooltipTitle.textContent = "Sample " + String(index + 1).padStart(2, "0");
+      tooltipRows.innerHTML = definition.series.map((item) => {
+        const values = item.tooltipValues || item.values;
+        const currentValue = values[Math.min(index, values.length - 1)] || 0;
+        return '<div class="tooltip-row"><span class="tooltip-key"><span class="tooltip-dot" style="background:' + item.color + '"></span>' + esc(item.label) + '</span><span>' + esc(fmtNumber(currentValue) + (item.valueSuffix || "")) + '</span></div>';
+      }).join("");
+    }
+    function showLastPoint() { showIndex(count - 1); }
+    hit.addEventListener("mouseleave", showLastPoint);
+    hit.addEventListener("mousemove", function (event) {
+      const rect = hit.getBoundingClientRect();
+      const relativeX = (event.clientX - rect.left) / rect.width;
+      showIndex(Math.min(count - 1, Math.max(0, Math.round(relativeX * Math.max(count - 1, 0)))));
+    });
+    showLastPoint();
+  });
+}
+
+function render() {
+  const data = state.lastData || {};
+  const jobs = getJobs(data);
+  const job = getActiveJob(data);
+  const metrics = job && data.metrics ? (data.metrics[job.job_id] || {}) : {};
+  const chunks = job && data.chunks ? (data.chunks[job.job_id] || null) : null;
+  const replicas = getLiveReplicas(data, job);
+  const cost = job && data.cost ? (data.cost[job.job_id] || null) : null;
+  const quotaRows = getQuotaRows(data);
+  const events = getEvents(data);
+  const workload = pickWorkload(job, chunks);
+  const chain = pickChain(job, replicas, cost);
+  const metricsSummary = pickMetricsSummary(job, metrics, cost, replicas);
+  const series = normalizeTimeseries(data, job);
+  document.getElementById("app").innerHTML = '<div class="app-shell"><div class="workspace">'
+    + renderStickyHeader(job, jobs, chain || { replicas: 0, eta_label: "\u2014" }, metricsSummary || {})
+    + renderBentoDashboard(job, jobs, workload, chain || { progress_pct: 0, replicas: 0, eta_label: "\u2014", replicas_detail: [] }, metricsSummary || { throughput_avg_window_s: 10 }, events, series, quotaRows)
+    + '</div></div>';
+  const selectorBtn = document.getElementById("job-selector-btn");
+  if (selectorBtn) {
+    selectorBtn.onclick = function (e) {
+      e.stopPropagation();
+      state.jobPickerOpen = !state.jobPickerOpen;
+      render();
+    };
+  }
+  document.addEventListener("click", function closeSelector(e) {
+    if (state.jobPickerOpen && e.target && typeof e.target.closest === "function" && !e.target.closest("#job-selector")) {
+      state.jobPickerOpen = false;
+      render();
+      document.removeEventListener("click", closeSelector);
+    }
+  });
+  document.querySelectorAll("[data-job]").forEach((button) => {
+    button.onclick = function (e) {
+      e.stopPropagation();
+      const newId = this.getAttribute("data-job");
+      if (newId !== state.activeJobId) state.activeReplicaId = null;
+      state.activeJobId = newId;
+      state.jobPickerOpen = false;
+      render();
+    };
+  });
+  document.querySelectorAll("[data-replica]").forEach((el) => {
+    el.onclick = function () {
+      state.activeReplicaId = this.getAttribute("data-replica") || null;
+      render();
+    };
+  });
+  document.querySelectorAll("[data-chart-filter]").forEach((button) => {
+    button.onclick = function () {
+      state.activeChartKey = this.getAttribute("data-chart-filter") || "throughput";
+      render();
+    };
+  });
+  installChartInteractions();
+}
+
+function setConnection(next) {
+  state.connection = next;
+  render();
+}
+
+function pollOnce() {
+  if (mockConfig) return;
+  fetch(window.location.origin + "/dashboard/poll").then((response) => response.json()).then((payload) => {
+    state.lastData = payload;
+    state.lastRefreshed = Date.now();
+    setConnection("connected");
+  }).catch(function () {
+    setConnection("disconnected");
+  });
+}
+
+function startPolling() {
+  if (mockConfig) return;
+  if (state.pollTimer) return;
+  pollOnce();
+  state.pollTimer = setInterval(pollOnce, 2000);
+}
+
+function connect() {
+  if (mockConfig) {
+    const frames = Array.isArray(mockConfig.frames) && mockConfig.frames.length ? mockConfig.frames : [mockConfig.payload || {}];
+    let index = 0;
+    state.lastData = frames[0] || {};
+    setConnection("connected");
+    if (frames.length > 1) {
+      state.pollTimer = setInterval(function () {
+        index = (index + 1) % frames.length;
+        state.lastData = frames[index];
+        render();
+      }, mockConfig.interval_ms || 2000);
+    }
+    return;
+  }
+  if (state.eventSource) {
+    try { state.eventSource.close(); } catch (_err) {}
+  }
+  setConnection("connecting");
+  let gotData = false;
+  const source = new EventSource(window.location.origin + "/dashboard/stream");
+  state.eventSource = source;
+  const timeout = setTimeout(function () {
+    if (!gotData) {
+      try { source.close(); } catch (_err) {}
+      startPolling();
+    }
+  }, 5000);
+  source.onopen = function () {
+    setConnection("connected");
+  };
+  source.onmessage = function (event) {
+    gotData = true;
+    clearTimeout(timeout);
+    try {
+      state.lastData = JSON.parse(event.data);
+      state.lastRefreshed = Date.now();
+      state.connection = "connected";
+      render();
+    } catch (_err) {}
+  };
+  source.onerror = function () {
+    clearTimeout(timeout);
+    setConnection("disconnected");
+    try { source.close(); } catch (_err) {}
+    state.eventSource = null;
+    if (!gotData) {
+      startPolling();
+      return;
+    }
+    if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = setTimeout(connect, 3000);
+  };
+}
+
+render();
+connect();
+})();
+</script>
+</body>
+</html>
