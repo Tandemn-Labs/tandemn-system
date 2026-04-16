@@ -1157,6 +1157,202 @@ button,input,textarea,select{font:inherit}
   .projects-page{padding:32px 16px}
   .projects-grid{grid-template-columns:1fr}
 }
+.landing-header{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:22px 32px 20px;
+  border-bottom:1px solid var(--line);
+  background:#f7f7f6;
+  position:sticky;
+  top:0;
+  z-index:10;
+}
+.landing-title{
+  font-size:1.35rem;
+  font-weight:700;
+  letter-spacing:-.04em;
+  color:var(--text);
+}
+.landing-nav{
+  display:flex;
+  align-items:center;
+  gap:6px;
+}
+.landing-nav-btn{
+  padding:7px 14px;
+  border:0;
+  border-radius:8px;
+  background:transparent;
+  color:var(--muted);
+  font-size:.82rem;
+  font-weight:500;
+  cursor:pointer;
+  transition:background .15s ease,color .15s ease;
+}
+.landing-nav-btn:hover{
+  background:var(--surface-strong);
+  color:var(--text);
+}
+.landing-body{
+  padding:0 32px 0;
+  height:calc(100vh - 57px);
+  overflow:hidden;
+}
+.landing-layout{
+  display:grid;
+  grid-template-columns:minmax(240px,.3fr) minmax(0,.7fr);
+  gap:24px;
+  height:100%;
+}
+.landing-resources{
+  border:1px solid var(--line);
+  border-radius:var(--radius-12);
+  background:var(--surface);
+  padding:24px;
+  box-shadow:0 10px 28px rgba(17,17,17,.03);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  height:100%;
+}
+.landing-resources-title{
+  font-size:1.1rem;
+  font-weight:600;
+  letter-spacing:-.03em;
+  color:var(--text);
+  margin-bottom:18px;
+  flex-shrink:0;
+}
+.landing-resources .quota-list{
+  flex:1;
+  overflow-y:auto;
+  scrollbar-width:none;
+}
+.landing-resources .quota-list::-webkit-scrollbar{display:none}
+.landing-tables{
+  display:flex;
+  flex-direction:column;
+  gap:16px;
+  height:100%;
+  min-height:0;
+}
+.project-table-wrap{
+  border:1px solid var(--line);
+  border-radius:var(--radius-12);
+  background:var(--surface);
+  box-shadow:0 10px 28px rgba(17,17,17,.03);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  flex:1;
+  min-height:0;
+}
+.project-table-header{
+  padding:20px 24px 14px;
+  border-bottom:1px solid var(--line);
+  flex-shrink:0;
+}
+.project-table-title{
+  font-size:1.1rem;
+  font-weight:600;
+  letter-spacing:-.03em;
+  color:var(--text);
+}
+.project-table-sub{
+  margin-top:4px;
+  font-size:.82rem;
+  color:var(--muted);
+}
+.project-table-scroll{
+  flex:1;
+  overflow:auto;
+  scrollbar-width:none;
+}
+.project-table-scroll::-webkit-scrollbar{display:none}
+.project-table{
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0;
+}
+.project-table th{
+  padding:8px 12px;
+  text-align:left;
+  font-size:.68rem;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  color:var(--muted);
+  border-bottom:1px solid var(--line);
+  font-weight:500;
+  white-space:nowrap;
+  position:sticky;
+  top:0;
+  background:var(--surface);
+  z-index:1;
+}
+.project-table td{
+  padding:14px 12px;
+  text-align:left;
+  font-size:.82rem;
+  border-bottom:1px solid var(--line);
+  color:var(--text);
+  white-space:nowrap;
+}
+.project-table tbody tr:last-child td{
+  border-bottom:0;
+}
+.project-table tbody tr.clickable{
+  cursor:pointer;
+  transition:background .15s ease;
+}
+.project-table tbody tr.clickable:hover{
+  background:var(--surface-strong);
+}
+.project-table tbody tr.disabled{
+  opacity:.4;
+  pointer-events:none;
+}
+.project-row-name{
+  font-weight:600;
+  letter-spacing:-.02em;
+  white-space:nowrap;
+}
+.project-row-desc{
+  margin-top:3px;
+  font-size:.72rem;
+  color:var(--muted);
+  line-height:1.4;
+  white-space:nowrap;
+}
+.project-status-pill{
+  display:inline-block;
+  font-size:.72rem;
+  font-weight:600;
+  letter-spacing:.03em;
+  padding:2px 10px;
+  border-radius:9999px;
+  line-height:1.6;
+  white-space:nowrap;
+}
+.project-status-pill.active{background:rgba(34,197,94,.12);color:#16a34a}
+.project-status-pill.paused{background:rgba(234,179,8,.12);color:#ca8a04}
+.project-status-pill.idle{background:rgba(148,163,184,.12);color:#64748b}
+.project-status-pill.completed{background:rgba(59,130,246,.10);color:#3b82f6}
+.project-status-pill.failed{background:rgba(239,68,68,.12);color:#ef4444}
+.mono-cell{font-family:monospace;font-size:.75rem}
+.project-row-arrow{
+  font-size:1rem;
+  color:var(--muted);
+  transition:transform .15s ease;
+}
+.project-table tbody tr.clickable:hover .project-row-arrow{
+  transform:translateX(3px);
+  color:var(--text);
+}
+@media (max-width:900px){
+  .landing-layout{grid-template-columns:1fr}
+  .landing-resources{position:static}
+}
 </style>
 </head>
 <body>
@@ -1563,27 +1759,94 @@ function renderJobRow(job, jobs) {
 }
 
 function renderProjectsPage() {
+  const data = state.lastData || {};
+  const quotaRows = getQuotaRows(data);
   const projects = [
-    { id: "content-moderation", name: "Content Moderation Pipeline", desc: "Classifies user-generated content across trust and safety categories at ingest time.", status: "Active", jobs: 2, replicas: 2 },
-    { id: "search-reranking", name: "Search Reranking", desc: "Second-pass reranker that scores candidate results before serving to improve relevance.", status: "Paused", jobs: 1, replicas: 0 },
-    { id: "customer-support", name: "Support Ticket Routing", desc: "Triages inbound support tickets and routes them to the appropriate team based on intent.", status: "Idle", jobs: 0, replicas: 0 }
+    { id: "content-moderation", name: "Content Moderation Pipeline", desc: "Trust & safety classification at ingest", status: "Active", job_id: "job-qwen32b-3cc4", user: "alice@tandemn.com", started_at: "2026-04-15 09:14", jobs: 2, replicas: 2, model: "Qwen/Qwen3-32B", gpu: "L40S", cost: "$4.71" },
+    { id: "search-reranking", name: "Search Reranking", desc: "Second-pass relevance scoring", status: "Paused", job_id: "job-llama70b-9fd2", user: "bob@tandemn.com", started_at: "2026-04-14 17:42", jobs: 1, replicas: 0, model: "meta-llama/Llama-3-70B", gpu: "A100", cost: "$0.00" },
+    { id: "customer-support", name: "Support Ticket Routing", desc: "Intent-based ticket triage", status: "Idle", job_id: "job-mistral7b-a1e0", user: "charlie@tandemn.com", started_at: "2026-04-13 11:05", jobs: 0, replicas: 0, model: "mistralai/Mistral-7B", gpu: "\u2014", cost: "$0.00" }
   ];
-  const cards = projects.map(function(p, i) {
+
+  // Left: resource map
+  const allQuota = (quotaRows || []).slice();
+  allQuota.sort(function(a, b) {
+    const aUsed = a.Used || 0, bUsed = b.Used || 0;
+    if (bUsed > 0 && aUsed === 0) return 1;
+    if (aUsed > 0 && bUsed === 0) return -1;
+    return (bUsed / (b.Baseline || 1)) - (aUsed / (a.Baseline || 1));
+  });
+  const quotaItems = allQuota.length
+    ? allQuota.map(function(item) {
+        const used = item.Used || 0;
+        const total = item.Baseline || 0;
+        const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+        const inactive = used === 0;
+        const provider = item.Provider || '';
+        const sub = (provider ? provider + ' \u00b7 ' : '') + (item.Family || 'GPU') + (item.Market ? ' \u00b7 ' + String(item.Market).replace(/_/g, ' ') : '');
+        return '<div class="quota-item' + (inactive ? ' inactive' : '') + '">'
+          + '<div class="quota-item-header"><span class="quota-item-title">' + esc(item.Region || '\u2014') + '</span><span class="quota-item-count">' + used + '/' + total + '</span></div>'
+          + '<div class="quota-item-sub">' + esc(sub) + '</div>'
+          + '<div class="quota-bar-track"><div class="quota-bar-fill" style="width:' + pct + '%"></div></div>'
+          + '</div>';
+      }).join("")
+    : '<div class="quota-empty">No active resources</div>';
+  const resourcePanel = '<div class="landing-resources">'
+    + '<div class="landing-resources-title">Resource Map</div>'
+    + '<div class="quota-list">' + quotaItems + '</div>'
+    + '</div>';
+
+  function statusClass(s) { return (s || '').toLowerCase().replace(/[^a-z]/g, ''); }
+
+  // Right: project table rows
+  const rows = projects.map(function(p, i) {
     const clickable = i === 0;
-    return '<div class="project-card' + (clickable ? ' clickable' : ' disabled') + '"' + (clickable ? ' data-project="' + esc(p.id) + '"' : '') + '>'
-      + '<div class="project-card-status">' + esc(p.status) + '</div>'
-      + '<div class="project-card-name">' + esc(p.name) + '</div>'
-      + '<div class="project-card-desc">' + esc(p.desc) + '</div>'
-      + '<div class="project-card-footer">'
-      + '<span class="project-card-jobs">' + p.jobs + ' job' + (p.jobs !== 1 ? 's' : '') + '</span>'
-      + '<span class="project-card-arrow">\u2192</span>'
-      + '</div>'
-      + '</div>';
+    return '<tr class="' + (clickable ? 'clickable' : 'disabled') + '"' + (clickable ? ' data-project="' + esc(p.id) + '"' : '') + '>'
+      + '<td><span class="project-status-pill ' + statusClass(p.status) + '">' + esc(p.status) + '</span></td>'
+      + '<td><div class="project-row-name">' + esc(p.name) + '</div></td>'
+      + '<td class="mono-cell">' + esc(p.job_id) + '</td>'
+      + '<td>' + esc(p.user) + '</td>'
+      + '<td>' + esc(p.started_at) + '</td>'
+      + '<td>' + esc(p.cost) + '</td>'
+      + '<td><span class="project-row-arrow">\u2192</span></td>'
+      + '</tr>';
   }).join("");
-  return '<div class="projects-page"><div class="projects-inner">'
-    + '<div class="projects-header"><div class="projects-title">Projects</div><div class="projects-subtitle">Select a project to view its deployment dashboard, job status, and infrastructure details.</div></div>'
-    + '<div class="projects-grid">' + cards + '</div>'
-    + '</div></div>';
+  const projectTable = '<div class="project-table-wrap">'
+    + '<div class="project-table-header"><div class="project-table-title">Projects</div></div>'
+    + '<div class="project-table-scroll"><table class="project-table"><thead><tr>'
+    + '<th>Status</th><th>Project</th><th>Job ID</th><th>User</th><th>Started</th><th>Cost</th><th></th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+
+  // Past projects
+  const pastProjects = [
+    { name: "Embedding Indexer", desc: "Nightly vector re-index pipeline", status: "Completed", job_id: "job-embed-b4f1", user: "alice@tandemn.com", started_at: "2026-04-10 06:00", finished_at: "2026-04-10 09:23", replicas: 4, gpu: "L40S", cost: "$12.40" },
+    { name: "Summarisation Batch", desc: "Weekly long-doc summarisation run", status: "Completed", job_id: "job-summ-72d8", user: "dana@tandemn.com", started_at: "2026-04-07 22:00", finished_at: "2026-04-08 03:47", replicas: 2, gpu: "A100", cost: "$31.06" },
+    { name: "Toxicity Classifier v2", desc: "Fine-tune eval sweep", status: "Failed", job_id: "job-toxic-ee91", user: "bob@tandemn.com", started_at: "2026-04-05 14:30", finished_at: "2026-04-05 14:58", replicas: 1, gpu: "L40S", cost: "$0.84" },
+    { name: "Translation Pipeline", desc: "EN\u2192ES production batch", status: "Completed", job_id: "job-trans-5a03", user: "charlie@tandemn.com", started_at: "2026-04-02 08:15", finished_at: "2026-04-02 12:01", replicas: 3, gpu: "A10G", cost: "$7.22" },
+  ];
+  const pastRows = pastProjects.map(function(p) {
+    const cls = p.status === 'Failed' ? 'failed' : 'completed';
+    return '<tr>'
+      + '<td><span class="project-status-pill ' + cls + '">' + esc(p.status) + '</span></td>'
+      + '<td><div class="project-row-name">' + esc(p.name) + '</div></td>'
+      + '<td class="mono-cell">' + esc(p.job_id) + '</td>'
+      + '<td>' + esc(p.user) + '</td>'
+      + '<td>' + esc(p.started_at) + '</td>'
+      + '<td>' + esc(p.finished_at) + '</td>'
+      + '<td>' + esc(p.cost) + '</td>'
+      + '</tr>';
+  }).join("");
+  const pastTable = '<div class="project-table-wrap">'
+    + '<div class="project-table-header"><div class="project-table-title">Past Projects</div></div>'
+    + '<div class="project-table-scroll"><table class="project-table"><thead><tr>'
+    + '<th>Status</th><th>Project</th><th>Job ID</th><th>User</th><th>Started</th><th>Finished</th><th>Cost</th>'
+    + '</tr></thead><tbody>' + pastRows + '</tbody></table></div></div>';
+
+  return '<div style="min-height:100vh">'
+    + '<header class="landing-header"><span class="landing-title">Tandemn</span><nav class="landing-nav"><button class="landing-nav-btn" type="button">Users</button><button class="landing-nav-btn" type="button">Configuration</button></nav></header>'
+    + '<div class="landing-body"><div class="landing-layout">'
+    + resourcePanel
+    + '<div class="landing-tables">' + projectTable + pastTable + '</div>'
+    + '</div></div></div>';
 }
 
 function renderStickyHeader(job, jobs, chain, metricsSummary) {
@@ -1872,8 +2135,8 @@ function installChartInteractions() {
 function render() {
   if (state.view === "projects") {
     document.getElementById("app").innerHTML = renderProjectsPage();
-    document.querySelectorAll("[data-project]").forEach(function(card) {
-      card.onclick = function () {
+    document.querySelectorAll("[data-project]").forEach(function(row) {
+      row.onclick = function () {
         state.view = "dashboard";
         render();
       };
