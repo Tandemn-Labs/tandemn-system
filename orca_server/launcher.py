@@ -23,6 +23,7 @@ from orca_server.config import (
     VLLM_PORT,
     YAML_OUTPUT,
 )
+from orca_server.koi_contract import ReasonCode, TERMINAL_PHASES
 from orca_server.job_manager import (
     close_job_logger,
     download_output_from_s3,
@@ -978,9 +979,8 @@ async def launch_chunked_replicas(
                     cm.set_replica_state(parent_job_id, replica_id, phase="failed")
                     # Check if ALL replicas failed at launch → fire /job/launch-failed
                     states = cm.get_replica_states(parent_job_id)
-                    terminal = {"completed", "failed", "dead", "killed", "swapped_out"}
                     if states and all(
-                        s.get("phase") in terminal for s in states.values()
+                        s.get("phase") in TERMINAL_PHASES for s in states.values()
                     ):
                         any_ok = any(
                             s.get("phase") == "completed" for s in states.values()
@@ -1250,9 +1250,42 @@ async def _launch_chunked_replica(
         Phase stays 'provisioned' until the sidecar ingest endpoint receives
         first metrics — that's the real proof vLLM is up and serving.
         The ingest endpoint (server.py) transitions to 'running' with running_since.
+
+        Guarantee-fire invariant: on ANY exit path where the replica is not
+        in a terminal phase and no /job/replica-failed has been enqueued,
+        the finally block emits one with reason_code=MONITOR_THREAD_EXITED.
+        Dedup via replica_failed:{replica_id} collapses any race with the
+        inline emits below or with watchdog detection.
         """
-        # Don't set phase="running" here — vLLM hasn't loaded yet.
-        # Phase was already set to "provisioned" at line ~751 after sky.launch.
+        # Tracks whether we already enqueued a failure on one of the
+        # explicit paths below. The guarantee-fire fallback in the finally
+        # block checks this to avoid a bogus double-send (the outbox would
+        # dedup it anyway, but clean code > relying on the safety net).
+        replica_failed_enqueued = {"flag": False}
+
+        def _emit_replica_failed(reason_code: ReasonCode, detail: str) -> None:
+            state = cm.get_replica_states(parent_job_id).get(replica_id, {})
+            info = state.get("koi_webhook_info") or {}
+            _post_koi_webhook(
+                "/job/replica-failed",
+                {
+                    "job_id": replica_id,
+                    "replica_id": replica_id,
+                    "group_id": parent_job_id,
+                    "decision_id": info.get("decision_id"),
+                    "instance_type": state.get("instance_type", "unknown"),
+                    "region": state.get("region", "unknown"),
+                    "market": state.get("market", "unknown"),
+                    "status": "failed",
+                    "reason": detail[:200],
+                    "reason_code": reason_code.value,
+                    "reason_detail": detail[:500],
+                },
+                "replica-failed",
+                dedup_key=f"replica_failed:{replica_id}",
+            )
+            replica_failed_enqueued["flag"] = True
+
         try:
             sky.tail_logs(cluster_name=replica_id, job_id=sky_job_id, follow=True)
             # Verify this is a real completion — not a killed instance
@@ -1269,22 +1302,9 @@ async def _launch_chunked_replica(
                         f"[Chunked] Replica {replica_id} exited but chunks still pending — treating as failure"
                     )
                 cm.set_replica_state(parent_job_id, replica_id, phase="failed")
-                failure_state = cm.get_replica_states(parent_job_id).get(replica_id, {})
-                failure_info = failure_state.get("koi_webhook_info") or {}
-                _post_koi_webhook(
-                    "/job/replica-failed",
-                    {
-                        "job_id": replica_id,
-                        "group_id": parent_job_id,
-                        "decision_id": failure_info.get("decision_id"),
-                        "instance_type": failure_state.get("instance_type", "unknown"),
-                        "region": failure_state.get("region", "unknown"),
-                        "market": failure_state.get("market", "unknown"),
-                        "status": "failed",
-                        "reason": "Clean exit with pending chunks (likely killed)",
-                    },
-                    "replica-failed",
-                    dedup_key=f"replica_failed:{replica_id}",
+                _emit_replica_failed(
+                    ReasonCode.CLEAN_EXIT_PENDING_CHUNKS,
+                    "Clean exit with pending chunks (likely killed)",
                 )
             else:
                 if job_logger:
@@ -1304,7 +1324,7 @@ async def _launch_chunked_replica(
             rec_tmp = jt_tmp.get(parent_job_id)
             job_done = rec_tmp and rec_tmp.status in ("succeeded", "failed")
 
-            if cur_phase in ("completed", "killed", "swapped_out"):
+            if cur_phase in TERMINAL_PHASES:
                 if job_logger:
                     job_logger.info(
                         f"[Chunked] Replica {replica_id} log stream ended (phase={cur_phase})"
@@ -1319,23 +1339,7 @@ async def _launch_chunked_replica(
                 if job_logger:
                     job_logger.error(f"[Chunked] Replica {replica_id} error: {e}")
                 cm.set_replica_state(parent_job_id, replica_id, phase="failed")
-                failure_info = current.get("koi_webhook_info") or {}
-                # Notify Koi that this replica died
-                _post_koi_webhook(
-                    "/job/replica-failed",
-                    {
-                        "job_id": replica_id,
-                        "group_id": parent_job_id,
-                        "decision_id": failure_info.get("decision_id"),
-                        "instance_type": current.get("instance_type", "unknown"),
-                        "region": current.get("region", "unknown"),
-                        "market": current.get("market", "unknown"),
-                        "status": "failed",
-                        "reason": str(e)[:200],
-                    },
-                    "replica-failed",
-                    dedup_key=f"replica_failed:{replica_id}",
-                )
+                _emit_replica_failed(ReasonCode.LOG_STREAM_ERROR, str(e))
         finally:
             _stop_koi_launch_heartbeat(replica_id)
             if quota_tracker is not None:
@@ -1345,14 +1349,41 @@ async def _launch_chunked_replica(
             if not persist:
                 sky_down_with_retry(replica_id)
 
+            # GUARANTEED-FIRE FALLBACK: if the thread is exiting, no
+            # /job/replica-failed has been enqueued, AND the replica isn't
+            # in a terminal phase, something fell through the explicit
+            # branches above (new exit path, programming bug, etc.). Emit
+            # a fallback event so Koi doesn't hang waiting for a replica
+            # that's effectively gone. Dedup_key collapses any race with
+            # watchdog detection.
+            try:
+                if not replica_failed_enqueued["flag"]:
+                    state = cm.get_replica_states(parent_job_id).get(replica_id, {})
+                    phase = state.get("phase", "")
+                    if phase not in TERMINAL_PHASES:
+                        _emit_replica_failed(
+                            ReasonCode.MONITOR_THREAD_EXITED,
+                            (
+                                "Monitor thread exited without an explicit "
+                                f"failure emit and phase was {phase!r}"
+                            ),
+                        )
+            except Exception as fb_exc:
+                logger.error(
+                    "[Chunked] Fallback replica-failed emission failed for %s: %s",
+                    replica_id,
+                    fb_exc,
+                )
+
             # Check if ALL replicas are terminal — if so, mark the job failed
             # (prevents orphaned jobs stuck in "launching" when setup fails)
             jt = get_job_tracker()
             rec = jt.get(parent_job_id)
             if rec and rec.status in ("launching", "loading_model"):
                 states = cm.get_replica_states(parent_job_id)
-                terminal = {"completed", "failed", "dead", "killed", "swapped_out"}
-                if states and all(s.get("phase") in terminal for s in states.values()):
+                if states and all(
+                    s.get("phase") in TERMINAL_PHASES for s in states.values()
+                ):
                     any_success = any(
                         s.get("phase") == "completed" for s in states.values()
                     )
