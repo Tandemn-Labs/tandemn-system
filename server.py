@@ -310,6 +310,40 @@ def get_quota_tracker():
     return app.state.quota_tracker
 
 
+@app.get("/health")
+async def health():
+    """Operator-facing health snapshot.
+
+    The `outbox_*` fields surface the state of the Koi webhook delivery
+    pipeline. If `outbox_oldest_undelivered_age_secs` grows past ~60s,
+    Koi has been unreachable for longer than a restart takes — worth a
+    look. If `outbox_pending` stays stuck and Koi is up, something in
+    the publisher thread is wrong.
+    """
+    from orca_server.outbox import get_outbox
+
+    body = {
+        "status": "ok",
+        "redis_available": getattr(app.state, "redis_available", False),
+    }
+    outbox = get_outbox()
+    if outbox is not None:
+        pending = outbox.pending_count()
+        oldest_age = outbox.oldest_undelivered_age_secs()
+        body["outbox_enabled"] = True
+        body["outbox_pending"] = pending
+        body["outbox_oldest_undelivered_age_secs"] = round(oldest_age, 2)
+        if oldest_age > 60:
+            logger.warning(
+                "[Outbox] oldest undelivered event is %.0fs old (pending=%d)",
+                oldest_age,
+                pending,
+            )
+    else:
+        body["outbox_enabled"] = False
+    return body
+
+
 @app.get("/quota/status")
 async def quota_status():
     """Get current quota usage summary and active cluster reservations."""
