@@ -158,138 +158,6 @@ async def test_resources_quota_families_match_instances(client):
 # Task 3 & 4: CLI Koi helpers (unit tests, no server needed)
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Import the orca CLI as a module
-ORCA_CLI = os.path.join(os.path.dirname(__file__), "..", "orca")
-
-
-def _load_orca_module():
-    """Load the orca CLI as a Python module for testing."""
-    import importlib.util
-
-    loader = importlib.machinery.SourceFileLoader("orca_cli", ORCA_CLI)
-    spec = importlib.util.spec_from_loader("orca_cli", loader, origin=ORCA_CLI)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture
-def orca_mod():
-    return _load_orca_module()
-
-
-class TestKoiHelpers:
-    def test_koi_service_url_in_cli(self, orca_mod):
-        """CLI reads KOI_SERVICE_URL."""
-        assert hasattr(orca_mod, "KOI_SERVICE_URL")
-        assert isinstance(orca_mod.KOI_SERVICE_URL, str)
-
-    def test_fetch_resources_returns_none_on_failure(self, orca_mod):
-        """fetch_resources returns None when server is unreachable."""
-        # Point at a server that doesn't exist
-        original = orca_mod.ORCA_SERVER
-        orca_mod.ORCA_SERVER = "http://127.0.0.1:1"
-        try:
-            result = orca_mod.fetch_resources()
-            assert result is None
-        finally:
-            orca_mod.ORCA_SERVER = original
-
-    def test_call_koi_returns_none_when_disabled(self, orca_mod):
-        """call_koi returns None when KOI_SERVICE_URL is empty."""
-        original = orca_mod.KOI_SERVICE_URL
-        orca_mod.KOI_SERVICE_URL = ""
-        try:
-            result = orca_mod.call_koi({"model_name": "test"}, {"resources": []})
-            assert result is None
-        finally:
-            orca_mod.KOI_SERVICE_URL = original
-
-    def test_call_koi_returns_none_on_connection_error(self, orca_mod):
-        """call_koi returns None when Koi service is unreachable."""
-        original = orca_mod.KOI_SERVICE_URL
-        orca_mod.KOI_SERVICE_URL = "http://127.0.0.1:1"
-        try:
-            result = orca_mod.call_koi(
-                {"model_name": "test"}, {"resources": []}, timeout=1
-            )
-            assert result is None
-        finally:
-            orca_mod.KOI_SERVICE_URL = original
-
-    def test_call_koi_returns_none_on_malformed_json(self, orca_mod):
-        """call_koi should fail closed if Koi returns invalid JSON."""
-        original = orca_mod.KOI_SERVICE_URL
-        orca_mod.KOI_SERVICE_URL = "http://koi:8090"
-        bad_response = MagicMock(status_code=200)
-        bad_response.json.side_effect = ValueError("invalid json")
-        try:
-            with patch.object(orca_mod.requests, "post", return_value=bad_response):
-                result = orca_mod.call_koi(
-                    {"model_name": "test"}, {"resources": []}, timeout=1
-                )
-            assert result is None
-        finally:
-            orca_mod.KOI_SERVICE_URL = original
-
-    def test_call_koi_returns_none_on_timeout(self, orca_mod):
-        """call_koi should fail closed if Koi times out."""
-        original = orca_mod.KOI_SERVICE_URL
-        orca_mod.KOI_SERVICE_URL = "http://koi:8090"
-        try:
-            with patch.object(
-                orca_mod.requests, "post", side_effect=orca_mod.requests.Timeout
-            ):
-                result = orca_mod.call_koi(
-                    {"model_name": "test"}, {"resources": []}, timeout=1
-                )
-            assert result is None
-        finally:
-            orca_mod.KOI_SERVICE_URL = original
-
-    def test_koi_summary_lines_basic(self, orca_mod):
-        """_koi_summary_lines produces display lines from Koi response."""
-        koi_data = {
-            "config": {
-                "gpu_type": "L40S",
-                "instance_type": "g6e.12xlarge",
-                "tp": 4,
-                "pp": 1,
-                "dp": 2,
-                "num_instances": 2,
-                "engine_config": {"max_model_len": 8192, "max_num_seqs": 64},
-            },
-            "predicted_tps": 2500.0,
-            "predicted_cost_per_hour": 9.36,
-            "predicted_runtime_hours": 3.2,
-            "predicted_total_cost": 29.95,
-            "confidence": 0.78,
-        }
-        lines = orca_mod._koi_summary_lines(koi_data)
-        assert len(lines) > 0
-        text = "\n".join(lines)
-        assert "L40S" in text
-        assert "g6e.12xlarge" in text
-        assert "2500" in text
-        assert "9.36" in text
-
-    def test_koi_summary_lines_minimal(self, orca_mod):
-        """_koi_summary_lines handles minimal Koi response."""
-        koi_data = {
-            "config": {
-                "gpu_type": "A100",
-                "instance_type": "p4d.24xlarge",
-                "tp": 8,
-                "pp": 1,
-                "dp": 1,
-                "num_instances": 1,
-                "engine_config": {},
-            },
-        }
-        lines = orca_mod._koi_summary_lines(koi_data)
-        assert len(lines) >= 3  # instance, GPU, parallelism lines at minimum
-
-
 class TestKoiWebhookNotifications:
     def test_submit_batch_chunked_passes_koi_alternatives_to_launcher(self):
         """Chunked submit should preserve Koi alternatives as ordered fallbacks."""
@@ -461,149 +329,6 @@ class TestKoiWebhookNotifications:
             else:
                 server.app.state.cluster_manager = old_cm
 
-    def test_cmd_deploy_uses_top_level_koi_predicted_tps_for_chunked_submit(
-        self, orca_mod
-    ):
-        """Chunked deploy should forward Koi predicted_tps from the top-level response."""
-        from types import SimpleNamespace
-
-        plan_response = MagicMock(status_code=200)
-        plan_response.json.return_value = {
-            "status": "ok",
-            "placements": [
-                {
-                    "gpu_type": "L40S",
-                    "instance_type": "g6e.12xlarge",
-                    "tp_size": 4,
-                    "pp_size": 1,
-                    "cost_per_hour": 9.36,
-                }
-            ],
-        }
-        submit_response = MagicMock(status_code=200)
-        submit_response.json.return_value = {
-            "status": "launched",
-            "job_id": "job-123",
-            "config": {
-                "instance_type": "p4de.24xlarge",
-                "tp": 8,
-                "pp": 1,
-            },
-            "chunks": 1,
-            "replicas": 1,
-        }
-        captured = {}
-
-        def fake_api(method, path, **kwargs):
-            assert method == "post"
-            assert path == "/test/placement"
-            return plan_response
-
-        def fake_api_with_spinner(method, path, message="Working...", **kwargs):
-            assert method == "post"
-            assert path == "/submit/batch"
-            captured["payload"] = kwargs["json"]
-            return submit_response
-
-        args = SimpleNamespace(
-            model_name="Qwen/Qwen2.5-72B-Instruct",
-            input_file="/tmp/input.jsonl",
-            output="output.jsonl",
-            slo=8.0,
-            max_output_tokens=1024,
-            gpu=None,
-            tp=None,
-            pp=None,
-            force=False,
-            chunk_size=1000,
-            replicas=None,
-            persist=False,
-            on_demand=False,
-            log_level="INFO",
-            s3_models=None,
-            skip_dangerously=False,
-        )
-        koi_data = {
-            "_decision_id": "dec-123",
-            "planned_market": "on_demand",
-            "config": {
-                "gpu_type": "A100-80GB",
-                "instance_type": "p4de.24xlarge",
-                "tp": 8,
-                "pp": 1,
-                "dp": 2,
-                "num_instances": 1,
-                "market": "on_demand",
-                "engine_config": {},
-            },
-            "predicted_tps": 2500.0,
-            "alternatives": [
-                {
-                    "gpu_type": "L40S",
-                    "tp": 4,
-                    "pp": 1,
-                    "dp": 2,
-                    "planned_market": "on_demand",
-                }
-            ],
-        }
-
-        def fake_call_koi(job_params, resource_map, timeout=600):
-            captured["koi_job"] = job_params
-            return koi_data
-
-        original_koi = orca_mod.KOI_SERVICE_URL
-        orca_mod.KOI_SERVICE_URL = "http://koi:8090"
-        try:
-            with (
-                patch.object(
-                    orca_mod,
-                    "parse_input_file",
-                    return_value={
-                        "num_lines": 1000,
-                        "avg_input_tokens": 953,
-                        "max_input_tokens": 2048,
-                        "has_explicit_max_tokens": False,
-                    },
-                ),
-                patch.object(orca_mod.os.path, "exists", return_value=True),
-                patch.object(
-                    orca_mod, "upload_to_server", return_value="s3://bucket/input.jsonl"
-                ),
-                patch.object(
-                    orca_mod,
-                    "split_and_upload_chunks",
-                    return_value=[
-                        {
-                            "chunk_id": 0,
-                            "s3_input_path": "s3://bucket/chunk-0.jsonl",
-                            "num_lines": 1000,
-                        }
-                    ],
-                ),
-                patch.object(
-                    orca_mod, "fetch_resources", return_value={"resources": []}
-                ),
-                patch.object(orca_mod, "call_koi", side_effect=fake_call_koi),
-                patch.object(orca_mod, "api", side_effect=fake_api),
-                patch.object(
-                    orca_mod, "api_with_spinner", side_effect=fake_api_with_spinner
-                ),
-                patch.object(orca_mod, "spinner", return_value=None),
-                patch("builtins.input", return_value="1"),
-            ):
-                orca_mod.cmd_deploy(args)
-        finally:
-            orca_mod.KOI_SERVICE_URL = original_koi
-
-        assert captured["payload"]["koi_decision_id"] == "dec-123"
-        assert captured["payload"]["koi_predicted_tps"] == 2500.0
-        assert captured["payload"]["gpu_type"] == "A100-80GB"
-        assert captured["payload"]["replicas"] == 2
-        assert captured["payload"]["preferred_market"] == "spot"
-        assert captured["payload"]["planned_market"] == "on_demand"
-        assert captured["koi_job"]["preferred_market"] == "spot"
-
     def test_launch_chunked_replicas_fallback_success_updates_ready_payload(self):
         """If the primary config fails, the started webhook should reflect the fallback config."""
         import asyncio
@@ -731,7 +456,7 @@ class TestKoiWebhookNotifications:
         server.app.state.cluster_manager = cm
         try:
             with (
-                patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"),
+                patch.object(launcher._cfg, "TD_SERVER_URL", "http://orca"),
                 patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
                 patch.dict(
                     cfg.INSTANCE_TO_GPU,
@@ -1049,7 +774,7 @@ class TestKoiWebhookNotifications:
         ]
 
         with (
-            patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"),
+            patch.object(launcher._cfg, "TD_SERVER_URL", "http://orca"),
             patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
             patch.dict(
                 cfg.INSTANCE_TO_GPU,
@@ -1181,7 +906,7 @@ class TestKoiWebhookNotifications:
         ]
 
         with (
-            patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"),
+            patch.object(launcher._cfg, "TD_SERVER_URL", "http://orca"),
             patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
             patch.dict(
                 cfg.INSTANCE_TO_GPU,
@@ -1220,61 +945,6 @@ class TestKoiWebhookNotifications:
 # Task 5: --skip-dangerously flag
 # ──────────────────────────────────────────────────────────────────────────────
 
-
-class TestSkipDangerouslyFlag:
-    def test_flag_accepted_by_parser(self, orca_mod):
-        """deploy parser accepts --skip-dangerously."""
-        import argparse
-
-        parser = argparse.ArgumentParser()
-        subparsers = parser.add_subparsers(dest="command")
-        # Re-create parser to test flag existence
-        args = orca_mod.main  # just verify module loads; test via subprocess below
-
-    def test_skip_dangerously_parsed(self):
-        """--skip-dangerously is parsed as True."""
-        result = subprocess.run(
-            [sys.executable, ORCA_CLI, "deploy", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert "--skip-dangerously" in result.stdout
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Integration: backward compatibility (no Koi configured)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-class TestBackwardCompatibility:
-    def test_plan_help_works(self):
-        """orca plan --help still works."""
-        result = subprocess.run(
-            [sys.executable, ORCA_CLI, "plan", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0
-        assert "model_name" in result.stdout
-
-    def test_deploy_help_works(self):
-        """orca deploy --help still works."""
-        result = subprocess.run(
-            [sys.executable, ORCA_CLI, "deploy", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert result.returncode == 0
-        assert "--skip-dangerously" in result.stdout
-        assert "--slo" in result.stdout
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Pricing + filtering (server-side unit tests)
-# ──────────────────────────────────────────────────────────────────────────────
 
 
 class TestResourceFiltering:
