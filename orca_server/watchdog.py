@@ -175,31 +175,29 @@ class ReplicaWatchdog:
         self._cm.set_replica_state(job_id, replica_id, phase="dead")
         self._mc.exclude_replica(job_id, replica_id)
 
-        # 1b. Notify Koi that this replica died
-        try:
-            from orca_server.config import KOI_SERVICE_URL
+        # 1b. Notify Koi that this replica died. The dedup_key matches the
+        # one monitor_replica uses in launcher.py — if both paths detect
+        # the same death, the outbox collapses them to a single delivery.
+        from orca_server.launcher import _post_koi_webhook
 
-            if KOI_SERVICE_URL:
-                import requests as _req
-
-                state = self._cm.get_replica_states(job_id).get(replica_id, {})
-                koi_info = state.get("koi_webhook_info") or {}
-                _req.post(
-                    f"{KOI_SERVICE_URL}/job/replica-failed",
-                    json={
-                        "job_id": replica_id,
-                        "group_id": job_id,
-                        "decision_id": koi_info.get("decision_id"),
-                        "instance_type": state.get("instance_type", "unknown"),
-                        "region": state.get("region", "unknown"),
-                        "market": state.get("market", "unknown"),
-                        "status": "failed",
-                        "reason": f"Heartbeat timeout ({self._dead_threshold}s)",
-                    },
-                    timeout=5,
-                )
-        except Exception as exc:
-            logger.warning("[Watchdog] Failed to notify Koi of replica death: %s", exc)
+        state = self._cm.get_replica_states(job_id).get(replica_id, {})
+        koi_info = state.get("koi_webhook_info") or {}
+        _post_koi_webhook(
+            "/job/replica-failed",
+            {
+                "job_id": replica_id,
+                "replica_id": replica_id,
+                "group_id": job_id,
+                "decision_id": koi_info.get("decision_id"),
+                "instance_type": state.get("instance_type", "unknown"),
+                "region": state.get("region", "unknown"),
+                "market": state.get("market", "unknown"),
+                "status": "failed",
+                "reason": f"Heartbeat timeout ({self._dead_threshold}s)",
+            },
+            "replica-failed",
+            dedup_key=f"replica_failed:{replica_id}",
+        )
 
         # 2. Force-reclaim inflight chunks
         cm = self._chunk_manager_fn()

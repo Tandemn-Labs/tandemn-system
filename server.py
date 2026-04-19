@@ -164,6 +164,14 @@ async def lifespan(app: FastAPI):
     app.state.metrics_collector = get_metrics_collector()
     app.state.metrics_db = get_metrics_db()
 
+    # Initialize the Koi webhook outbox. Events enqueue here regardless of
+    # Koi reachability; a background publisher drains them. If KOI_SERVICE_URL
+    # is unset or the outbox is opt-out (ORCA_OUTBOX_DB_PATH=""), enqueues
+    # are no-ops and direct POST still works as a fallback.
+    from orca_server.outbox import init_outbox as _init_outbox
+
+    _init_outbox()
+
     # Redis health check — required for chunked multi-replica jobs
     try:
         import redis as _redis
@@ -252,6 +260,11 @@ async def lifespan(app: FastAPI):
         await reclaim_task
     except asyncio.CancelledError:
         pass
+
+    # Drain the outbox publisher and close the DB.
+    from orca_server.outbox import shutdown_outbox as _shutdown_outbox
+
+    _shutdown_outbox()
 
     # Shutdown: join non-daemon monitor threads so they can finish teardown
     cm = app.state.cluster_manager
@@ -851,41 +864,40 @@ def _notify_koi_replica_ready(job_id: str, replica_id: str):
     else:
         adjusted_slo = original_slo
 
-    try:
-        import requests as _req
+    from orca_server.launcher import _post_koi_webhook
 
-        _req.post(
-            f"{KOI_SERVICE_URL}/job/started",
-            json={
-                "job_id": replica_id,
-                "group_id": koi_info.get("group_id"),
-                "decision_id": koi_info.get("decision_id"),
-                "gpu_type": INSTANCE_TO_GPU.get(
-                    state.get("instance_type", ""), "unknown"
-                ),
-                "instance_type": state.get("instance_type", "unknown"),
-                "region": state.get("region", "unknown"),
-                "market": state.get("market", "unknown"),
-                "tp": state.get("tp", 1),
-                "pp": state.get("pp", 1),
-                "dp": 1,
-                "slo_deadline_hours": adjusted_slo,
-                "total_tokens": koi_info.get("total_tokens", 0),
-                "predicted_tps": koi_info.get("predicted_tps", 0),
-                "is_fallback": state.get("config_index", 0) > 0,
-            },
-            timeout=5,
-        )
-        logger.info(
-            "[Koi] Notified model_ready: %s (%s), SLO adjusted %.2fh→%.2fh (%.0fmin provisioning)",
-            replica_id,
-            state.get("instance_type"),
-            original_slo,
-            adjusted_slo,
-            (original_slo - adjusted_slo) * 60,
-        )
-    except Exception as e:
-        logger.warning("[Koi] Failed to notify model_ready: %s", e)
+    _post_koi_webhook(
+        "/job/started",
+        {
+            "job_id": replica_id,
+            "replica_id": replica_id,
+            "group_id": koi_info.get("group_id"),
+            "decision_id": koi_info.get("decision_id"),
+            "gpu_type": INSTANCE_TO_GPU.get(
+                state.get("instance_type", ""), "unknown"
+            ),
+            "instance_type": state.get("instance_type", "unknown"),
+            "region": state.get("region", "unknown"),
+            "market": state.get("market", "unknown"),
+            "tp": state.get("tp", 1),
+            "pp": state.get("pp", 1),
+            "dp": 1,
+            "slo_deadline_hours": adjusted_slo,
+            "total_tokens": koi_info.get("total_tokens", 0),
+            "predicted_tps": koi_info.get("predicted_tps", 0),
+            "is_fallback": state.get("config_index", 0) > 0,
+        },
+        "job-started",
+        dedup_key=f"job_started:{replica_id}",
+    )
+    logger.info(
+        "[Koi] Enqueued job_started: %s (%s), SLO adjusted %.2fh→%.2fh (%.0fmin provisioning)",
+        replica_id,
+        state.get("instance_type"),
+        original_slo,
+        adjusted_slo,
+        (original_slo - adjusted_slo) * 60,
+    )
 
 
 @app.post("/job/{job_id}/chunks/pull")
@@ -1186,29 +1198,26 @@ async def _assemble_output(job_id: str):
         else:
             job_logger.info(f"[Assembly] Job {job_id} completed successfully")
 
-        # Notify Koi of job completion (if KOI_SERVICE_URL is set)
-        # Send parent job_id — Koi looks up all chains in this group and
-        # records ONE aggregate outcome, then unregisters all chains.
-        from orca_server.config import KOI_SERVICE_URL
+        # Notify Koi of job completion. Koi writes per-chain outcomes for
+        # every tracker in this group (see koi/server.py:785-799). The
+        # dedup_key collapses retried /job/complete emissions at source.
+        from orca_server.launcher import _post_koi_webhook
 
-        if KOI_SERVICE_URL:
-            try:
-                import requests as _req
-
-                final_status = "failed" if assembly_failures else "succeeded"
-                koi_payload = {
-                    "job_id": job_id,
-                    "status": final_status,
-                    "metrics": agg if agg else {},
-                }
-                _req.post(
-                    f"{KOI_SERVICE_URL}/job/complete", json=koi_payload, timeout=10
-                )
-                job_logger.info(
-                    f"[Assembly] Notified Koi: job {job_id} completed ({final_status})"
-                )
-            except Exception as ke:
-                job_logger.warning(f"[Assembly] Failed to notify Koi: {ke}")
+        final_status = "failed" if assembly_failures else "succeeded"
+        _post_koi_webhook(
+            "/job/complete",
+            {
+                "job_id": job_id,
+                "group_id": job_id,
+                "status": final_status,
+                "metrics": agg if agg else {},
+            },
+            "job-complete",
+            dedup_key=f"job_complete:{job_id}",
+        )
+        job_logger.info(
+            f"[Assembly] Enqueued job_complete: {job_id} ({final_status})"
+        )
 
         # Rename directory with success-/partial-/failed- prefix (after all writes are done)
         status_prefix = (
@@ -2260,39 +2269,38 @@ async def submit_batch(request: BatchedRequest):
     )
 
     if success:
-        # Notify Koi that the job launched (starts monitoring)
-        from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
+        # Notify Koi that the job launched (starts monitoring).
+        # Non-chunked path is legacy (project_always_chunked); migrated for
+        # safety even though prod doesn't exercise this branch.
+        from orca_server.config import INSTANCE_TO_GPU
+        from orca_server.launcher import _post_koi_webhook
 
-        if KOI_SERVICE_URL:
-            try:
-                import requests as _req
-
-                _req.post(
-                    f"{KOI_SERVICE_URL}/job/started",
-                    json={
-                        "job_id": used_config.decision_id,
-                        "decision_id": request.koi_decision_id,
-                        "gpu_type": INSTANCE_TO_GPU.get(
-                            used_config.instance_type, "unknown"
-                        ),
-                        "instance_type": used_config.instance_type,
-                        "tp": used_config.tp_size,
-                        "pp": used_config.pp_size,
-                        "dp": getattr(request, "replicas", 1) or 1,
-                        "slo_deadline_hours": request.slo_deadline_hours or 8.0,
-                        "total_tokens": (request.num_lines or 0)
-                        * (
-                            (request.avg_input_tokens or 0)
-                            + (request.avg_output_tokens or 0)
-                        ),
-                    },
-                    timeout=5,
-                )
-                logger.info(
-                    f"[Launch] Notified Koi: job {used_config.decision_id} started"
-                )
-            except Exception as ke:
-                logger.warning(f"[Launch] Failed to notify Koi of job start: {ke}")
+        _post_koi_webhook(
+            "/job/started",
+            {
+                "job_id": used_config.decision_id,
+                "replica_id": used_config.decision_id,
+                "decision_id": request.koi_decision_id,
+                "gpu_type": INSTANCE_TO_GPU.get(
+                    used_config.instance_type, "unknown"
+                ),
+                "instance_type": used_config.instance_type,
+                "tp": used_config.tp_size,
+                "pp": used_config.pp_size,
+                "dp": getattr(request, "replicas", 1) or 1,
+                "slo_deadline_hours": request.slo_deadline_hours or 8.0,
+                "total_tokens": (request.num_lines or 0)
+                * (
+                    (request.avg_input_tokens or 0)
+                    + (request.avg_output_tokens or 0)
+                ),
+            },
+            "job-started",
+            dedup_key=f"job_started:{used_config.decision_id}",
+        )
+        logger.info(
+            f"[Launch] Enqueued job_started: {used_config.decision_id}"
+        )
 
         resp = {
             "status": "launched",
