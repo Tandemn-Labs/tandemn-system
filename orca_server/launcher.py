@@ -108,18 +108,65 @@ def _validate_parallelism_topology(config: MagicOutput) -> None:
         )
 
 
-def _post_koi_webhook(path: str, payload: dict, event: str) -> None:
-    """Best-effort Koi callback with warning-level visibility on failures."""
+def _post_koi_webhook(
+    path: str,
+    payload: dict,
+    event: str,
+    *,
+    dedup_key: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+) -> None:
+    """Deliver a webhook to Koi through the durable outbox.
+
+    Primary path (production): enqueue into OutboxDB. The publisher thread
+    drains it with retry/backoff, so Koi restarts and network blips don't
+    lose events. Passing `dedup_key` collapses naturally-duplicated events
+    at the source (e.g. watchdog + monitor_replica both detecting the same
+    replica death → one row via INSERT OR IGNORE on the PK).
+
+    Fallback path (dev / rollback): if the outbox singleton is absent
+    (ORCA_OUTBOX_DB_PATH="" opt-out or startup hasn't initialized it yet),
+    fall back to a direct best-effort POST.
+    """
     try:
         from orca_server.config import KOI_SERVICE_URL
 
         if not KOI_SERVICE_URL:
             return
+
+        # Primary: durable outbox.
+        from orca_server.outbox import get_outbox
+
+        outbox = get_outbox()
+        if outbox is not None:
+            job_id = (
+                payload.get("replica_id")
+                or payload.get("group_id")
+                or payload.get("job_id")
+                or "unknown"
+            )
+            event_type = event.replace("-", "_")
+            outbox.enqueue(
+                path,
+                event_type,
+                payload,
+                job_id=job_id,
+                dedup_key=dedup_key,
+                correlation_id=correlation_id,
+            )
+            return
+
+        # Fallback: outbox disabled, direct fire-and-forget.
         import requests as _req
 
         _req.post(f"{KOI_SERVICE_URL}{path}", json=payload, timeout=5)
     except Exception as exc:
-        ident = payload.get("job_id") or payload.get("group_id") or "unknown"
+        ident = (
+            payload.get("replica_id")
+            or payload.get("job_id")
+            or payload.get("group_id")
+            or "unknown"
+        )
         logger.warning("[Koi] Failed to notify %s for %s: %s", event, ident, exc)
 
 
@@ -964,6 +1011,7 @@ async def launch_chunked_replicas(
                                     ),
                                 },
                                 "launch-failed",
+                                dedup_key=f"launch_failed:{parent_job_id}",
                             )
 
     for i in range(num_replicas):
@@ -1186,6 +1234,7 @@ async def _launch_chunked_replica(
                 "attempt_index": config_index,
             },
             "launching",
+            dedup_key=f"job_launching:{replica_id}:{config_index}",
         )
     except Exception:
         _stop_koi_launch_heartbeat(replica_id)
@@ -1235,6 +1284,7 @@ async def _launch_chunked_replica(
                         "reason": "Clean exit with pending chunks (likely killed)",
                     },
                     "replica-failed",
+                    dedup_key=f"replica_failed:{replica_id}",
                 )
             else:
                 if job_logger:
@@ -1284,6 +1334,7 @@ async def _launch_chunked_replica(
                         "reason": str(e)[:200],
                     },
                     "replica-failed",
+                    dedup_key=f"replica_failed:{replica_id}",
                 )
         finally:
             _stop_koi_launch_heartbeat(replica_id)
