@@ -126,16 +126,16 @@ async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Validate critical env vars ──
-    from orca_server.config import ORCA_SERVER_URL, HF_TOKEN
+    from orca_server.config import TD_SERVER_URL, HF_TOKEN
 
-    if not ORCA_SERVER_URL or ORCA_SERVER_URL == "placeholder":
+    if not TD_SERVER_URL or TD_SERVER_URL == "placeholder":
         logger.error(
-            "[Startup] ⚠ ORCA_SERVER_URL is not set! Replicas will not be able to "
+            "[Startup] ⚠ TD_SERVER_URL is not set! Replicas will not be able to "
             "call back to the control plane. Set it in .env or pass --url/--tunnel. "
             "Jobs WILL fail silently without this."
         )
     else:
-        logger.info(f"[Startup] ORCA_SERVER_URL = {ORCA_SERVER_URL}")
+        logger.info(f"[Startup] TD_SERVER_URL = {TD_SERVER_URL}")
     if not HF_TOKEN:
         logger.warning(
             "[Startup] HF_TOKEN not set — gated models (Llama, Gemma) will fail to download. "
@@ -2845,7 +2845,7 @@ if __name__ == "__main__":
     _parser = _ap.ArgumentParser(description="Orca control plane server")
     _parser.add_argument(
         "--url",
-        help="Public URL for this server (e.g. Cloudflare tunnel URL). Overrides ORCA_SERVER_URL env var.",
+        help="Public URL for this server (e.g. Cloudflare tunnel URL). Overrides TD_SERVER_URL env var.",
     )
     _parser.add_argument("--port", type=int, default=26336)
     _parser.add_argument(
@@ -2902,8 +2902,8 @@ if __name__ == "__main__":
     if _args.url:
         from orca_server import config as _cfg
 
-        _cfg.ORCA_SERVER_URL = _args.url
-        os.environ["ORCA_SERVER_URL"] = _args.url
-        print(f"[Server] ORCA_SERVER_URL set to {_args.url}")
+        _cfg.TD_SERVER_URL = _args.url
+        os.environ["TD_SERVER_URL"] = _args.url
+        print(f"[Server] TD_SERVER_URL set to {_args.url}")
 
     uvicorn.run(app, host="0.0.0.0", port=_args.port)
