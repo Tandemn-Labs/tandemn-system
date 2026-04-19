@@ -555,6 +555,7 @@ def cmd_deploy(args):
         step(f"Uploaded to {c(s3_input_file, DIM)}")
 
     # Build common payload fields
+    preferred_market = "on_demand" if args.on_demand else "spot"
     payload = {
         "placement_solver": "user_specified" if args.gpu else "roofline",
         "user_id": "orca-cli",
@@ -573,6 +574,7 @@ def cmd_deploy(args):
         "s3_model_path": getattr(args, 's3_models', None),
         "persist": args.persist,
         "prefer_spot": not args.on_demand,
+        "preferred_market": preferred_market,
         "hf_token": os.environ.get("HF_TOKEN", ""),
         "log_level": args.log_level,
     }
@@ -617,6 +619,7 @@ def cmd_deploy(args):
             "num_requests": stats["num_lines"],
             "slo_deadline_hours": args.slo,
             "objective": "cheapest",
+            "preferred_market": preferred_market,
         }
 
         koi_result = [None]
@@ -686,13 +689,22 @@ def cmd_deploy(args):
                 payload["tp_size"] = rec.get("tp")
                 payload["pp_size"] = rec.get("pp")
                 payload["replicas"] = rec.get("dp", 1)
+                payload["planned_market"] = (
+                    koi_data.get("planned_market")
+                    or rec.get("market")
+                    or preferred_market
+                )
                 payload["koi_decision_id"] = koi_data.get("_decision_id")
                 payload["koi_predicted_tps"] = koi_data.get("predicted_tps", 0)
                 # Pass Koi alternatives for fallback retry
                 alts = koi_data.get("alternatives", [])
                 if alts:
                     payload["koi_alternatives"] = alts
-                step(f"Launching with Koi: {c(rec.get('gpu_type','?'), CYAN)} TP={rec.get('tp')} PP={rec.get('pp')} DP={rec.get('dp')}")
+                step(
+                    f"Launching with Koi: {c(rec.get('gpu_type','?'), CYAN)} "
+                    f"TP={rec.get('tp')} PP={rec.get('pp')} DP={rec.get('dp')} "
+                    f"market={payload['planned_market']}"
+                )
             elif choice == "2":
                 payload["placement_solver"] = "user_specified"
                 payload["gpu_type"] = rcfg.get("gpu_type")
@@ -723,6 +735,9 @@ def cmd_deploy(args):
             payload["tp_size"] = rec.get("tp")
             payload["pp_size"] = rec.get("pp")
             payload["replicas"] = rec.get("dp", 1)
+            payload["planned_market"] = (
+                koi_data.get("planned_market") or rec.get("market") or preferred_market
+            )
             payload["koi_decision_id"] = koi_data.get("_decision_id")
             payload["koi_predicted_tps"] = koi_data.get("predicted_tps", 0)
             alts = koi_data.get("alternatives", [])
@@ -860,6 +875,7 @@ def cmd_plan(args):
 
     # For plan, send locally-parsed stats directly — no S3 upload needed
     # (the file only needs to be in S3 for deploy, where the EC2 node fetches it)
+    preferred_market = "on_demand" if args.on_demand else "spot"
     payload = {
         "placement_solver": "user_specified" if args.gpu else "roofline",
         "user_id": "orca-cli",
@@ -875,6 +891,8 @@ def cmd_plan(args):
         "slo_mode": "batch",
         "slo_deadline_hours": args.slo,
         "placement": "aws",
+        "prefer_spot": not args.on_demand,
+        "preferred_market": preferred_market,
         "log_level": args.log_level,
     }
     # Inject locally-parsed stats so server skips the S3 download
@@ -907,6 +925,7 @@ def cmd_plan(args):
             "num_requests": stats["num_lines"],
             "slo_deadline_hours": args.slo,
             "objective": "cheapest",
+            "preferred_market": preferred_market,
         }
 
         koi_result = [None]

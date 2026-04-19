@@ -11,7 +11,7 @@ from threading import Event, Lock, Thread
 
 logger = logging.getLogger(__name__)
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import requests
 import sky
@@ -35,16 +35,45 @@ from orca_server.job_manager import (
 )
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
-from quota.region_selector import get_cached_quotas, get_instance_family, get_ordered_regions
-from orca_server.job_templates import get_vllm_config_template, replace_run_vllm, replace_run_vllm_online
+from quota.region_selector import (
+    get_cached_quotas,
+    get_instance_family,
+    get_ordered_regions,
+)
+from orca_server.job_templates import (
+    get_vllm_config_template,
+    replace_run_vllm,
+    replace_run_vllm_online,
+)
 from utils.utils import split_uri, update_template, update_yaml_file
 
 # EFA-capable instance families (NVSwitch/NVLink, multi-NIC).
 # network_tier=best enables EFA, DLAMI, NCCL auto-config on AWS.
-EFA_PREFIXES = ('p3.', 'p3dn.', 'p4d.', 'p4de.', 'p5.', 'p5e.')
+EFA_PREFIXES = ("p3.", "p3dn.", "p4d.", "p4de.", "p5.", "p5e.")
 _KOI_LAUNCH_HEARTBEAT_INTERVAL_SECONDS = 45.0
 _koi_launch_heartbeats = {}
 _koi_launch_heartbeat_lock = Lock()
+
+
+def _requested_market(
+    request: BatchedRequest, config: Optional[MagicOutput] = None
+) -> Optional[str]:
+    """Resolve the intended market for a launch attempt.
+
+    planned_market is the exact market selected by Koi for this config.
+    preferred_market is the caller's broader preference.
+    prefer_spot is the legacy boolean fallback.
+    """
+    if config and getattr(config, "planned_market", None) in {"spot", "on_demand"}:
+        return config.planned_market
+    if getattr(request, "planned_market", None) in {"spot", "on_demand"}:
+        return request.planned_market
+    if getattr(request, "preferred_market", None) in {"spot", "on_demand"}:
+        return request.preferred_market
+    prefer_spot = getattr(request, "prefer_spot", None)
+    if prefer_spot is None:
+        return None
+    return "spot" if prefer_spot else "on_demand"
 
 
 def _needs_efa(instance_type: str) -> bool:
@@ -83,9 +112,11 @@ def _post_koi_webhook(path: str, payload: dict, event: str) -> None:
     """Best-effort Koi callback with warning-level visibility on failures."""
     try:
         from orca_server.config import KOI_SERVICE_URL
+
         if not KOI_SERVICE_URL:
             return
         import requests as _req
+
         _req.post(f"{KOI_SERVICE_URL}{path}", json=payload, timeout=5)
     except Exception as exc:
         ident = payload.get("job_id") or payload.get("group_id") or "unknown"
@@ -93,24 +124,37 @@ def _post_koi_webhook(path: str, payload: dict, event: str) -> None:
 
 
 def _notify_koi_config_attempted(
-    parent_job_id, koi_webhook_info, instance_type,
-    region, market, launched, attempt_index,
-    time_to_launch=0, failure_reason="",
+    parent_job_id,
+    koi_webhook_info,
+    instance_type,
+    region,
+    market,
+    launched,
+    attempt_index,
+    time_to_launch=0,
+    failure_reason="",
 ):
     """Fire-and-forget: tell Koi about one allocation attempt."""
     from orca_server.config import INSTANCE_TO_GPU
-    _post_koi_webhook("/job/config-attempted", {
-        "job_id": parent_job_id,
-        "decision_id": koi_webhook_info.get("decision_id") if koi_webhook_info else None,
-        "instance_type": instance_type,
-        "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
-        "region": region,
-        "market": market,
-        "launched": launched,
-        "failure_reason": failure_reason,
-        "time_to_launch": time_to_launch,
-        "attempt_index": attempt_index,
-    }, "config-attempted")
+
+    _post_koi_webhook(
+        "/job/config-attempted",
+        {
+            "job_id": parent_job_id,
+            "decision_id": koi_webhook_info.get("decision_id")
+            if koi_webhook_info
+            else None,
+            "instance_type": instance_type,
+            "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
+            "region": region,
+            "market": market,
+            "launched": launched,
+            "failure_reason": failure_reason,
+            "time_to_launch": time_to_launch,
+            "attempt_index": attempt_index,
+        },
+        "config-attempted",
+    )
 
 
 def _notify_koi_launch_heartbeat(
@@ -129,23 +173,28 @@ def _notify_koi_launch_heartbeat(
 ):
     """Fire-and-forget: tell Koi a chunked launch is still alive."""
     from orca_server.config import INSTANCE_TO_GPU
+
     if not koi_webhook_info:
         return
-    _post_koi_webhook("/job/launch-heartbeat", {
-        "job_id": replica_id,
-        "decision_id": koi_webhook_info.get("decision_id"),
-        "group_id": parent_job_id,
-        "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
-        "instance_type": instance_type,
-        "tp": tp,
-        "pp": pp,
-        "region": region,
-        "market": market,
-        "attempt_index": attempt_index,
-        "phase": phase,
-        "message": message,
-        "timestamp": time.time(),
-    }, "launch-heartbeat")
+    _post_koi_webhook(
+        "/job/launch-heartbeat",
+        {
+            "job_id": replica_id,
+            "decision_id": koi_webhook_info.get("decision_id"),
+            "group_id": parent_job_id,
+            "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
+            "instance_type": instance_type,
+            "tp": tp,
+            "pp": pp,
+            "region": region,
+            "market": market,
+            "attempt_index": attempt_index,
+            "phase": phase,
+            "message": message,
+            "timestamp": time.time(),
+        },
+        "launch-heartbeat",
+    )
 
 
 def _run_koi_launch_heartbeat(replica_id: str) -> None:
@@ -177,6 +226,7 @@ def _start_koi_launch_heartbeat(
 ):
     """Start a lightweight launch heartbeat loop for one chunked replica."""
     from orca_server.config import KOI_SERVICE_URL
+
     if not KOI_SERVICE_URL or not koi_webhook_info:
         return False
 
@@ -254,12 +304,19 @@ async def sp_launch_vllm_batch_with_fallback(
     try:
         return await asyncio.wait_for(
             _launch_with_fallback_inner(
-                request, configs, solver, early_messages, quota_tracker, persist,
+                request,
+                configs,
+                solver,
+                early_messages,
+                quota_tracker,
+                persist,
             ),
             timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
-        logger.error(f"[Launch] Timeout after {timeout_seconds:.0f}s, tried {len(configs)} configs")
+        logger.error(
+            f"[Launch] Timeout after {timeout_seconds:.0f}s, tried {len(configs)} configs"
+        )
         return (False, configs[0])
 
 
@@ -279,8 +336,12 @@ async def _launch_with_fallback_inner(
 
         try:
             await sp_launch_vllm_batch(
-                request, config, solver, early_messages=early_messages,
-                quota_tracker=quota_tracker, persist=persist,
+                request,
+                config,
+                solver,
+                early_messages=early_messages,
+                quota_tracker=quota_tracker,
+                persist=persist,
             )
             logger.info(f"[Launch] Success with config {i + 1}: {config.instance_type}")
             return (True, config)
@@ -463,7 +524,9 @@ async def sp_launch_vllm_batch(
             "envs.ORCA_SERVER_URL": _cfg.ORCA_SERVER_URL,
             "envs.JOB_ID": config.decision_id,
             "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,
-            "envs.VLLM_USE_V1": "1" if _cfg.supports_vllm_v1(config.instance_type) else "0",
+            "envs.VLLM_USE_V1": "1"
+            if _cfg.supports_vllm_v1(config.instance_type)
+            else "0",
         }
 
         # Add S3 model weight mount if requested
@@ -514,11 +577,14 @@ async def sp_launch_vllm_batch(
 
             # Update job tracker
             get_job_tracker().update_progress(config.decision_id, 1.0)
-            get_job_tracker().update_status(config.decision_id, "succeeded" if is_success else "failed")
+            get_job_tracker().update_status(
+                config.decision_id, "succeeded" if is_success else "failed"
+            )
 
             if is_success:
                 from orca_server.monitoring import get_metrics_collector
                 from orca_server.metrics_db import get_metrics_db
+
                 last_snap = get_metrics_collector().get_latest(config.decision_id)
                 db = get_metrics_db()
                 try:
@@ -537,25 +603,43 @@ async def sp_launch_vllm_batch(
                 # Export timeseries to local experiment directory
                 try:
                     import csv as _csv
+
                     ts_data = db.get_timeseries(config.decision_id)
                     if ts_data:
                         ts_path = base_dir / "timeseries.csv"
                         all_keys = list(ts_data[0].keys())
                         with open(ts_path, "w", newline="") as tf:
-                            writer = _csv.DictWriter(tf, fieldnames=all_keys, extrasaction="ignore")
+                            writer = _csv.DictWriter(
+                                tf, fieldnames=all_keys, extrasaction="ignore"
+                            )
                             writer.writeheader()
                             for row in ts_data:
                                 writer.writerow(row)
-                        job_logger.info(f"[Job] Saved timeseries.csv ({len(ts_data)} samples) to {ts_path}")
+                        job_logger.info(
+                            f"[Job] Saved timeseries.csv ({len(ts_data)} samples) to {ts_path}"
+                        )
 
                         # Generate timeseries PDF
                         try:
-                            from orca_server.plot_timeseries import plot_timeseries as _plot_ts
+                            from orca_server.plot_timeseries import (
+                                plot_timeseries as _plot_ts,
+                            )
+
                             pdf_path = base_dir / "timeseries.pdf"
                             _metrics_csv = str(base_dir / "metrics.csv")
-                            _metrics_arg = _metrics_csv if (base_dir / "metrics.csv").exists() else None
-                            _plot_ts(str(ts_path), str(pdf_path), metrics_csv_path=_metrics_arg)
-                            job_logger.info(f"[Job] Generated timeseries.pdf at {pdf_path}")
+                            _metrics_arg = (
+                                _metrics_csv
+                                if (base_dir / "metrics.csv").exists()
+                                else None
+                            )
+                            _plot_ts(
+                                str(ts_path),
+                                str(pdf_path),
+                                metrics_csv_path=_metrics_arg,
+                            )
+                            job_logger.info(
+                                f"[Job] Generated timeseries.pdf at {pdf_path}"
+                            )
                         except Exception as pe:
                             job_logger.warning(f"[Job] Timeseries plot failed: {pe}")
                 except Exception as te:
@@ -586,6 +670,7 @@ async def sp_launch_vllm_batch(
                 failed_dir.mkdir(parents=True, exist_ok=True)
         finally:
             from orca_server.monitoring import get_metrics_collector
+
             get_metrics_collector().stop_collecting(config.decision_id)
             if quota_tracker is not None:
                 quota_tracker.release_cluster(config.decision_id)
@@ -594,7 +679,9 @@ async def sp_launch_vllm_batch(
             if not persist:
                 sky_down_with_retry(config.decision_id)
             else:
-                job_logger.info(f"[Teardown] --persist: keeping cluster {config.decision_id} alive")
+                job_logger.info(
+                    f"[Teardown] --persist: keeping cluster {config.decision_id} alive"
+                )
 
     try:
         job_logger.info(f"[SkyPilot] Launching cluster {config.decision_id}...")
@@ -614,17 +701,25 @@ async def sp_launch_vllm_batch(
                 instance_type=config.instance_type,
                 num_instances=num_nodes,
             )
-        cm.register(config.decision_id, config.decision_id,
-                     region=actual_region, market=actual_market,
-                     instance_type=config.instance_type, num_instances=num_nodes)
-        job_logger.info(f"[Quota] Reserved {config.instance_type} x{num_nodes} in {actual_region}/{actual_market}")
+        cm.register(
+            config.decision_id,
+            config.decision_id,
+            region=actual_region,
+            market=actual_market,
+            instance_type=config.instance_type,
+            num_instances=num_nodes,
+        )
+        job_logger.info(
+            f"[Quota] Reserved {config.instance_type} x{num_nodes} in {actual_region}/{actual_market}"
+        )
 
         # Update job tracker: running + head IP
         jt.update_status(config.decision_id, "running")
-        head_ip = getattr(handle, 'head_ip', None)
+        head_ip = getattr(handle, "head_ip", None)
         if head_ip:
             jt.set_head_ip(config.decision_id, head_ip)
             from orca_server.monitoring import get_metrics_collector
+
             endpoint_url = f"http://{head_ip}:{VLLM_PORT}"
             jt.set_endpoint_url(config.decision_id, endpoint_url)
             get_metrics_collector().start_collecting(config.decision_id, endpoint_url)
@@ -633,8 +728,11 @@ async def sp_launch_vllm_batch(
         t = threading.Thread(
             target=monitor_and_download,
             args=(job_id,),
-            kwargs=dict(actual_region=actual_region, actual_market=actual_market, solver=solver),
-            daemon=False, name=f"orca-monitor-{config.decision_id[:12]}",
+            kwargs=dict(
+                actual_region=actual_region, actual_market=actual_market, solver=solver
+            ),
+            daemon=False,
+            name=f"orca-monitor-{config.decision_id[:12]}",
         )
         cm.register_thread(config.decision_id, t)
         if persist:
@@ -739,20 +837,25 @@ async def launch_chunked_replicas(
     # Pre-register all replicas as "launching"
     for i in range(num_replicas):
         rid = f"{parent_job_id}-r{i}"
-        cm.set_replica_state(parent_job_id, rid, phase="launching", launched_at=time.time())
+        cm.set_replica_state(
+            parent_job_id, rid, phase="launching", launched_at=time.time()
+        )
         cm.register_for_job(parent_job_id, rid)
 
     def _launch_replica_thread(i):
         """Try each config in order until one succeeds (per-replica fallback)."""
         import asyncio as _aio
+
         replica_id = f"{parent_job_id}-r{i}"
 
         for j, cfg in enumerate(configs):
-            replica_config = cfg.model_copy(update={
-                "decision_id": replica_id,
-                "replicas": 1,
-                "num_instances": cfg.num_nodes,
-            })
+            replica_config = cfg.model_copy(
+                update={
+                    "decision_id": replica_id,
+                    "replicas": 1,
+                    "num_instances": cfg.num_nodes,
+                }
+            )
             cm.set_replica_state(
                 parent_job_id,
                 replica_id,
@@ -770,34 +873,48 @@ async def launch_chunked_replicas(
             )
             try:
                 loop = _aio.new_event_loop()
-                loop.run_until_complete(_launch_chunked_replica(
-                    request, replica_config, replica_id,
-                    parent_job_id=parent_job_id,
-                    job_dirname=job_dirname,
-                    job_logger=job_logger,
-                    quota_tracker=quota_tracker,
-                    persist=persist,
-                    koi_webhook_info=koi_webhook_info,
-                    config_index=j,
-                ))
+                loop.run_until_complete(
+                    _launch_chunked_replica(
+                        request,
+                        replica_config,
+                        replica_id,
+                        parent_job_id=parent_job_id,
+                        job_dirname=job_dirname,
+                        job_logger=job_logger,
+                        quota_tracker=quota_tracker,
+                        persist=persist,
+                        koi_webhook_info=koi_webhook_info,
+                        config_index=j,
+                    )
+                )
                 loop.close()
                 return  # success — stop trying alternatives
             except Exception as e:
+                requested_market = _requested_market(request, cfg) or "unknown"
                 _stop_koi_launch_heartbeat(replica_id)
                 # Notify Koi: this config attempt failed
                 _notify_koi_config_attempted(
-                    parent_job_id, koi_webhook_info, cfg.instance_type,
-                    region="unknown", market="unknown",
-                    launched=False, attempt_index=j,
+                    parent_job_id,
+                    koi_webhook_info,
+                    cfg.instance_type,
+                    region="unknown",
+                    market=requested_market,
+                    launched=False,
+                    attempt_index=j,
                     failure_reason=str(e)[:500],
                 )
                 with _attempt_log_lock:
-                    _attempt_log.append({
-                        "gpu_type": _cfg.INSTANCE_TO_GPU.get(cfg.instance_type, "unknown"),
-                        "instance_type": cfg.instance_type,
-                        "region": "unknown", "market": "unknown",
-                        "reason": str(e)[:500],
-                    })
+                    _attempt_log.append(
+                        {
+                            "gpu_type": _cfg.INSTANCE_TO_GPU.get(
+                                cfg.instance_type, "unknown"
+                            ),
+                            "instance_type": cfg.instance_type,
+                            "region": "unknown",
+                            "market": requested_market,
+                            "reason": str(e)[:500],
+                        }
+                    )
                 if j < len(configs) - 1:
                     job_logger.warning(
                         f"[Chunked] Replica {i} config {j + 1} failed: {e}. Trying next..."
@@ -815,36 +932,56 @@ async def launch_chunked_replicas(
                     # Check if ALL replicas failed at launch → fire /job/launch-failed
                     states = cm.get_replica_states(parent_job_id)
                     terminal = {"completed", "failed", "dead", "killed", "swapped_out"}
-                    if states and all(s.get("phase") in terminal for s in states.values()):
-                        any_ok = any(s.get("phase") == "completed" for s in states.values())
+                    if states and all(
+                        s.get("phase") in terminal for s in states.values()
+                    ):
+                        any_ok = any(
+                            s.get("phase") == "completed" for s in states.values()
+                        )
                         if not any_ok and not _launch_failed_fired.is_set():
                             _launch_failed_fired.set()
                             jt_tmp = get_job_tracker()
                             rec_tmp = jt_tmp.get(parent_job_id)
-                            if rec_tmp and rec_tmp.status in ("launching", "loading_model"):
+                            if rec_tmp and rec_tmp.status in (
+                                "launching",
+                                "loading_model",
+                            ):
                                 jt_tmp.update_status(parent_job_id, "failed")
-                                job_logger.warning("[Chunked] All replicas failed at launch — marking job as failed")
+                                job_logger.warning(
+                                    "[Chunked] All replicas failed at launch — marking job as failed"
+                                )
                             with _attempt_log_lock:
                                 attempts = list(_attempt_log)
-                            _post_koi_webhook("/job/launch-failed", {
-                                "job_id": parent_job_id,
-                                "decision_id": request.koi_decision_id,
-                                "configs_tried": attempts,
-                                "failure_reasons": [a["reason"] for a in attempts],
-                                "total_time_seconds": round(time.time() - _launch_start_time, 2),
-                            }, "launch-failed")
+                            _post_koi_webhook(
+                                "/job/launch-failed",
+                                {
+                                    "job_id": parent_job_id,
+                                    "decision_id": request.koi_decision_id,
+                                    "configs_tried": attempts,
+                                    "failure_reasons": [a["reason"] for a in attempts],
+                                    "total_time_seconds": round(
+                                        time.time() - _launch_start_time, 2
+                                    ),
+                                },
+                                "launch-failed",
+                            )
 
     for i in range(num_replicas):
         t = threading.Thread(
-            target=_launch_replica_thread, args=(i,),
-            daemon=False, name=f"orca-launch-r{i}",
+            target=_launch_replica_thread,
+            args=(i,),
+            daemon=False,
+            name=f"orca-launch-r{i}",
         )
         t.start()
 
     # Track parent job (individual replicas register themselves on launch)
-    cm.register(parent_job_id, parent_job_id,
-                instance_type=primary.instance_type,
-                num_instances=num_replicas * primary.num_nodes)
+    cm.register(
+        parent_job_id,
+        parent_job_id,
+        instance_type=primary.instance_type,
+        num_instances=num_replicas * primary.num_nodes,
+    )
     return True
 
 
@@ -871,11 +1008,18 @@ async def _launch_chunked_replica(
     # Get quota-aware ordered regions
     instance_family = get_instance_family(config.instance_type)
     quotas = get_cached_quotas(instance_family)
+    requested_market = _requested_market(request, config)
+    prefer_spot = (
+        requested_market == "spot"
+        if requested_market is not None
+        else getattr(request, "prefer_spot", True)
+    )
     ordered_regions = get_ordered_regions(
         instance_type=config.instance_type,
         num_nodes=num_nodes,
         quotas=quotas,
-        prefer_spot=getattr(request, "prefer_spot", True),
+        prefer_spot=prefer_spot,
+        target_market=requested_market,
     )
 
     use_efa = _needs_efa(config.instance_type)
@@ -894,6 +1038,10 @@ async def _launch_chunked_replica(
             any_of_resources.append(res)
         resources_config = {"any_of": any_of_resources}
     else:
+        if requested_market is not None:
+            raise RuntimeError(
+                f"No {requested_market} quota candidates for {config.instance_type}"
+            )
         resources_config = {
             "infra": "aws",
             "instance_type": config.instance_type,
@@ -975,23 +1123,38 @@ async def _launch_chunked_replica(
 
         cm = get_cluster_manager()
         current_state = cm.get_replica_states(parent_job_id).get(replica_id, {})
-        cm.register(replica_id, parent_job_id,
-                    region=actual_region, market=actual_market,
-                    instance_type=config.instance_type, num_instances=num_nodes)
-        cm.set_replica_state(parent_job_id, replica_id,
-                             phase="provisioned", region=actual_region,
-                             market=actual_market, instance_type=config.instance_type,
-                             launched_at=current_state.get("launched_at", _launch_start),
-                             num_instances=num_nodes,
-                             koi_webhook_info=koi_webhook_info,
-                             tp=config.tp_size, pp=config.pp_size,
-                             config_index=config_index)
+        cm.register(
+            replica_id,
+            parent_job_id,
+            region=actual_region,
+            market=actual_market,
+            instance_type=config.instance_type,
+            num_instances=num_nodes,
+        )
+        cm.set_replica_state(
+            parent_job_id,
+            replica_id,
+            phase="provisioned",
+            region=actual_region,
+            market=actual_market,
+            instance_type=config.instance_type,
+            launched_at=current_state.get("launched_at", _launch_start),
+            num_instances=num_nodes,
+            koi_webhook_info=koi_webhook_info,
+            tp=config.tp_size,
+            pp=config.pp_size,
+            config_index=config_index,
+        )
 
         # Notify Koi: this config attempt succeeded
         _notify_koi_config_attempted(
-            parent_job_id, koi_webhook_info, config.instance_type,
-            region=actual_region, market=actual_market,
-            launched=True, attempt_index=config_index,
+            parent_job_id,
+            koi_webhook_info,
+            config.instance_type,
+            region=actual_region,
+            market=actual_market,
+            launched=True,
+            attempt_index=config_index,
             time_to_launch=round(time.time() - _launch_start, 2),
         )
 
@@ -1005,18 +1168,25 @@ async def _launch_chunked_replica(
 
         # Notify Koi: replica is provisioned (pre-model_ready visibility)
         from orca_server.config import INSTANCE_TO_GPU
-        _post_koi_webhook("/job/launching", {
-            "job_id": replica_id,
-            "decision_id": koi_webhook_info.get("decision_id") if koi_webhook_info else None,
-            "group_id": parent_job_id,
-            "gpu_type": INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
-            "instance_type": config.instance_type,
-            "tp": config.tp_size,
-            "pp": config.pp_size,
-            "region": actual_region,
-            "market": actual_market,
-            "attempt_index": config_index,
-        }, "launching")
+
+        _post_koi_webhook(
+            "/job/launching",
+            {
+                "job_id": replica_id,
+                "decision_id": koi_webhook_info.get("decision_id")
+                if koi_webhook_info
+                else None,
+                "group_id": parent_job_id,
+                "gpu_type": INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
+                "instance_type": config.instance_type,
+                "tp": config.tp_size,
+                "pp": config.pp_size,
+                "region": actual_region,
+                "market": actual_market,
+                "attempt_index": config_index,
+            },
+            "launching",
+        )
     except Exception:
         _stop_koi_launch_heartbeat(replica_id)
         raise
@@ -1039,20 +1209,33 @@ async def _launch_chunked_replica(
             # Verify this is a real completion — not a killed instance
             try:
                 from orca_server.chunk_manager import get_chunk_manager as _gcm
+
                 _progress = _gcm().get_progress(parent_job_id)
             except Exception:
                 _progress = None
             if _progress and not _progress.get("all_done", False):
                 # Chunks still pending → replica was killed mid-job, not completed
                 if job_logger:
-                    job_logger.warning(f"[Chunked] Replica {replica_id} exited but chunks still pending — treating as failure")
+                    job_logger.warning(
+                        f"[Chunked] Replica {replica_id} exited but chunks still pending — treating as failure"
+                    )
                 cm.set_replica_state(parent_job_id, replica_id, phase="failed")
-                _post_koi_webhook("/job/replica-failed", {
-                    "job_id": replica_id,
-                    "group_id": parent_job_id,
-                    "status": "failed",
-                    "reason": "Clean exit with pending chunks (likely killed)",
-                }, "replica-failed")
+                failure_state = cm.get_replica_states(parent_job_id).get(replica_id, {})
+                failure_info = failure_state.get("koi_webhook_info") or {}
+                _post_koi_webhook(
+                    "/job/replica-failed",
+                    {
+                        "job_id": replica_id,
+                        "group_id": parent_job_id,
+                        "decision_id": failure_info.get("decision_id"),
+                        "instance_type": failure_state.get("instance_type", "unknown"),
+                        "region": failure_state.get("region", "unknown"),
+                        "market": failure_state.get("market", "unknown"),
+                        "status": "failed",
+                        "reason": "Clean exit with pending chunks (likely killed)",
+                    },
+                    "replica-failed",
+                )
             else:
                 if job_logger:
                     job_logger.info(f"[Chunked] Replica {replica_id} completed")
@@ -1064,29 +1247,44 @@ async def _launch_chunked_replica(
             current = cm.get_replica_states(parent_job_id).get(replica_id, {})
             cur_phase = current.get("phase", "")
             err_str = str(e)
-            is_log_cancel = "cancelled" in err_str.lower() or "cancel" in err_str.lower()
+            is_log_cancel = (
+                "cancelled" in err_str.lower() or "cancel" in err_str.lower()
+            )
             jt_tmp = get_job_tracker()
             rec_tmp = jt_tmp.get(parent_job_id)
             job_done = rec_tmp and rec_tmp.status in ("succeeded", "failed")
 
             if cur_phase in ("completed", "killed", "swapped_out"):
                 if job_logger:
-                    job_logger.info(f"[Chunked] Replica {replica_id} log stream ended (phase={cur_phase})")
+                    job_logger.info(
+                        f"[Chunked] Replica {replica_id} log stream ended (phase={cur_phase})"
+                    )
             elif is_log_cancel or job_done:
                 # Log cancellation or job already finished — not a real failure
                 if job_logger:
-                    job_logger.info(f"[Chunked] Replica {replica_id} log stream cancelled (job {'done' if job_done else 'active'}): {e}")
+                    job_logger.info(
+                        f"[Chunked] Replica {replica_id} log stream cancelled (job {'done' if job_done else 'active'}): {e}"
+                    )
             else:
                 if job_logger:
                     job_logger.error(f"[Chunked] Replica {replica_id} error: {e}")
                 cm.set_replica_state(parent_job_id, replica_id, phase="failed")
+                failure_info = current.get("koi_webhook_info") or {}
                 # Notify Koi that this replica died
-                _post_koi_webhook("/job/replica-failed", {
-                    "job_id": replica_id,
-                    "group_id": parent_job_id,
-                    "status": "failed",
-                    "reason": str(e)[:200],
-                }, "replica-failed")
+                _post_koi_webhook(
+                    "/job/replica-failed",
+                    {
+                        "job_id": replica_id,
+                        "group_id": parent_job_id,
+                        "decision_id": failure_info.get("decision_id"),
+                        "instance_type": current.get("instance_type", "unknown"),
+                        "region": current.get("region", "unknown"),
+                        "market": current.get("market", "unknown"),
+                        "status": "failed",
+                        "reason": str(e)[:200],
+                    },
+                    "replica-failed",
+                )
         finally:
             _stop_koi_launch_heartbeat(replica_id)
             if quota_tracker is not None:
@@ -1104,15 +1302,21 @@ async def _launch_chunked_replica(
                 states = cm.get_replica_states(parent_job_id)
                 terminal = {"completed", "failed", "dead", "killed", "swapped_out"}
                 if states and all(s.get("phase") in terminal for s in states.values()):
-                    any_success = any(s.get("phase") == "completed" for s in states.values())
+                    any_success = any(
+                        s.get("phase") == "completed" for s in states.values()
+                    )
                     if not any_success:
                         jt.update_status(parent_job_id, "failed")
                         if job_logger:
-                            job_logger.warning("[Chunked] All replicas failed — marking job as failed")
+                            job_logger.warning(
+                                "[Chunked] All replicas failed — marking job as failed"
+                            )
 
     t = threading.Thread(
-        target=monitor_replica, args=(job_id_sky,),
-        daemon=False, name=f"orca-replica-{replica_id[:12]}",
+        target=monitor_replica,
+        args=(job_id_sky,),
+        daemon=False,
+        name=f"orca-replica-{replica_id[:12]}",
     )
     cm.register_thread(replica_id, t)
     t.start()

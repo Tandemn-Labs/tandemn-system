@@ -76,8 +76,14 @@ def test_get_ordered_regions_spot_preferred(region_quotas):
         "g6e.48xlarge", num_nodes=1, quotas=region_quotas, prefer_spot=True
     )
     # At same quota level, spot should come before on-demand
-    spot_indices = [i for i, c in enumerate(candidates) if c.use_spot and c.region == "us-east-1"]
-    od_indices = [i for i, c in enumerate(candidates) if not c.use_spot and c.region == "us-east-1"]
+    spot_indices = [
+        i for i, c in enumerate(candidates) if c.use_spot and c.region == "us-east-1"
+    ]
+    od_indices = [
+        i
+        for i, c in enumerate(candidates)
+        if not c.use_spot and c.region == "us-east-1"
+    ]
     if spot_indices and od_indices:
         assert spot_indices[0] < od_indices[0]
 
@@ -88,6 +94,30 @@ def test_get_ordered_regions_no_viable():
     }
     candidates = get_ordered_regions("g6e.48xlarge", num_nodes=1, quotas=empty_quotas)
     assert candidates == []
+
+
+def test_get_ordered_regions_exact_on_demand(region_quotas):
+    candidates = get_ordered_regions(
+        "g6e.48xlarge",
+        num_nodes=1,
+        quotas=region_quotas,
+        prefer_spot=True,
+        target_market="on_demand",
+    )
+    assert candidates
+    assert all(not c.use_spot for c in candidates)
+
+
+def test_get_ordered_regions_exact_spot(region_quotas):
+    candidates = get_ordered_regions(
+        "g6e.48xlarge",
+        num_nodes=1,
+        quotas=region_quotas,
+        prefer_spot=False,
+        target_market="spot",
+    )
+    assert candidates
+    assert all(c.use_spot for c in candidates)
 
 
 # --- Cross-table consistency ---

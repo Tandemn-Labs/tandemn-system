@@ -28,9 +28,11 @@ from httpx import AsyncClient, ASGITransport
 # Task 1: KOI_SERVICE_URL in config
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestKoiConfig:
     def test_koi_service_url_exists(self):
         from orca_server.config import KOI_SERVICE_URL
+
         assert isinstance(KOI_SERVICE_URL, str)
 
     def test_koi_service_url_default_empty(self):
@@ -40,6 +42,7 @@ class TestKoiConfig:
             # Re-import to get fresh value
             import importlib
             import orca_server.config as cfg
+
             importlib.reload(cfg)
             assert cfg.KOI_SERVICE_URL == ""
 
@@ -48,6 +51,7 @@ class TestKoiConfig:
         with patch.dict(os.environ, {"KOI_SERVICE_URL": "http://koi:8090"}):
             import importlib
             import orca_server.config as cfg
+
             importlib.reload(cfg)
             assert cfg.KOI_SERVICE_URL == "http://koi:8090"
 
@@ -87,8 +91,13 @@ async def test_resources_instance_schema(client):
     data = (await client.get("/resources")).json()
     assert len(data["instances"]) > 0, "Should have at least one instance"
     required = {
-        "instance_type", "gpu_type", "gpus_per_instance", "vcpus",
-        "quota_family", "gpu_memory_gb", "interconnect",
+        "instance_type",
+        "gpu_type",
+        "gpus_per_instance",
+        "vcpus",
+        "quota_family",
+        "gpu_memory_gb",
+        "interconnect",
         "cost_per_instance_hour_usd",
     }
     for inst in data["instances"]:
@@ -156,6 +165,7 @@ ORCA_CLI = os.path.join(os.path.dirname(__file__), "..", "orca")
 def _load_orca_module():
     """Load the orca CLI as a Python module for testing."""
     import importlib.util
+
     loader = importlib.machinery.SourceFileLoader("orca_cli", ORCA_CLI)
     spec = importlib.util.spec_from_loader("orca_cli", loader, origin=ORCA_CLI)
     mod = importlib.util.module_from_spec(spec)
@@ -200,7 +210,9 @@ class TestKoiHelpers:
         original = orca_mod.KOI_SERVICE_URL
         orca_mod.KOI_SERVICE_URL = "http://127.0.0.1:1"
         try:
-            result = orca_mod.call_koi({"model_name": "test"}, {"resources": []}, timeout=1)
+            result = orca_mod.call_koi(
+                {"model_name": "test"}, {"resources": []}, timeout=1
+            )
             assert result is None
         finally:
             orca_mod.KOI_SERVICE_URL = original
@@ -213,7 +225,9 @@ class TestKoiHelpers:
         bad_response.json.side_effect = ValueError("invalid json")
         try:
             with patch.object(orca_mod.requests, "post", return_value=bad_response):
-                result = orca_mod.call_koi({"model_name": "test"}, {"resources": []}, timeout=1)
+                result = orca_mod.call_koi(
+                    {"model_name": "test"}, {"resources": []}, timeout=1
+                )
             assert result is None
         finally:
             orca_mod.KOI_SERVICE_URL = original
@@ -223,8 +237,12 @@ class TestKoiHelpers:
         original = orca_mod.KOI_SERVICE_URL
         orca_mod.KOI_SERVICE_URL = "http://koi:8090"
         try:
-            with patch.object(orca_mod.requests, "post", side_effect=orca_mod.requests.Timeout):
-                result = orca_mod.call_koi({"model_name": "test"}, {"resources": []}, timeout=1)
+            with patch.object(
+                orca_mod.requests, "post", side_effect=orca_mod.requests.Timeout
+            ):
+                result = orca_mod.call_koi(
+                    {"model_name": "test"}, {"resources": []}, timeout=1
+                )
             assert result is None
         finally:
             orca_mod.KOI_SERVICE_URL = original
@@ -235,7 +253,9 @@ class TestKoiHelpers:
             "config": {
                 "gpu_type": "L40S",
                 "instance_type": "g6e.12xlarge",
-                "tp": 4, "pp": 1, "dp": 2,
+                "tp": 4,
+                "pp": 1,
+                "dp": 2,
                 "num_instances": 2,
                 "engine_config": {"max_model_len": 8192, "max_num_seqs": 64},
             },
@@ -256,9 +276,15 @@ class TestKoiHelpers:
     def test_koi_summary_lines_minimal(self, orca_mod):
         """_koi_summary_lines handles minimal Koi response."""
         koi_data = {
-            "config": {"gpu_type": "A100", "instance_type": "p4d.24xlarge",
-                       "tp": 8, "pp": 1, "dp": 1, "num_instances": 1,
-                       "engine_config": {}},
+            "config": {
+                "gpu_type": "A100",
+                "instance_type": "p4d.24xlarge",
+                "tp": 8,
+                "pp": 1,
+                "dp": 1,
+                "num_instances": 1,
+                "engine_config": {},
+            },
         }
         lines = orca_mod._koi_summary_lines(koi_data)
         assert len(lines) >= 3  # instance, GPU, parallelism lines at minimum
@@ -275,7 +301,9 @@ class TestKoiWebhookNotifications:
         chunk_manager = MagicMock()
         job_tracker = MagicMock()
 
-        async def fake_launch_chunked_replicas(request, configs, num_replicas, **kwargs):
+        async def fake_launch_chunked_replicas(
+            request, configs, num_replicas, **kwargs
+        ):
             captured["request"] = request
             captured["configs"] = configs
             captured["num_replicas"] = num_replicas
@@ -311,11 +339,13 @@ class TestKoiWebhookNotifications:
             tp_size=4,
             pp_size=1,
             replicas=1,
-            chunks=[{
-                "chunk_id": 0,
-                "s3_input_path": "s3://bucket/job/chunk-0.jsonl",
-                "num_lines": 1000,
-            }],
+            chunks=[
+                {
+                    "chunk_id": 0,
+                    "s3_input_path": "s3://bucket/job/chunk-0.jsonl",
+                    "num_lines": 1000,
+                }
+            ],
             koi_alternatives=[{"gpu_type": "A100", "tp": 8, "pp": 1}],
         )
 
@@ -332,15 +362,25 @@ class TestKoiWebhookNotifications:
         old_redis = getattr(server.app.state, "redis_available", False)
         server.app.state.redis_available = True
         try:
-            with patch.object(server, "_make_job_id", return_value="job-123"), \
-                 patch.object(server, "resolve_gpu_type_to_instance", side_effect=fake_resolve_gpu_type_to_instance), \
-                 patch.object(server, "check_user_specified_feasibility", return_value=feasibility), \
-                 patch.object(server, "get_cached_quotas", return_value=[]), \
-                 patch.object(server, "get_ordered_regions", return_value=[object()]), \
-                 patch.object(server, "get_chunk_manager", return_value=chunk_manager), \
-                 patch.object(server, "get_job_tracker", return_value=job_tracker), \
-                 patch.object(server, "get_quota_tracker", return_value=MagicMock()), \
-                 patch.object(server, "launch_chunked_replicas", new=fake_launch_chunked_replicas):
+            with (
+                patch.object(server, "_make_job_id", return_value="job-123"),
+                patch.object(
+                    server,
+                    "resolve_gpu_type_to_instance",
+                    side_effect=fake_resolve_gpu_type_to_instance,
+                ),
+                patch.object(
+                    server, "check_user_specified_feasibility", return_value=feasibility
+                ),
+                patch.object(server, "get_cached_quotas", return_value=[]),
+                patch.object(server, "get_ordered_regions", return_value=[object()]),
+                patch.object(server, "get_chunk_manager", return_value=chunk_manager),
+                patch.object(server, "get_job_tracker", return_value=job_tracker),
+                patch.object(server, "get_quota_tracker", return_value=MagicMock()),
+                patch.object(
+                    server, "launch_chunked_replicas", new=fake_launch_chunked_replicas
+                ),
+            ):
                 data = asyncio.run(server.submit_batch(request))
         finally:
             server.app.state.redis_available = old_redis
@@ -386,11 +426,17 @@ class TestKoiWebhookNotifications:
         old_cm = getattr(server.app.state, "cluster_manager", None)
         server.app.state.cluster_manager = mock_cm
         try:
-            with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-                 patch("orca_server.launcher._stop_koi_launch_heartbeat") as stop_heartbeat, \
-                 patch.dict(cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False), \
-                 patch("time.time", return_value=7200.0), \
-                 patch("requests.post") as post:
+            with (
+                patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+                patch(
+                    "orca_server.launcher._stop_koi_launch_heartbeat"
+                ) as stop_heartbeat,
+                patch.dict(
+                    cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False
+                ),
+                patch("time.time", return_value=7200.0),
+                patch("requests.post") as post,
+            ):
                 server._notify_koi_replica_ready("parent-job", "parent-job-r1")
 
             post.assert_called_once()
@@ -415,20 +461,24 @@ class TestKoiWebhookNotifications:
             else:
                 server.app.state.cluster_manager = old_cm
 
-    def test_cmd_deploy_uses_top_level_koi_predicted_tps_for_chunked_submit(self, orca_mod):
+    def test_cmd_deploy_uses_top_level_koi_predicted_tps_for_chunked_submit(
+        self, orca_mod
+    ):
         """Chunked deploy should forward Koi predicted_tps from the top-level response."""
         from types import SimpleNamespace
 
         plan_response = MagicMock(status_code=200)
         plan_response.json.return_value = {
             "status": "ok",
-            "placements": [{
-                "gpu_type": "L40S",
-                "instance_type": "g6e.12xlarge",
-                "tp_size": 4,
-                "pp_size": 1,
-                "cost_per_hour": 9.36,
-            }],
+            "placements": [
+                {
+                    "gpu_type": "L40S",
+                    "instance_type": "g6e.12xlarge",
+                    "tp_size": 4,
+                    "pp_size": 1,
+                    "cost_per_hour": 9.36,
+                }
+            ],
         }
         submit_response = MagicMock(status_code=200)
         submit_response.json.return_value = {
@@ -475,6 +525,7 @@ class TestKoiWebhookNotifications:
         )
         koi_data = {
             "_decision_id": "dec-123",
+            "planned_market": "on_demand",
             "config": {
                 "gpu_type": "A100-80GB",
                 "instance_type": "p4de.24xlarge",
@@ -482,34 +533,65 @@ class TestKoiWebhookNotifications:
                 "pp": 1,
                 "dp": 2,
                 "num_instances": 1,
+                "market": "on_demand",
                 "engine_config": {},
             },
             "predicted_tps": 2500.0,
-            "alternatives": [{"gpu_type": "L40S", "tp": 4, "pp": 1}],
+            "alternatives": [
+                {
+                    "gpu_type": "L40S",
+                    "tp": 4,
+                    "pp": 1,
+                    "dp": 2,
+                    "planned_market": "on_demand",
+                }
+            ],
         }
+
+        def fake_call_koi(job_params, resource_map, timeout=600):
+            captured["koi_job"] = job_params
+            return koi_data
 
         original_koi = orca_mod.KOI_SERVICE_URL
         orca_mod.KOI_SERVICE_URL = "http://koi:8090"
         try:
-            with patch.object(orca_mod, "parse_input_file", return_value={
-                "num_lines": 1000,
-                "avg_input_tokens": 953,
-                "max_input_tokens": 2048,
-                "has_explicit_max_tokens": False,
-            }), \
-                 patch.object(orca_mod.os.path, "exists", return_value=True), \
-                 patch.object(orca_mod, "upload_to_server", return_value="s3://bucket/input.jsonl"), \
-                 patch.object(orca_mod, "split_and_upload_chunks", return_value=[{
-                     "chunk_id": 0,
-                     "s3_input_path": "s3://bucket/chunk-0.jsonl",
-                     "num_lines": 1000,
-                 }]), \
-                 patch.object(orca_mod, "fetch_resources", return_value={"resources": []}), \
-                 patch.object(orca_mod, "call_koi", return_value=koi_data), \
-                 patch.object(orca_mod, "api", side_effect=fake_api), \
-                 patch.object(orca_mod, "api_with_spinner", side_effect=fake_api_with_spinner), \
-                 patch.object(orca_mod, "spinner", return_value=None), \
-                 patch("builtins.input", return_value="1"):
+            with (
+                patch.object(
+                    orca_mod,
+                    "parse_input_file",
+                    return_value={
+                        "num_lines": 1000,
+                        "avg_input_tokens": 953,
+                        "max_input_tokens": 2048,
+                        "has_explicit_max_tokens": False,
+                    },
+                ),
+                patch.object(orca_mod.os.path, "exists", return_value=True),
+                patch.object(
+                    orca_mod, "upload_to_server", return_value="s3://bucket/input.jsonl"
+                ),
+                patch.object(
+                    orca_mod,
+                    "split_and_upload_chunks",
+                    return_value=[
+                        {
+                            "chunk_id": 0,
+                            "s3_input_path": "s3://bucket/chunk-0.jsonl",
+                            "num_lines": 1000,
+                        }
+                    ],
+                ),
+                patch.object(
+                    orca_mod, "fetch_resources", return_value={"resources": []}
+                ),
+                patch.object(orca_mod, "call_koi", side_effect=fake_call_koi),
+                patch.object(orca_mod, "api", side_effect=fake_api),
+                patch.object(
+                    orca_mod, "api_with_spinner", side_effect=fake_api_with_spinner
+                ),
+                patch.object(orca_mod, "spinner", return_value=None),
+                patch("builtins.input", return_value="1"),
+            ):
                 orca_mod.cmd_deploy(args)
         finally:
             orca_mod.KOI_SERVICE_URL = original_koi
@@ -518,6 +600,9 @@ class TestKoiWebhookNotifications:
         assert captured["payload"]["koi_predicted_tps"] == 2500.0
         assert captured["payload"]["gpu_type"] == "A100-80GB"
         assert captured["payload"]["replicas"] == 2
+        assert captured["payload"]["preferred_market"] == "spot"
+        assert captured["payload"]["planned_market"] == "on_demand"
+        assert captured["koi_job"]["preferred_market"] == "spot"
 
     def test_launch_chunked_replicas_fallback_success_updates_ready_payload(self):
         """If the primary config fails, the started webhook should reflect the fallback config."""
@@ -533,7 +618,9 @@ class TestKoiWebhookNotifications:
         RealThread = real_threading.Thread
 
         class InlineThread:
-            def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+            def __init__(
+                self, target=None, args=(), kwargs=None, daemon=None, name=None
+            ):
                 self._thread = RealThread(
                     target=target,
                     args=args,
@@ -612,7 +699,10 @@ class TestKoiWebhookNotifications:
             placement="auto",
             replicas=1,
             chunks=[{"chunk_id": 0}],
+            preferred_market="on_demand",
+            planned_market="on_demand",
             koi_decision_id="dec-123",
+            koi_predicted_tps=2500.0,
         )
         configs = [
             MagicOutput(
@@ -622,6 +712,7 @@ class TestKoiWebhookNotifications:
                 tp_size=4,
                 pp_size=1,
                 replicas=1,
+                planned_market="on_demand",
                 num_instances=1,
             ),
             MagicOutput(
@@ -631,6 +722,7 @@ class TestKoiWebhookNotifications:
                 tp_size=8,
                 pp_size=1,
                 replicas=1,
+                planned_market="on_demand",
                 num_instances=1,
             ),
         ]
@@ -638,20 +730,36 @@ class TestKoiWebhookNotifications:
         old_cm = getattr(server.app.state, "cluster_manager", None)
         server.app.state.cluster_manager = cm
         try:
-            with patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"), \
-                 patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-                 patch.dict(cfg.INSTANCE_TO_GPU, {
-                     "g6e.12xlarge": "L40S",
-                     "p4de.24xlarge": "A100-80GB",
-                 }, clear=False), \
-                 patch("orca_server.launcher.generate_job_dirname", return_value="test-jobdir"), \
-                 patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()), \
-                 patch("orca_server.launcher.get_job_tracker", return_value=jt), \
-                 patch("orca_server.launcher.get_cluster_manager", return_value=cm), \
-                 patch("orca_server.launcher._launch_chunked_replica", new=fake_launch_replica), \
-                 patch("orca_server.launcher._notify_koi_config_attempted") as notify_attempted, \
-                 patch("orca_server.launcher.sky_down_with_retry"), \
-                 patch("orca_server.launcher.threading.Thread", InlineThread):
+            with (
+                patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"),
+                patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+                patch.dict(
+                    cfg.INSTANCE_TO_GPU,
+                    {
+                        "g6e.12xlarge": "L40S",
+                        "p4de.24xlarge": "A100-80GB",
+                    },
+                    clear=False,
+                ),
+                patch(
+                    "orca_server.launcher.generate_job_dirname",
+                    return_value="test-jobdir",
+                ),
+                patch(
+                    "orca_server.launcher.setup_job_logger", return_value=MagicMock()
+                ),
+                patch("orca_server.launcher.get_job_tracker", return_value=jt),
+                patch("orca_server.launcher.get_cluster_manager", return_value=cm),
+                patch(
+                    "orca_server.launcher._launch_chunked_replica",
+                    new=fake_launch_replica,
+                ),
+                patch(
+                    "orca_server.launcher._notify_koi_config_attempted"
+                ) as notify_attempted,
+                patch("orca_server.launcher.sky_down_with_retry"),
+                patch("orca_server.launcher.threading.Thread", InlineThread),
+            ):
                 ok = asyncio.run(
                     launcher.launch_chunked_replicas(
                         request=request,
@@ -667,11 +775,17 @@ class TestKoiWebhookNotifications:
             assert notify_attempted.call_args_list[1].kwargs["launched"] is True
             assert notify_attempted.call_args_list[1].args[2] == "p4de.24xlarge"
 
-            deploy_ts = cm.get_replica_states("parent-job")["parent-job-r0"]["koi_webhook_info"]["deploy_timestamp"]
-            with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-                 patch.dict(cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False), \
-                 patch("time.time", return_value=deploy_ts + 1800), \
-                 patch("requests.post") as post:
+            deploy_ts = cm.get_replica_states("parent-job")["parent-job-r0"][
+                "koi_webhook_info"
+            ]["deploy_timestamp"]
+            with (
+                patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+                patch.dict(
+                    cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False
+                ),
+                patch("time.time", return_value=deploy_ts + 1800),
+                patch("requests.post") as post,
+            ):
                 server._notify_koi_replica_ready("parent-job", "parent-job-r0")
 
             post.assert_called_once()
@@ -687,6 +801,7 @@ class TestKoiWebhookNotifications:
             assert payload["tp"] == 8
             assert payload["pp"] == 1
             assert payload["total_tokens"] == 1_977_000
+            assert payload["predicted_tps"] == 2500.0
             assert payload["is_fallback"] is True
         finally:
             if old_cm is None:
@@ -699,9 +814,11 @@ class TestKoiWebhookNotifications:
         import orca_server.config as cfg
         from orca_server.launcher import _notify_koi_config_attempted
 
-        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-             patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False), \
-             patch("requests.post") as post:
+        with (
+            patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+            patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False),
+            patch("requests.post") as post,
+        ):
             _notify_koi_config_attempted(
                 parent_job_id="parent-job",
                 koi_webhook_info={"decision_id": "dec-123"},
@@ -731,10 +848,12 @@ class TestKoiWebhookNotifications:
         import orca_server.config as cfg
         from orca_server.launcher import _notify_koi_config_attempted
 
-        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-             patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False), \
-             patch("requests.post", side_effect=RuntimeError("boom")), \
-             caplog.at_level(logging.WARNING, logger="orca_server.launcher"):
+        with (
+            patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+            patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False),
+            patch("requests.post", side_effect=RuntimeError("boom")),
+            caplog.at_level(logging.WARNING, logger="orca_server.launcher"),
+        ):
             _notify_koi_config_attempted(
                 parent_job_id="parent-job",
                 koi_webhook_info={"decision_id": "dec-123"},
@@ -753,9 +872,11 @@ class TestKoiWebhookNotifications:
         import orca_server.config as cfg
         from orca_server.launcher import _notify_koi_launch_heartbeat
 
-        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-             patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False), \
-             patch("requests.post") as post:
+        with (
+            patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+            patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False),
+            patch("requests.post") as post,
+        ):
             _notify_koi_launch_heartbeat(
                 replica_id="parent-job-r0",
                 parent_job_id="parent-job",
@@ -797,30 +918,38 @@ class TestKoiWebhookNotifications:
         def capture(path, payload, event):
             events.append((path, payload.copy(), event))
 
-        with patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-             patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False), \
-             patch.object(launcher, "_KOI_LAUNCH_HEARTBEAT_INTERVAL_SECONDS", 0.01), \
-             patch.object(launcher, "_post_koi_webhook", side_effect=capture):
-            assert launcher._start_koi_launch_heartbeat(
-                replica_id="parent-job-r0",
-                parent_job_id="parent-job",
-                koi_webhook_info={"decision_id": "dec-123"},
-                instance_type="g6e.12xlarge",
-                tp=4,
-                pp=1,
-                attempt_index=0,
-                phase="searching_capacity",
-                message="searching for capacity",
-            ) is True
+        with (
+            patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+            patch.dict(cfg.INSTANCE_TO_GPU, {"g6e.12xlarge": "L40S"}, clear=False),
+            patch.object(launcher, "_KOI_LAUNCH_HEARTBEAT_INTERVAL_SECONDS", 0.01),
+            patch.object(launcher, "_post_koi_webhook", side_effect=capture),
+        ):
+            assert (
+                launcher._start_koi_launch_heartbeat(
+                    replica_id="parent-job-r0",
+                    parent_job_id="parent-job",
+                    koi_webhook_info={"decision_id": "dec-123"},
+                    instance_type="g6e.12xlarge",
+                    tp=4,
+                    pp=1,
+                    attempt_index=0,
+                    phase="searching_capacity",
+                    message="searching for capacity",
+                )
+                is True
+            )
 
             time.sleep(0.03)
-            assert launcher._update_koi_launch_heartbeat(
-                "parent-job-r0",
-                phase="provisioning",
-                message="cluster provisioning",
-                region="us-east-1",
-                market="on_demand",
-            ) is True
+            assert (
+                launcher._update_koi_launch_heartbeat(
+                    "parent-job-r0",
+                    phase="provisioning",
+                    message="cluster provisioning",
+                    region="us-east-1",
+                    market="on_demand",
+                )
+                is True
+            )
             time.sleep(0.03)
             before_stop = len(events)
             assert launcher._stop_koi_launch_heartbeat("parent-job-r0") is True
@@ -849,7 +978,9 @@ class TestKoiWebhookNotifications:
         RealThread = real_threading.Thread
 
         class InlineThread:
-            def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+            def __init__(
+                self, target=None, args=(), kwargs=None, daemon=None, name=None
+            ):
                 self._thread = RealThread(
                     target=target,
                     args=args,
@@ -890,6 +1021,8 @@ class TestKoiWebhookNotifications:
             placement="auto",
             replicas=1,
             chunks=[{"chunk_id": 0}],
+            preferred_market="on_demand",
+            planned_market="on_demand",
             koi_decision_id="dec-123",
         )
         configs = [
@@ -900,6 +1033,7 @@ class TestKoiWebhookNotifications:
                 tp_size=4,
                 pp_size=1,
                 replicas=1,
+                planned_market="on_demand",
                 num_instances=1,
             ),
             MagicOutput(
@@ -909,25 +1043,34 @@ class TestKoiWebhookNotifications:
                 tp_size=8,
                 pp_size=1,
                 replicas=1,
+                planned_market="spot",
                 num_instances=1,
             ),
         ]
 
-        with patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"), \
-             patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-             patch.dict(cfg.INSTANCE_TO_GPU, {
-                 "g6e.12xlarge": "L40S",
-                 "p4de.24xlarge": "A100-80GB",
-             }, clear=False), \
-             patch("orca_server.launcher.generate_job_dirname", return_value="test-jobdir"), \
-             patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()), \
-             patch("orca_server.launcher.get_job_tracker", return_value=jt), \
-             patch("orca_server.launcher.get_cluster_manager", return_value=cm), \
-             patch("orca_server.launcher._launch_chunked_replica", new=fail_launch), \
-             patch("orca_server.launcher._notify_koi_config_attempted"), \
-             patch("orca_server.launcher.sky_down_with_retry"), \
-             patch("orca_server.launcher.threading.Thread", InlineThread), \
-             patch("requests.post") as post:
+        with (
+            patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"),
+            patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+            patch.dict(
+                cfg.INSTANCE_TO_GPU,
+                {
+                    "g6e.12xlarge": "L40S",
+                    "p4de.24xlarge": "A100-80GB",
+                },
+                clear=False,
+            ),
+            patch(
+                "orca_server.launcher.generate_job_dirname", return_value="test-jobdir"
+            ),
+            patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()),
+            patch("orca_server.launcher.get_job_tracker", return_value=jt),
+            patch("orca_server.launcher.get_cluster_manager", return_value=cm),
+            patch("orca_server.launcher._launch_chunked_replica", new=fail_launch),
+            patch("orca_server.launcher._notify_koi_config_attempted"),
+            patch("orca_server.launcher.sky_down_with_retry"),
+            patch("orca_server.launcher.threading.Thread", InlineThread),
+            patch("requests.post") as post,
+        ):
             ok = asyncio.run(
                 launcher.launch_chunked_replicas(
                     request=request,
@@ -947,13 +1090,19 @@ class TestKoiWebhookNotifications:
             "g6e.12xlarge",
             "p4de.24xlarge",
         ]
+        assert [a["market"] for a in payload["configs_tried"]] == [
+            "on_demand",
+            "spot",
+        ]
         assert payload["failure_reasons"] == [
             "g6e.12xlarge failed",
             "p4de.24xlarge failed",
         ]
         assert payload["total_time_seconds"] >= 0
 
-    def test_launch_chunked_replicas_logs_warning_when_launch_failed_webhook_errors(self, caplog):
+    def test_launch_chunked_replicas_logs_warning_when_launch_failed_webhook_errors(
+        self, caplog
+    ):
         """All-failed launch webhook errors should log a warning instead of disappearing silently."""
         import asyncio
         import threading as real_threading
@@ -965,7 +1114,9 @@ class TestKoiWebhookNotifications:
         RealThread = real_threading.Thread
 
         class InlineThread:
-            def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+            def __init__(
+                self, target=None, args=(), kwargs=None, daemon=None, name=None
+            ):
                 self._thread = RealThread(
                     target=target,
                     args=args,
@@ -1029,22 +1180,30 @@ class TestKoiWebhookNotifications:
             ),
         ]
 
-        with patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"), \
-             patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"), \
-             patch.dict(cfg.INSTANCE_TO_GPU, {
-                 "g6e.12xlarge": "L40S",
-                 "p4de.24xlarge": "A100-80GB",
-             }, clear=False), \
-             patch("orca_server.launcher.generate_job_dirname", return_value="test-jobdir"), \
-             patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()), \
-             patch("orca_server.launcher.get_job_tracker", return_value=jt), \
-             patch("orca_server.launcher.get_cluster_manager", return_value=cm), \
-             patch("orca_server.launcher._launch_chunked_replica", new=fail_launch), \
-             patch("orca_server.launcher._notify_koi_config_attempted"), \
-             patch("orca_server.launcher.sky_down_with_retry"), \
-             patch("orca_server.launcher.threading.Thread", InlineThread), \
-             patch("requests.post", side_effect=RuntimeError("boom")), \
-             caplog.at_level(logging.WARNING, logger="orca_server.launcher"):
+        with (
+            patch.object(launcher._cfg, "ORCA_SERVER_URL", "http://orca"),
+            patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
+            patch.dict(
+                cfg.INSTANCE_TO_GPU,
+                {
+                    "g6e.12xlarge": "L40S",
+                    "p4de.24xlarge": "A100-80GB",
+                },
+                clear=False,
+            ),
+            patch(
+                "orca_server.launcher.generate_job_dirname", return_value="test-jobdir"
+            ),
+            patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()),
+            patch("orca_server.launcher.get_job_tracker", return_value=jt),
+            patch("orca_server.launcher.get_cluster_manager", return_value=cm),
+            patch("orca_server.launcher._launch_chunked_replica", new=fail_launch),
+            patch("orca_server.launcher._notify_koi_config_attempted"),
+            patch("orca_server.launcher.sky_down_with_retry"),
+            patch("orca_server.launcher.threading.Thread", InlineThread),
+            patch("requests.post", side_effect=RuntimeError("boom")),
+            caplog.at_level(logging.WARNING, logger="orca_server.launcher"),
+        ):
             ok = asyncio.run(
                 launcher.launch_chunked_replicas(
                     request=request,
@@ -1061,10 +1220,12 @@ class TestKoiWebhookNotifications:
 # Task 5: --skip-dangerously flag
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestSkipDangerouslyFlag:
     def test_flag_accepted_by_parser(self, orca_mod):
         """deploy parser accepts --skip-dangerously."""
         import argparse
+
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers(dest="command")
         # Re-create parser to test flag existence
@@ -1074,7 +1235,9 @@ class TestSkipDangerouslyFlag:
         """--skip-dangerously is parsed as True."""
         result = subprocess.run(
             [sys.executable, ORCA_CLI, "deploy", "--help"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert "--skip-dangerously" in result.stdout
 
@@ -1083,12 +1246,15 @@ class TestSkipDangerouslyFlag:
 # Integration: backward compatibility (no Koi configured)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestBackwardCompatibility:
     def test_plan_help_works(self):
         """orca plan --help still works."""
         result = subprocess.run(
             [sys.executable, ORCA_CLI, "plan", "--help"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0
         assert "model_name" in result.stdout
@@ -1097,7 +1263,9 @@ class TestBackwardCompatibility:
         """orca deploy --help still works."""
         result = subprocess.run(
             [sys.executable, ORCA_CLI, "deploy", "--help"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode == 0
         assert "--skip-dangerously" in result.stdout
@@ -1108,16 +1276,19 @@ class TestBackwardCompatibility:
 # Pricing + filtering (server-side unit tests)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestResourceFiltering:
     def test_skypilot_pricing_returns_positive(self):
         """SkyPilot catalog returns a positive price for known instances."""
         from server import _get_instance_price
+
         price = _get_instance_price("g6e.12xlarge", "us-east-1")
         assert price > 0
 
     def test_skypilot_pricing_cached(self):
         """Second call uses cache."""
         from server import _get_instance_price, _pricing_cache
+
         _pricing_cache.pop("g5.12xlarge:us-east-1", None)
         p1 = _get_instance_price("g5.12xlarge", "us-east-1")
         p2 = _get_instance_price("g5.12xlarge", "us-east-1")
@@ -1126,16 +1297,19 @@ class TestResourceFiltering:
     def test_no_v100_in_koi_gpu_types(self):
         """V100 is excluded from Koi-supported GPUs."""
         from server import _KOI_GPU_TYPES
+
         assert "V100" not in _KOI_GPU_TYPES
 
     def test_koi_gpu_types_coverage(self):
         """Koi GPU types includes the main inference GPUs."""
         from server import _KOI_GPU_TYPES
+
         assert {"H100", "A100", "L40S", "A10G", "L4"} == _KOI_GPU_TYPES
 
     def test_instance_prefixes_filter(self):
         """Only multi-GPU instance prefixes are allowed."""
         from server import _KOI_INSTANCE_PREFIXES
+
         # Should include the big instances
         assert any("g6e.12xlarge" in p for p in _KOI_INSTANCE_PREFIXES)
         assert any("p5." in p for p in _KOI_INSTANCE_PREFIXES)
