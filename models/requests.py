@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class KoiPlacementAlternative(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     gpu_type: str
     tp: int
