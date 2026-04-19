@@ -7,6 +7,7 @@ buffer already exists from sidecar ingest endpoint writes.
 Recovery is handled by Koi: watchdog fires /job/replica-failed webhook → Koi's agent
 decides config → calls scale_chain_tool → Orca's /job/{id}/scale launches replacement.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -78,7 +79,13 @@ class ReplicaWatchdog:
             states = self._cm.get_replica_states(job_id)
             for replica_id, state in states.items():
                 phase = state.get("phase", "")
-                if phase in ("launching", "provisioned", "completed", "swapped_out", "killed"):
+                if phase in (
+                    "launching",
+                    "provisioned",
+                    "completed",
+                    "swapped_out",
+                    "killed",
+                ):
                     continue  # not expected to heartbeat yet (or already done)
 
                 # Failed replicas: force-reclaim their chunks (monitor thread set phase
@@ -133,7 +140,9 @@ class ReplicaWatchdog:
         except Exception:
             return False
 
-    def _handle_dead_replica(self, job_id: str, replica_id: str, last_hb: float | None) -> None:
+    def _handle_dead_replica(
+        self, job_id: str, replica_id: str, last_hb: float | None
+    ) -> None:
         """Force-reclaim chunks and notify Koi. Recovery is Koi's responsibility."""
         if replica_id in self._dead_replicas:
             return  # already processed
@@ -143,19 +152,23 @@ class ReplicaWatchdog:
             self._dead_replicas[replica_id] = time.time()
             logger.info(
                 "[Watchdog] Replica %s completed gracefully (last heartbeat: %s)",
-                replica_id, f"{last_hb:.1f}" if last_hb else "never",
+                replica_id,
+                f"{last_hb:.1f}" if last_hb else "never",
             )
             self._cm.set_replica_state(job_id, replica_id, phase="completed")
             self._mc.exclude_replica(job_id, replica_id)
             # Trigger cluster teardown
             from orca_server.job_manager import sky_down_with_retry
+
             sky_down_with_retry(replica_id)
             return
 
         self._dead_replicas[replica_id] = time.time()
         logger.warning(
             "[Watchdog] Replica %s declared DEAD (last heartbeat: %s, threshold: %ss)",
-            replica_id, f"{last_hb:.1f}" if last_hb else "never", self._dead_threshold,
+            replica_id,
+            f"{last_hb:.1f}" if last_hb else "never",
+            self._dead_threshold,
         )
 
         # 1. Update replica phase
@@ -165,14 +178,26 @@ class ReplicaWatchdog:
         # 1b. Notify Koi that this replica died
         try:
             from orca_server.config import KOI_SERVICE_URL
+
             if KOI_SERVICE_URL:
                 import requests as _req
-                _req.post(f"{KOI_SERVICE_URL}/job/replica-failed", json={
-                    "job_id": replica_id,
-                    "group_id": job_id,
-                    "status": "failed",
-                    "reason": f"Heartbeat timeout ({self._dead_threshold}s)",
-                }, timeout=5)
+
+                state = self._cm.get_replica_states(job_id).get(replica_id, {})
+                koi_info = state.get("koi_webhook_info") or {}
+                _req.post(
+                    f"{KOI_SERVICE_URL}/job/replica-failed",
+                    json={
+                        "job_id": replica_id,
+                        "group_id": job_id,
+                        "decision_id": koi_info.get("decision_id"),
+                        "instance_type": state.get("instance_type", "unknown"),
+                        "region": state.get("region", "unknown"),
+                        "market": state.get("market", "unknown"),
+                        "status": "failed",
+                        "reason": f"Heartbeat timeout ({self._dead_threshold}s)",
+                    },
+                    timeout=5,
+                )
         except Exception as exc:
             logger.warning("[Watchdog] Failed to notify Koi of replica death: %s", exc)
 
@@ -181,12 +206,17 @@ class ReplicaWatchdog:
         result = cm.force_reclaim(job_id, [replica_id])
         logger.info(
             "[Watchdog] Force-reclaimed for %s: reclaimed=%d, failed=%d",
-            replica_id, result["reclaimed"], result["failed"],
+            replica_id,
+            result["reclaimed"],
+            result["failed"],
         )
 
         # 3. Check if force-reclaim completed the job (failed chunks → all_done)
         progress = cm.get_progress(job_id)
         if progress and progress["all_done"]:
-            logger.info("[Watchdog] Job %s is all_done after force-reclaim, triggering assembly", job_id)
+            logger.info(
+                "[Watchdog] Job %s is all_done after force-reclaim, triggering assembly",
+                job_id,
+            )
             if self._assembly_callback:
                 self._assembly_callback(job_id)
