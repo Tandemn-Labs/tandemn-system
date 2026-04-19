@@ -602,14 +602,13 @@ def cmd_deploy(args):
     payload["chunks"] = chunk_infos
     payload["replicas"] = effective_replicas
 
-    # ── Phase 3: Solve placement (Koi + roofline in parallel) ─────────
+    # ── Phase 3: Solve placement (Koi only; roofline is not a fallback) ─────
     print()
     use_koi = KOI_SERVICE_URL and not args.gpu and not is_s3
     koi_data = None
 
     if use_koi:
-        import threading as _thr
-        step("Running Koi + Orca roofline in parallel...")
+        step("Running Koi placement solver...")
 
         koi_job = {
             "model_name": model_name,
@@ -622,128 +621,48 @@ def cmd_deploy(args):
             "preferred_market": preferred_market,
         }
 
-        koi_result = [None]
-        def _koi_thread():
-            rm = fetch_resources()
-            if rm:
-                koi_result[0] = call_koi(koi_job, rm)
-        kt = _thr.Thread(target=_koi_thread, daemon=True)
-        kt.start()
+        rm = fetch_resources()
+        koi_data = call_koi(koi_job, rm) if rm else None
 
-        plan_payload = {
-            k: v for k, v in payload.items()
-            if k not in ("chunks", "replicas", "force", "persist", "prefer_spot",
-                         "s3_model_path", "hf_token")
-        }
-        plan_payload["input_file"] = "s3://plan-dry-run/placeholder"
-        import threading as _thr2
-        _stop = _thr2.Event()
-        _spin = _thr2.Thread(target=spinner, args=("Solving placement...", _stop), daemon=True)
-        _spin.start()
-        try:
-            roofline_resp = api("post", "/test/placement", json=plan_payload)
-        finally:
-            kt.join(timeout=600)
-            _stop.set()
-            _spin.join(timeout=2)
-        koi_data = koi_result[0]
+        if koi_data is None:
+            print(f"\n  {RED}Koi unavailable — aborting.{RESET}")
+            print(f"  {DIM}Orca roofline is not used as a fallback when Koi is enabled.{RESET}")
+            print(f"  {DIM}To bypass Koi, re-run with --gpu <type> or unset KOI_SERVICE_URL.{RESET}\n")
+            sys.exit(1)
 
-        if koi_data is None and KOI_SERVICE_URL:
-            step(f"{YELLOW}Warning:{RESET} Koi service unavailable, using roofline only")
+        rec = koi_data.get("config", {})
+        print()
+        print(box(_koi_summary_lines(koi_data), title="KOI RECOMMENDATION"))
+        print()
 
-        roofline_configs = []
-        if roofline_resp.status_code in (200, 201):
-            rdata = roofline_resp.json()
-            if rdata.get("status") != "error":
-                roofline_configs = rdata.get("placements") or rdata.get("configs") or []
+        if getattr(args, 'skip_dangerously', False):
+            confirmed = True
+            step("--skip-dangerously: auto-confirming Koi recommendation")
+        else:
+            ans = input(f"  {BOLD}Launch with Koi recommendation? [y/N]:{RESET} ").strip().lower()
+            confirmed = ans == "y"
+        if not confirmed:
+            print(f"\n  {DIM}Aborted.{RESET}")
+            sys.exit(0)
 
-        if koi_data and roofline_configs:
-            rec = koi_data.get("config", {})
-            rcfg = roofline_configs[0]
-            print()
-            print(box(_koi_summary_lines(koi_data), title="[1] KOI RECOMMENDATION"))
-            print()
-            orca_lines = [
-                f"{DIM}Instance:{RESET}     {c(rcfg.get('instance_type', '?'), WHITE+BOLD)}",
-                f"{DIM}GPU:{RESET}          {c(rcfg.get('gpu_type', '?'), CYAN+BOLD)}",
-                f"{DIM}TP:{RESET}           {rcfg.get('tp_size', '?')}    {DIM}PP:{RESET} {rcfg.get('pp_size', '?')}",
-            ]
-            if rcfg.get("cost_per_hour"):
-                orca_lines.append(f"{DIM}Est. cost:{RESET}   ${rcfg['cost_per_hour']:.2f}/hr")
-            slo = _slo_line(rcfg, args.slo)
-            if slo:
-                orca_lines.append(slo)
-            print(box(orca_lines, title="[2] ORCA ROOFLINE"))
-            print()
-            print(f"  {DIM}[3] Cancel{RESET}")
-
-            if getattr(args, 'skip_dangerously', False):
-                choice = "1"
-                step(f"--skip-dangerously: auto-picking Koi recommendation")
-            else:
-                choice = input(f"\n  {BOLD}Choice [1/2/3]:{RESET} ").strip()
-
-            if choice == "1":
-                payload["placement_solver"] = "user_specified"
-                payload["gpu_type"] = rec.get("gpu_type")
-                payload["tp_size"] = rec.get("tp")
-                payload["pp_size"] = rec.get("pp")
-                payload["replicas"] = rec.get("dp", 1)
-                payload["planned_market"] = (
-                    koi_data.get("planned_market")
-                    or rec.get("market")
-                    or preferred_market
-                )
-                payload["koi_decision_id"] = koi_data.get("_decision_id")
-                payload["koi_predicted_tps"] = koi_data.get("predicted_tps", 0)
-                # Pass Koi alternatives for fallback retry
-                alts = koi_data.get("alternatives", [])
-                if alts:
-                    payload["koi_alternatives"] = alts
-                step(
-                    f"Launching with Koi: {c(rec.get('gpu_type','?'), CYAN)} "
-                    f"TP={rec.get('tp')} PP={rec.get('pp')} DP={rec.get('dp')} "
-                    f"market={payload['planned_market']}"
-                )
-            elif choice == "2":
-                payload["placement_solver"] = "user_specified"
-                payload["gpu_type"] = rcfg.get("gpu_type")
-                if rcfg.get("tp_size"):
-                    payload["tp_size"] = rcfg["tp_size"]
-                if rcfg.get("pp_size"):
-                    payload["pp_size"] = rcfg["pp_size"]
-                step(f"Launching with roofline: {c(rcfg.get('gpu_type','?'), CYAN)}")
-            else:
-                print(f"\n  {DIM}Aborted.{RESET}")
-                sys.exit(0)
-        elif koi_data and not roofline_configs:
-            rec = koi_data.get("config", {})
-            print()
-            print(box(_koi_summary_lines(koi_data), title="[KOI RECOMMENDATION]"))
-            print()
-            if getattr(args, 'skip_dangerously', False):
-                confirmed = True
-                step("--skip-dangerously: auto-confirming Koi recommendation")
-            else:
-                ans = input(f"  {BOLD}Launch with Koi recommendation? [y/N]:{RESET} ").strip().lower()
-                confirmed = ans == "y"
-            if not confirmed:
-                print(f"\n  {DIM}Aborted.{RESET}")
-                sys.exit(0)
-            payload["placement_solver"] = "user_specified"
-            payload["gpu_type"] = rec.get("gpu_type")
-            payload["tp_size"] = rec.get("tp")
-            payload["pp_size"] = rec.get("pp")
-            payload["replicas"] = rec.get("dp", 1)
-            payload["planned_market"] = (
-                koi_data.get("planned_market") or rec.get("market") or preferred_market
-            )
-            payload["koi_decision_id"] = koi_data.get("_decision_id")
-            payload["koi_predicted_tps"] = koi_data.get("predicted_tps", 0)
-            alts = koi_data.get("alternatives", [])
-            if alts:
-                payload["koi_alternatives"] = alts
-        # else: no advisor — fall through to normal roofline submit
+        payload["placement_solver"] = "user_specified"
+        payload["gpu_type"] = rec.get("gpu_type")
+        payload["tp_size"] = rec.get("tp")
+        payload["pp_size"] = rec.get("pp")
+        payload["replicas"] = rec.get("dp", 1)
+        payload["planned_market"] = (
+            koi_data.get("planned_market") or rec.get("market") or preferred_market
+        )
+        payload["koi_decision_id"] = koi_data.get("_decision_id")
+        payload["koi_predicted_tps"] = koi_data.get("predicted_tps", 0)
+        alts = koi_data.get("alternatives", [])
+        if alts:
+            payload["koi_alternatives"] = alts
+        step(
+            f"Launching with Koi: {c(rec.get('gpu_type','?'), CYAN)} "
+            f"TP={rec.get('tp')} PP={rec.get('pp')} DP={rec.get('dp')} "
+            f"market={payload['planned_market']}"
+        )
 
     # ── Submit to server ─────────────────────────────────────────────
     if args.gpu:
