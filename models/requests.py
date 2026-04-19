@@ -4,11 +4,23 @@ This is the pydantic schema for the cli to send to the api_gateway
 
 from __future__ import annotations
 from typing import Literal, Optional
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
+
+
+class KoiPlacementAlternative(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    gpu_type: str
+    tp: int
+    pp: int
+    dp: int = 1
+    planned_market: Optional[Literal["spot", "on_demand"]] = None
 
 
 class BatchedRequest(BaseModel):
     """Request to send batched inference job to central server."""
+
+    model_config = ConfigDict(extra="forbid")
 
     user_id: str
     input_file: str  # S3/local path to the file
@@ -54,6 +66,8 @@ class BatchedRequest(BaseModel):
 
     # Use on-demand instances instead of spot (default: prefer spot)
     prefer_spot: Optional[bool] = True
+    preferred_market: Optional[Literal["spot", "on_demand"]] = None
+    planned_market: Optional[Literal["spot", "on_demand"]] = None
 
     # S3 URI to model weights — if set, loads from S3 instead of HuggingFace
     s3_model_path: Optional[str] = None
@@ -64,11 +78,20 @@ class BatchedRequest(BaseModel):
     # Solver log level: "debug", "info", "warning" (default: "info")
     log_level: Optional[str] = None
     # Chunked distributed batch inference
-    replicas: Optional[int] = None       # Replica count (from CLI --replicas or solver)
-    chunk_size: Optional[int] = None     # Lines per chunk (default: 1000)
-    chunks: Optional[list[dict]] = None  # [{chunk_id, s3_input_path, num_lines}, ...] — CLI uploads
-    koi_alternatives: Optional[list[dict]] = None  # Koi placement alternatives for fallback retry
-    koi_decision_id: Optional[str] = None          # Koi decision ID — passed back via /job/started webhook
+    replicas: Optional[int] = None  # Replica count (from CLI --replicas or solver)
+    chunk_size: Optional[int] = None  # Lines per chunk (default: 1000)
+    chunks: Optional[list[dict]] = (
+        None  # [{chunk_id, s3_input_path, num_lines}, ...] — CLI uploads
+    )
+    koi_alternatives: Optional[list[KoiPlacementAlternative]] = (
+        None  # Koi placement alternatives for fallback retry
+    )
+    koi_decision_id: Optional[str] = (
+        None  # Koi decision ID — passed back via /job/started webhook
+    )
+    koi_predicted_tps: Optional[float] = (
+        None  # Koi top-level TPS prediction for webhook propagation
+    )
 
     # Only change the ModelSpecificCofig
     # right now its just vllm, but we can interject the parameters here

@@ -36,9 +36,9 @@ AWS_REGIONS = [
 # Instance family to quota code mapping
 # G and VT instances share one quota, P instances have their own
 QUOTA_CODES = {
-    "g": "L-DB2E81BA",       # Running On-Demand G and VT instances
+    "g": "L-DB2E81BA",  # Running On-Demand G and VT instances
     "g_spot": "L-3819A6DF",  # All G and VT Spot Instance Requests
-    "p": "L-417A185B",       # Running On-Demand P instances (all P families share this)
+    "p": "L-417A185B",  # Running On-Demand P instances (all P families share this)
     "p_spot": "L-7212CCBC",  # All P Spot Instance Requests
 }
 
@@ -153,6 +153,7 @@ def get_ordered_regions(
     num_nodes: int = 1,
     quotas: Optional[Dict[str, RegionQuota]] = None,
     prefer_spot: bool = True,
+    target_market: Optional[str] = None,
 ) -> List[RegionCandidate]:
     """
     Get ordered list of regions to try for cluster creation.
@@ -162,6 +163,7 @@ def get_ordered_regions(
         num_nodes: Number of nodes needed (for multi-node clusters)
         quotas: Pre-fetched quotas, or None to query fresh
         prefer_spot: If True, prioritize spot over on-demand at same quota level
+        target_market: If set, only return candidates for that exact market
 
     Returns:
         List of RegionCandidate sorted by:
@@ -189,8 +191,12 @@ def get_ordered_regions(
     candidates: List[RegionCandidate] = []
 
     for region, quota in quotas.items():
-        # Check spot quota (skip if user explicitly requested on-demand)
-        if prefer_spot and quota.spot_vcpus >= required_vcpus:
+        # Check spot quota
+        if (
+            target_market in (None, "spot")
+            and (target_market == "spot" or prefer_spot)
+            and quota.spot_vcpus >= required_vcpus
+        ):
             candidates.append(
                 RegionCandidate(
                     region=region, use_spot=True, available_quota=quota.spot_vcpus
@@ -198,7 +204,10 @@ def get_ordered_regions(
             )
 
         # Check on-demand quota
-        if quota.on_demand_vcpus >= required_vcpus:
+        if (
+            target_market in (None, "on_demand")
+            and quota.on_demand_vcpus >= required_vcpus
+        ):
             candidates.append(
                 RegionCandidate(
                     region=region, use_spot=False, available_quota=quota.on_demand_vcpus
@@ -236,6 +245,7 @@ def build_skypilot_any_of(
     num_nodes: int = 1,
     max_candidates: int = 5,
     prefer_spot: bool = True,
+    target_market: Optional[str] = None,
     disk_size: str = "300GB",
     ports: int = VLLM_PORT,
 ) -> List[dict]:
@@ -247,13 +257,19 @@ def build_skypilot_any_of(
         num_nodes: Number of nodes needed
         max_candidates: Maximum number of fallback options
         prefer_spot: Prefer spot instances
+        target_market: Restrict candidates to one exact market if set
         disk_size: Disk size for instances
         ports: Port to expose
 
     Returns:
         List of resource dicts for SkyPilot any_of, or empty list if no viable regions
     """
-    candidates = get_ordered_regions(instance_type, num_nodes, prefer_spot=prefer_spot)
+    candidates = get_ordered_regions(
+        instance_type,
+        num_nodes,
+        prefer_spot=prefer_spot,
+        target_market=target_market,
+    )
 
     if not candidates:
         return []
@@ -319,23 +335,42 @@ def print_quota_summary():
 
 # All AWS regions to scan (superset of AWS_REGIONS used for launch)
 ALL_AWS_REGIONS = [
-    "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-    "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-north-1",
-    "ap-south-1", "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
-    "ap-southeast-1", "ap-southeast-2",
-    "ca-central-1", "sa-east-1",
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "eu-central-1",
+    "eu-north-1",
+    "ap-south-1",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ca-central-1",
+    "sa-east-1",
 ]
 
 # Family-level quota codes (source: https://spenserpothier.github.io/aws-quota-code-list/)
 FAMILY_QUOTA_CODES_MAP = {
-    "G":         {"on_demand": "L-DB2E81BA", "spot": "L-3819A6DF"},
-    "P4_P3_P2":  {"on_demand": "L-417A185B", "spot": "L-7212CCBC"},
-    "P5":        {"on_demand": "L-417A185B", "spot": "L-7212CCBC"},  # same as P4/P3/P2
+    "G": {"on_demand": "L-DB2E81BA", "spot": "L-3819A6DF"},
+    "P4_P3_P2": {"on_demand": "L-417A185B", "spot": "L-7212CCBC"},
+    "P5": {"on_demand": "L-417A185B", "spot": "L-7212CCBC"},  # same as P4/P3/P2
 }
 
 GPU_VRAM_GB = {
-    "H100": 80, "A100": 80, "V100": 32, "L40S": 48,
-    "L4": 24, "A10G": 24, "T4": 16, "M60": 8, "Radeon Pro V520": 8,
+    "H100": 80,
+    "A100": 80,
+    "V100": 32,
+    "L40S": 48,
+    "L4": 24,
+    "A10G": 24,
+    "T4": 16,
+    "M60": 8,
+    "Radeon Pro V520": 8,
 }
 
 
@@ -343,6 +378,7 @@ def _boto3_get_quota(quota_code: str, region: str) -> int:
     """Fetch a single quota value via boto3."""
     try:
         from sky.adaptors import aws as aws_adaptor
+
         client = aws_adaptor.client("service-quotas", region_name=region)
         resp = client.get_service_quota(ServiceCode="ec2", QuotaCode=quota_code)
         return int(resp["Quota"]["Value"])
@@ -380,6 +416,7 @@ def refresh_quotas_from_aws(
         logger.info("[QuotaRefresh] Updating existing CSV (%d instance types)", len(df))
     else:
         from orca_server.config import AWS_INSTANCES
+
         rows = []
         for inst, (gpu_name, gpu_count, vcpus, vram) in sorted(AWS_INSTANCES.items()):
             family_raw = inst.split(".")[0]
@@ -390,18 +427,24 @@ def refresh_quotas_from_aws(
                 family_type = "P5"
             else:
                 family_type = "P4_P3_P2"
-            gpu_type_str = f"{gpu_count}x {gpu_name}" if gpu_count > 1 else f"1x {gpu_name}"
-            rows.append({
-                "Family": family_display,
-                "Instance_Type": inst,
-                "vCPU": vcpus,
-                "GPU_Type": gpu_type_str,
-                "VRAM_per_GPU": float(vram),
-                "Total_VRAM": float(vram * gpu_count),
-                "Family_Type": family_type,
-            })
+            gpu_type_str = (
+                f"{gpu_count}x {gpu_name}" if gpu_count > 1 else f"1x {gpu_name}"
+            )
+            rows.append(
+                {
+                    "Family": family_display,
+                    "Instance_Type": inst,
+                    "vCPU": vcpus,
+                    "GPU_Type": gpu_type_str,
+                    "VRAM_per_GPU": float(vram),
+                    "Total_VRAM": float(vram * gpu_count),
+                    "Family_Type": family_type,
+                }
+            )
         df = pd.DataFrame(rows)
-        logger.info("[QuotaRefresh] Fresh CSV from %d instances in AWS_INSTANCES", len(df))
+        logger.info(
+            "[QuotaRefresh] Fresh CSV from %d instances in AWS_INSTANCES", len(df)
+        )
 
     # Parallel fetch across all (family_type, region) combos
     family_types = sorted(df["Family_Type"].unique())
@@ -409,7 +452,9 @@ def refresh_quotas_from_aws(
     quotas = {}
 
     with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(_fetch_family_region, ft, r): (ft, r) for ft, r in tasks}
+        futures = {
+            executor.submit(_fetch_family_region, ft, r): (ft, r) for ft, r in tasks
+        }
         for future in as_completed(futures):
             try:
                 ft, region, on_demand, spot = future.result()
@@ -419,7 +464,9 @@ def refresh_quotas_from_aws(
                 logger.warning("[QuotaRefresh] Failed %s/%s: %s", ft, r, e)
                 quotas[(ft, r)] = {"on_demand": 0, "spot": 0}
 
-    logger.info("[QuotaRefresh] Fetched quotas for %d (family, region) pairs", len(quotas))
+    logger.info(
+        "[QuotaRefresh] Fetched quotas for %d (family, region) pairs", len(quotas)
+    )
 
     # Build quota columns
     for region in ALL_AWS_REGIONS:
@@ -430,7 +477,15 @@ def refresh_quotas_from_aws(
             )
 
     # Ensure column order: spec cols first, then quota cols sorted
-    spec_cols = ["Family", "Instance_Type", "vCPU", "GPU_Type", "VRAM_per_GPU", "Total_VRAM", "Family_Type"]
+    spec_cols = [
+        "Family",
+        "Instance_Type",
+        "vCPU",
+        "GPU_Type",
+        "VRAM_per_GPU",
+        "Total_VRAM",
+        "Family_Type",
+    ]
     quota_col_list = sorted([c for c in df.columns if c not in spec_cols])
     df = df[spec_cols + quota_col_list]
 
