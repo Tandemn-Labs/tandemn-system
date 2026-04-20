@@ -25,3 +25,7 @@ docs/throughput-measurement.md
 .codex
 .vscode/
 .cursor/
+
+# Builds
+dist/*
+.tar.gz
