@@ -1,7 +1,6 @@
 services:
   orca:
     image: ghcr.io/tandemn-labs/orca:0.0.1
-    build: .
     ports:
       - "26336:26336"
     env_file: .env
