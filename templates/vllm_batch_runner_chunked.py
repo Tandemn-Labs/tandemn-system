@@ -68,7 +68,7 @@ def write_progress(done: int, total: int, status: str = "running"):
         pass
 
 
-def _report_phase(phase: str):
+def _report_phase(phase: str, reason: Optional[str] = None):
     if not ORCA_URL or not JOB_ID:
         return
     try:
@@ -78,6 +78,8 @@ def _report_phase(phase: str):
         body = {"phase": phase}
         if REPLICA_ID:
             body["replica_id"] = REPLICA_ID
+        if reason:
+            body["reason"] = reason[:500]
         requests.post(f"{ORCA_URL}/job/{JOB_ID}/phase",
                       json=body, headers=headers, timeout=5)
     except Exception:
@@ -962,12 +964,36 @@ def start_vllm_server(args, log_collector: Optional[LogCollector] = None) -> sub
     return subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, env=env)
 
 
-def wait_for_server(proc: subprocess.Popen, timeout_sec: int = 1200) -> float:
+_OOM_MARKERS = ("out of memory", "cuda oom", "cuda out of memory", "outofmemoryerror")
+
+
+def _classify_startup_exit(rc: int, log_collector: Optional["LogCollector"]) -> str:
+    """Build a structured reason string for a non-zero vLLM startup exit.
+
+    Drains the runner's own log buffer (captured via LogCollector) and pattern-
+    matches for CUDA OOM signatures. Returns a string Koi's _classify_failure
+    regex will tag as "oom" when applicable.
+    """
+    tail = log_collector.drain(max_lines=200) if log_collector else []
+    is_oom = any(
+        any(marker in line.get("msg", "").lower() for marker in _OOM_MARKERS)
+        for line in tail
+    )
+    if is_oom:
+        return f"vLLM exited with code {rc} during startup — CUDA out of memory"
+    return f"vLLM exited with code {rc} during startup"
+
+
+def wait_for_server(
+    proc: subprocess.Popen,
+    timeout_sec: int = 1200,
+    log_collector: Optional["LogCollector"] = None,
+) -> float:
     start = time.time()
     while time.time() - start < timeout_sec:
         rc = proc.poll()
         if rc is not None:
-            raise RuntimeError(f"vLLM exited with code {rc} during startup")
+            raise RuntimeError(_classify_startup_exit(rc, log_collector))
         try:
             if requests.get(f"{BASE_URL}/health", timeout=5).status_code == 200:
                 return time.time() - start
@@ -1494,7 +1520,14 @@ def main():
     proc = start_vllm_server(args, log_collector=log_collector)
     try:
         print("[Runner] Waiting for vLLM server to be ready...")
-        model_load_sec = wait_for_server(proc)
+        try:
+            model_load_sec = wait_for_server(proc, log_collector=log_collector)
+        except (RuntimeError, TimeoutError) as exc:
+            # Report structured startup failure to control plane before re-raising
+            # so monitor_replica can classify (OOM vs crash vs timeout) and
+            # forward an actionable reason_code to Koi.
+            _report_phase("startup_failed", reason=str(exc))
+            raise
         print(f"[Runner] Server ready in {model_load_sec:.2f}s")
         _report_phase("model_ready")
 
