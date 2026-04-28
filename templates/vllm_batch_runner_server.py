@@ -539,9 +539,12 @@ def start_vllm_server(args) -> subprocess.Popen:
     return subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, env=env)
 
 
-def wait_for_server(timeout_sec: int = 1200) -> float:
+def wait_for_server(proc: subprocess.Popen, timeout_sec: int = 1200) -> float:
     start = time.time()
     while time.time() - start < timeout_sec:
+        rc = proc.poll()
+        if rc is not None:
+            raise RuntimeError(f"vLLM exited with code {rc} during startup")
         try:
             if requests.get(f"{BASE_URL}/health", timeout=5).status_code == 200:
                 return time.time() - start
@@ -1179,7 +1182,7 @@ def main():
     try:
         # 2. Wait until healthy
         print("[Runner] Waiting for vLLM server to be ready...")
-        model_load_sec = wait_for_server()
+        model_load_sec = wait_for_server(proc)
         print(f"[Runner] Server ready in {model_load_sec:.2f}s")
         _report_phase("model_ready")
 
