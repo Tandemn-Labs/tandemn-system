@@ -56,6 +56,29 @@ _koi_launch_heartbeats = {}
 _koi_launch_heartbeat_lock = Lock()
 
 
+def _classify_attempt_failure(reason: str) -> str:
+    """Mirror of Koi's _classify_failure regex so /job/launch-failed payload
+    carries a structured failure_category per attempted config. Keep the
+    pattern set in sync with koi/koi/server.py:_FAILURE_PATTERNS."""
+    lc = (reason or "").lower()
+    if (
+        "out of memory" in lc
+        or "outofmemory" in lc
+        or "cuda oom" in lc
+        or "oom" in lc
+    ):
+        return "oom"
+    if "insufficient" in lc and "capacity" in lc:
+        return "no_capacity"
+    if "no capacity" in lc:
+        return "no_capacity"
+    if "spot" in lc or "preempt" in lc:
+        return "spot_preemption"
+    if "quota" in lc:
+        return "quota"
+    return "unknown"
+
+
 def _requested_market(
     request: BatchedRequest, config: Optional[MagicOutput] = None
 ) -> Optional[str]:
@@ -952,6 +975,7 @@ async def launch_chunked_replicas(
                     failure_reason=str(e)[:500],
                 )
                 with _attempt_log_lock:
+                    _err_str = str(e)
                     _attempt_log.append(
                         {
                             "gpu_type": _cfg.INSTANCE_TO_GPU.get(
@@ -960,7 +984,8 @@ async def launch_chunked_replicas(
                             "instance_type": cfg.instance_type,
                             "region": "unknown",
                             "market": requested_market,
-                            "reason": str(e)[:500],
+                            "reason": _err_str[:500],
+                            "failure_category": _classify_attempt_failure(_err_str),
                         }
                     )
                 if j < len(configs) - 1:
@@ -1302,10 +1327,28 @@ async def _launch_chunked_replica(
                         f"[Chunked] Replica {replica_id} exited but chunks still pending — treating as failure"
                     )
                 cm.set_replica_state(parent_job_id, replica_id, phase="failed")
-                _emit_replica_failed(
-                    ReasonCode.CLEAN_EXIT_PENDING_CHUNKS,
-                    "Clean exit with pending chunks (likely killed)",
-                )
+
+                # If the runner reported a structured startup_failed phase
+                # before exiting, use its reason text to pick a more specific
+                # ReasonCode (STARTUP_OOM vs STARTUP_CRASH). Otherwise fall
+                # back to CLEAN_EXIT_PENDING_CHUNKS (the legacy default for
+                # mid-job kills with no other signal).
+                _state = cm.get_replica_states(parent_job_id).get(replica_id, {})
+                _startup_reason = _state.get("startup_failure_reason", "")
+                if _startup_reason:
+                    _lc = _startup_reason.lower()
+                    if "out of memory" in _lc or "cuda oom" in _lc:
+                        _rc = ReasonCode.STARTUP_OOM
+                    elif "during startup" in _lc:
+                        _rc = ReasonCode.STARTUP_CRASH
+                    else:
+                        _rc = ReasonCode.CLEAN_EXIT_PENDING_CHUNKS
+                    _emit_replica_failed(_rc, _startup_reason)
+                else:
+                    _emit_replica_failed(
+                        ReasonCode.CLEAN_EXIT_PENDING_CHUNKS,
+                        "Clean exit with pending chunks (likely killed)",
+                    )
             else:
                 if job_logger:
                     job_logger.info(f"[Chunked] Replica {replica_id} completed")

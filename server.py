@@ -865,6 +865,23 @@ async def update_job_phase(
         )
         return {"ok": True}
 
+    if phase == "startup_failed" and replica_id:
+        # Runner crashed during vLLM startup (OOM, missing arch, etc.).
+        # Stash the runner's structured reason on the replica state so
+        # monitor_replica can pick it up and emit the right ReasonCode.
+        cm = app.state.cluster_manager
+        cm.set_replica_state(
+            job_id,
+            replica_id,
+            startup_failure_reason=body.get("reason", "")[:500],
+        )
+        logger.info(
+            "[Phase] Replica %s reported startup_failed: %s",
+            replica_id,
+            body.get("reason", "")[:200],
+        )
+        return {"ok": True}
+
     if phase:
         get_job_tracker().update_status(job_id, phase)
         if phase == "generating":
