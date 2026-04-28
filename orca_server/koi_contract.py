@@ -38,6 +38,8 @@ class ReasonCode(str, Enum):
     MONITOR_THREAD_EXITED = "monitor_thread_exited"
     KOI_INITIATED_KILL = "koi_initiated_kill"
     MODEL_LOAD_TIMEOUT = "model_load_timeout"
+    STARTUP_OOM = "startup_oom"
+    STARTUP_CRASH = "startup_crash"
     UNKNOWN = "unknown"
 
 
