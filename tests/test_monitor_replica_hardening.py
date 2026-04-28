@@ -102,3 +102,62 @@ class TestMonitorReplicaReasonCodeUsage:
         assert "ReasonCode.MONITOR_THREAD_EXITED" in src
         assert "ReasonCode.LOG_STREAM_ERROR" in src
         assert "ReasonCode.CLEAN_EXIT_PENDING_CHUNKS" in src
+
+    def test_startup_reason_codes_routed_in_launcher(self):
+        """Cold-start failures should pick STARTUP_OOM or STARTUP_CRASH
+        based on the runner-reported reason text in startup_failure_reason,
+        and fall back to CLEAN_EXIT_PENDING_CHUNKS only when no signal
+        is present."""
+        from pathlib import Path
+
+        src = Path("orca_server/launcher.py").read_text()
+        assert "ReasonCode.STARTUP_OOM" in src
+        assert "ReasonCode.STARTUP_CRASH" in src
+        assert "startup_failure_reason" in src
+
+
+class TestStartupOOMReasonCodes:
+    """The new ReasonCode values added for cold-start failure classification."""
+
+    def test_startup_oom_value(self):
+        assert ReasonCode.STARTUP_OOM.value == "startup_oom"
+
+    def test_startup_crash_value(self):
+        assert ReasonCode.STARTUP_CRASH.value == "startup_crash"
+
+
+class TestClassifyAttemptFailure:
+    """The Orca-side helper that mirrors Koi's _classify_failure regex.
+    Keeps /job/launch-failed payload's failure_category in sync with how
+    Koi will categorize the same reason text."""
+
+    def test_oom_message_classified(self):
+        from orca_server.launcher import _classify_attempt_failure
+
+        assert _classify_attempt_failure("CUDA out of memory") == "oom"
+        assert _classify_attempt_failure("torch.cuda.OutOfMemoryError") == "oom"
+        assert _classify_attempt_failure("OOM during sampler warmup") == "oom"
+
+    def test_no_capacity_classified(self):
+        from orca_server.launcher import _classify_attempt_failure
+
+        assert _classify_attempt_failure("InsufficientInstanceCapacity") == "no_capacity"
+        assert _classify_attempt_failure("no capacity available") == "no_capacity"
+
+    def test_spot_preempt_classified(self):
+        from orca_server.launcher import _classify_attempt_failure
+
+        assert _classify_attempt_failure("spot interruption notice") == "spot_preemption"
+        assert _classify_attempt_failure("instance preempted") == "spot_preemption"
+
+    def test_quota_classified(self):
+        from orca_server.launcher import _classify_attempt_failure
+
+        assert _classify_attempt_failure("quota exceeded for L40S") == "quota"
+
+    def test_unknown_default(self):
+        from orca_server.launcher import _classify_attempt_failure
+
+        assert _classify_attempt_failure("some unrelated error") == "unknown"
+        assert _classify_attempt_failure("") == "unknown"
+        assert _classify_attempt_failure(None) == "unknown"
