@@ -61,6 +61,12 @@ def _make_args(**kwargs):
 # ---------------------------------------------------------------------------
 
 class TestWaitForServer:
+    @staticmethod
+    def _live_proc():
+        p = MagicMock()
+        p.poll.return_value = None
+        return p
+
     def test_ready_after_retries(self):
         responses = [MagicMock(status_code=503), MagicMock(status_code=200)]
         call_count = {"n": 0}
@@ -72,7 +78,7 @@ class TestWaitForServer:
 
         with patch.object(runner.requests, "get", side_effect=fake_get), \
              patch.object(runner.time, "sleep"):
-            elapsed = runner.wait_for_server(timeout_sec=60)
+            elapsed = runner.wait_for_server(self._live_proc(), timeout_sec=60)
         assert isinstance(elapsed, float)
 
     def test_raises_timeout(self):
@@ -80,7 +86,18 @@ class TestWaitForServer:
              patch.object(runner.time, "sleep"), \
              patch.object(runner.time, "time", side_effect=[0.0, 61.0]):
             with pytest.raises(TimeoutError):
-                runner.wait_for_server(timeout_sec=60)
+                runner.wait_for_server(self._live_proc(), timeout_sec=60)
+
+    def test_raises_when_proc_dies_during_startup(self):
+        """Fail-fast: if the vLLM subprocess exits non-zero (e.g. CUDA OOM)
+        before /health ever returns 200, we should raise immediately with
+        the exit code instead of polling for the full timeout window."""
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1  # subprocess exited with code 1
+        with patch.object(runner.requests, "get", side_effect=ConnectionRefusedError), \
+             patch.object(runner.time, "sleep"):
+            with pytest.raises(RuntimeError, match="exited with code 1"):
+                runner.wait_for_server(dead_proc, timeout_sec=1200)
 
 
 # ---------------------------------------------------------------------------
