@@ -17,13 +17,12 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import List, Optional
 
 log = logging.getLogger(__name__)
 
 from placement.advisor.model_arch_fetcher import ModelArchFeatures
 from placement.advisor.oracle import OracleCandidate
-from placement.roofline.gpu_specs import GPU_SPECS, GPU_MEMORY_GB
+from placement.roofline.gpu_specs import GPU_MEMORY_GB, GPU_SPECS
 
 
 @dataclass
@@ -36,9 +35,9 @@ class RankedPlacement:
 
 @dataclass
 class EnsembleResult:
-    placements: List[RankedPlacement]
-    synthesis: str                  # shown in CLI box
-    fallback: bool = False          # True if LLM call failed
+    placements: list[RankedPlacement]
+    synthesis: str  # shown in CLI box
+    fallback: bool = False  # True if LLM call failed
 
 
 _SYSTEM_PROMPT = """\
@@ -128,7 +127,8 @@ Always return exactly 3 placements. If fewer than 3 candidates exist, repeat the
 
 
 _GPU_REF = "\n".join(
-    ["GPU specs reference:"] + [
+    ["GPU specs reference:"]
+    + [
         f"  {gpu}: {specs['tflops']} TFLOPS FP16, {specs['mem_bw']} GB/s bandwidth, "
         f"{GPU_MEMORY_GB.get(gpu, '?')}GB VRAM, efficiency={specs['efficiency']}"
         for gpu, specs in GPU_SPECS.items()
@@ -143,7 +143,7 @@ def _build_prompt(
     avg_output: int,
     num_requests: int,
     slo_hours: float,
-    candidates: List[OracleCandidate],
+    candidates: list[OracleCandidate],
 ) -> str:
     lines = []
 
@@ -180,10 +180,7 @@ def _build_prompt(
             lines.append(f"     └─ Derived from: {c.nearest_db_entry}")
 
     lines.append("\n=== ARCHITECTURE CONTEXT ===")
-    lines.append(
-        f"Model arch class: {arch.architecture_class} | "
-        f"Arch source: {arch.source}"
-    )
+    lines.append(f"Model arch class: {arch.architecture_class} | Arch source: {arch.source}")
     # Show unique provenance entries so LLM knows which candidates are well-grounded
     seen_provenance: set[str] = set()
     for i, c in enumerate(candidates[:top_n]):
@@ -204,7 +201,7 @@ def _build_prompt(
     return "\n".join(lines)
 
 
-def _fallback(candidates: List[OracleCandidate]) -> EnsembleResult:
+def _fallback(candidates: list[OracleCandidate]) -> EnsembleResult:
     """Return cheapest SLO-meeting candidate without LLM call."""
     slo_meeting = [c for c in candidates if c.meets_slo]
     top3 = (slo_meeting or candidates)[:3]
@@ -226,8 +223,8 @@ def run(
     avg_output: int,
     num_requests: int,
     slo_hours: float,
-    candidates: List[OracleCandidate],
-    api_key: Optional[str] = None,
+    candidates: list[OracleCandidate],
+    api_key: str | None = None,
     model: str = "claude-opus-4-6",
 ) -> EnsembleResult:
     """
@@ -252,6 +249,7 @@ def run(
 
     try:
         import anthropic
+
         client = anthropic.Anthropic(api_key=_api_key)
         response = client.messages.create(
             model=model,
@@ -269,17 +267,19 @@ def run(
         raw = raw.strip()
 
         data = json.loads(raw)
-        placements: List[RankedPlacement] = []
+        placements: list[RankedPlacement] = []
         shown_n = min(10, len(candidates))  # must match top_n in _build_prompt
         for rank, entry in enumerate(data.get("top_placements", [])[:3], start=1):
             idx = int(entry.get("candidate_idx", 0))
             idx = max(0, min(idx, shown_n - 1))  # clamp to what LLM actually saw
-            placements.append(RankedPlacement(
-                candidate=candidates[idx],
-                rank=rank,
-                reasoning=entry.get("reasoning", ""),
-                confidence=float(entry.get("confidence", candidates[idx].confidence)),
-            ))
+            placements.append(
+                RankedPlacement(
+                    candidate=candidates[idx],
+                    rank=rank,
+                    reasoning=entry.get("reasoning", ""),
+                    confidence=float(entry.get("confidence", candidates[idx].confidence)),
+                )
+            )
 
         if not placements:
             return _fallback(candidates)

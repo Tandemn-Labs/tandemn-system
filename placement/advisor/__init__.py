@@ -6,5 +6,6 @@ __all__ = ["PlacementAdvisor"]
 def __getattr__(name):
     if name == "PlacementAdvisor":
         from .advisor import PlacementAdvisor
+
         return PlacementAdvisor
     raise AttributeError(name)

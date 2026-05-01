@@ -1,6 +1,6 @@
 import time
-import pytest
-from quota.tracker import JobSpec, JobState, JobRecord, VPCQuotaTracker
+
+from quota.tracker import JobRecord, JobSpec, JobState, VPCQuotaTracker
 
 
 def _make_spec(**overrides):
@@ -82,9 +82,7 @@ def test_release_for_instance(sample_tracker):
 
 
 def test_reserve_cluster_persists(sample_tracker):
-    ok = sample_tracker.reserve_cluster(
-        "cluster-1", "us-east-1", "on_demand", "g6e.12xlarge", 2
-    )
+    ok = sample_tracker.reserve_cluster("cluster-1", "us-east-1", "on_demand", "g6e.12xlarge", 2)
     assert ok is True
     # Check in-memory counters
     assert sample_tracker.get_used_vcpu("us-east-1", "on_demand", "G") == 96

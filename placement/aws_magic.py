@@ -1,18 +1,17 @@
 import math
-import re
-from typing import Any, Dict, List, Optional, Tuple, Union
-import uuid
+from typing import Any
 
-from models.resources import MagicOutput
-from orca_server.utils import make_job_id as _make_job_id
 import pandas as pd
-
+import torch
 from openai import OpenAI
 from pydantic import BaseModel
 from tabulate import tabulate
 from termcolor import colored
-import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
 from models.requests import BatchedRequest, OnlineServingRequest
+from models.resources import MagicOutput
+from orca_server.utils import make_job_id as _make_job_id
 from placement.magic import VPCMagic
 from utils.utils import (
     get_num_params_from_text,
@@ -22,7 +21,6 @@ from utils.utils import (
     select_perf_files_closest_to_model_size,
     sort_perf_entries_io_length,
 )
-from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 class AWSPlacementCandidate(BaseModel):
@@ -70,9 +68,7 @@ class AWSAllocation(VPCMagic):
         self.model_tier = model_tier if model_tier in self.ADVISOR_MODELS else "free"
         print(f"[AWSAllocation] Using {self.model_tier} tier models")
 
-    def decide(
-        self, request: Union[BatchedRequest, OnlineServingRequest]
-    ) -> MagicOutput:
+    def decide(self, request: BatchedRequest | OnlineServingRequest) -> MagicOutput:
         """Main decision function called by server"""
 
         if isinstance(request, BatchedRequest):
@@ -86,15 +82,11 @@ class AWSAllocation(VPCMagic):
                 replicas=candidate.replicas,
             )
 
-    def process_batch(
-        self, req: BatchedRequest, region="us-east-1", market="on_demand"
-    ) -> AWSPlacementCandidate:
+    def process_batch(self, req: BatchedRequest, region="us-east-1", market="on_demand") -> AWSPlacementCandidate:
         # Load inputs: Performance DB + AWS Quota
         model_size = get_num_params_from_text(req.model_name)
         perf_files = load_all_perfdb_files(self.perfdb_dir)
-        closest_perf_files = select_perf_files_closest_to_model_size(
-            perf_files, model_size, self.k_nearest_model_size
-        )
+        closest_perf_files = select_perf_files_closest_to_model_size(perf_files, model_size, self.k_nearest_model_size)
 
         print(f"[Stage A] Found {len(closest_perf_files)} GPU type(s) with perf data:")
         for pf in closest_perf_files:
@@ -127,9 +119,7 @@ class AWSAllocation(VPCMagic):
             all_candidates,
             key=lambda c: (c.replicas, c.vcpu_needed, c.runtime_hours),
         )
-        print(
-            f"[Math] tp={math_cfg.tp} pp={math_cfg.pp} r={math_cfg.replicas} gpu-h={math_cfg.gpu_time:.2f}"
-        )
+        print(f"[Math] tp={math_cfg.tp} pp={math_cfg.pp} r={math_cfg.replicas} gpu-h={math_cfg.gpu_time:.2f}")
         plans.append(("Math", math_cfg))
 
         # [Evaluate candidate]: LLM Advisor 1
@@ -144,9 +134,7 @@ class AWSAllocation(VPCMagic):
             top_k=20,
         )
         if advisor1_cfg:
-            print(
-                f"[{advisor1_name}] Picks: tp={advisor1_cfg.tp} pp={advisor1_cfg.pp} r={advisor1_cfg.replicas}"
-            )
+            print(f"[{advisor1_name}] Picks: tp={advisor1_cfg.tp} pp={advisor1_cfg.pp} r={advisor1_cfg.replicas}")
             plans.append((advisor1_name.replace("Advisor", ""), advisor1_cfg))
 
         # [Evaluate candidate]: LLM Advisor 2
@@ -160,16 +148,12 @@ class AWSAllocation(VPCMagic):
             top_k=20,
         )
         if advisor2_cfg:
-            print(
-                f"[{advisor2_name}] Picks: tp={advisor2_cfg.tp} pp={advisor2_cfg.pp} r={advisor2_cfg.replicas}"
-            )
+            print(f"[{advisor2_name}] Picks: tp={advisor2_cfg.tp} pp={advisor2_cfg.pp} r={advisor2_cfg.replicas}")
             plans.append((advisor2_name.replace("Advisor", ""), advisor2_cfg))
 
         def load_c_pmi_model(model_name: str = "Qwen/Qwen3-0.6B"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=torch.float16
-            )
+            model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
             DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
             model.to(DEVICE)
             model.eval()
@@ -185,7 +169,7 @@ class AWSAllocation(VPCMagic):
 
     @staticmethod
     def enumerate_candidates(
-        perf_file: Dict[str, Any],
+        perf_file: dict[str, Any],
         quota_df: pd.DataFrame,
         region: str,
         market: str,
@@ -194,7 +178,7 @@ class AWSAllocation(VPCMagic):
         num_lines: int,
         slo_hours: float,
         guard_frac: float = 0.1,
-    ) -> List[AWSPlacementCandidate]:
+    ) -> list[AWSPlacementCandidate]:
         """
         Extract vCPU quota for specific GPU, Region, Spot / On-Demand
         Reads given ONE perf file
@@ -210,9 +194,7 @@ class AWSAllocation(VPCMagic):
         df = perf_file["df"]
 
         col = f"{region}_{market}"
-        vcpu_quota = float(
-            quota_df[quota_df["gpu_base"] == gpu_base][col].max()
-        )  # TODO: Why is the quota a float?
+        vcpu_quota = float(quota_df[quota_df["gpu_base"] == gpu_base][col].max())  # TODO: Why is the quota a float?
         print(
             "Detected the vCPU Quota for the GPU Type: ",
             gpu_base,
@@ -264,20 +246,14 @@ class AWSAllocation(VPCMagic):
                         ]
                         for _, row in hit.iterrows()
                     ]
-                    print(
-                        tabulate(
-                            data, headers=headers, tablefmt="psql", stralign="left"
-                        )
-                    )
+                    print(tabulate(data, headers=headers, tablefmt="psql", stralign="left"))
 
                 if hit.empty:
                     continue
 
                 # Actually take the hit
                 hit = hit.copy()
-                hit = sort_perf_entries_io_length(
-                    hit, avg_input_tokens, avg_output_tokens
-                )
+                hit = sort_perf_entries_io_length(hit, avg_input_tokens, avg_output_tokens)
                 # Pretty print the matched dataframe, and color only those rows
 
                 # Function to color a DataFrame row
@@ -304,18 +280,14 @@ class AWSAllocation(VPCMagic):
                     # Packings sorted by vCPU (cheapest first)
                     # For TP>1, prefer single-instance (TP requires high-bandwidth intra-node comm)
                     # PP can work inter-node since it only passes activations between stages
-                    packings = get_vcpu_count_from_gpu(
-                        quota_df, gpu_base, gpus_needed, prefer_single_instance=(tp > 1)
-                    )
+                    packings = get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed, prefer_single_instance=(tp > 1))
 
                     for vcpu, inst_type, num_inst in packings:
                         # EARLY EXIT 1: if cheapest packing exceeds quota, skip rest
                         if vcpu > vcpu_quota:
                             break  # All remaining packings are more expensive
 
-                        runtime_hours = (
-                            job_tokens / (tokens_per_sec * replicas)
-                        ) / 3600.0
+                        runtime_hours = (job_tokens / (tokens_per_sec * replicas)) / 3600.0
                         if runtime_hours <= effective_slo_hours:
                             candidates.append(
                                 AWSPlacementCandidate(
@@ -335,14 +307,14 @@ class AWSAllocation(VPCMagic):
 
     @staticmethod
     def llm_choose_config_from_candidates(
-        candidates: List[AWSPlacementCandidate],
+        candidates: list[AWSPlacementCandidate],
         model_id: str,
         openrouter_api_key: str,
         advisor_name: str,
         req: BatchedRequest,
         top_k: int = 3,
         temperature: float = 0.7,
-    ) -> Optional[AWSPlacementCandidate]:
+    ) -> AWSPlacementCandidate | None:
         """
         Ask an HF LLM (Phi or other) to choose among top_k analytic candidates.
         Returns the chosen config or None.
@@ -359,15 +331,12 @@ class AWSAllocation(VPCMagic):
         # Making the prompt
         prompt_lines = []
         prompt_lines.append(
-            f"You are an expert GPU scheduler ({advisor_name}) choosing tensor/pipeline "
-            "parallelism for an LLM job.\n"
+            f"You are an expert GPU scheduler ({advisor_name}) choosing tensor/pipeline parallelism for an LLM job.\n"
         )
         prompt_lines.append("Goals, in order:\n")
         prompt_lines.append("1. The job must finish within its SLO (deadline).\n")
         prompt_lines.append("2. Minimize total GPU-hours used.\n")
-        prompt_lines.append(
-            "3. Prefer simpler configs (fewer TP/PP/replicas) when close.\n\n"
-        )
+        prompt_lines.append("3. Prefer simpler configs (fewer TP/PP/replicas) when close.\n\n")
 
         prompt_lines.append("Job:\n")
         prompt_lines.append(f"- Model: {req.model_name}\n")
@@ -392,10 +361,7 @@ class AWSAllocation(VPCMagic):
                 f"- GPU-hours: {cfg.gpu_time:.2f}\n\n"
             )
 
-        prompt_lines.append(
-            "Which plan best satisfies the goals? Respond with exactly one line:\n"
-            "Best plan: A\n"
-        )
+        prompt_lines.append("Which plan best satisfies the goals? Respond with exactly one line:\nBest plan: A\n")
         prompt = "".join(prompt_lines)
 
         # OpenRouter client setup and calling
@@ -475,13 +441,8 @@ class AWSAllocation(VPCMagic):
         model,
         temperature: float = 1.0,
     ):
-        hypotheses = [
-            f"In this situation, the best plan is {label}." for label in plan_labels
-        ]
-        scores = [
-            AWSAllocation.c_pmi_score(context, hyp, tokenizer, model)
-            for hyp in hypotheses
-        ]
+        hypotheses = [f"In this situation, the best plan is {label}." for label in plan_labels]
+        scores = [AWSAllocation.c_pmi_score(context, hyp, tokenizer, model) for hyp in hypotheses]
         max_s = max(scores)
         exps = [math.exp((s - max_s) / max(temperature, 1e-6)) for s in scores]
         Z = sum(exps)
@@ -493,20 +454,18 @@ class AWSAllocation(VPCMagic):
     @staticmethod
     def choose_and_apply_llm_plan(
         req: BatchedRequest,
-        plans: List[Tuple[str, AWSPlacementCandidate]],
-        plan_labels: List[str],
+        plans: list[tuple[str, AWSPlacementCandidate]],
+        plan_labels: list[str],
         cpmi_model: Any,
         cpmi_tokenizer: Any,
-    ) -> Tuple[str, Dict[str, float], AWSPlacementCandidate]:
+    ) -> tuple[str, dict[str, float], AWSPlacementCandidate]:
         """
         Given a job_state, list of plans [(label, cfg)], and plan_labels,
         builds context, queries C-PMI, chooses best config, and updates job_state in place.
         Returns (best_label, probs, chosen_cfg).
         """
         context_lines = []
-        context_lines.append(
-            "We are choosing a GPU parallelism configuration for an LLM job.\n"
-        )
+        context_lines.append("We are choosing a GPU parallelism configuration for an LLM job.\n")
         context_lines.append("Goals:\n")
         context_lines.append("1. Meet the SLO (deadline).\n")
         context_lines.append("2. Minimize total GPU-hours.\n")
@@ -519,9 +478,7 @@ class AWSAllocation(VPCMagic):
         context_lines.append(f"- Avg input tokens: {req.avg_input_tokens}\n")
         context_lines.append(f"- Avg output tokens: {req.avg_output_tokens}\n")
         context_lines.append(f"- SLO: {req.slo_deadline_hours} hours\n")
-        context_lines.append(
-            f"- Total tokens: {req.num_lines * (req.avg_input_tokens + req.avg_output_tokens)}\n\n"
-        )
+        context_lines.append(f"- Total tokens: {req.num_lines * (req.avg_input_tokens + req.avg_output_tokens)}\n\n")
 
         context_lines.append("Advisor proposals:\n")
 

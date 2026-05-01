@@ -11,7 +11,6 @@ every event and the compat window closes, callers may treat these as required.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -21,10 +20,10 @@ class EventEnvelope(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    event_id: Optional[str] = None
-    event_type: Optional[str] = None
-    emitted_at: Optional[float] = None
-    correlation_id: Optional[str] = None
+    event_id: str | None = None
+    event_type: str | None = None
+    emitted_at: float | None = None
+    correlation_id: str | None = None
 
 
 class ReasonCode(str, Enum):
@@ -41,6 +40,4 @@ class ReasonCode(str, Enum):
     UNKNOWN = "unknown"
 
 
-TERMINAL_PHASES: frozenset = frozenset(
-    {"completed", "failed", "dead", "killed", "swapped_out"}
-)
+TERMINAL_PHASES: frozenset = frozenset({"completed", "failed", "dead", "killed", "swapped_out"})

@@ -14,20 +14,17 @@ The solver accepts explicit paths for config files, falling back to defaults
 if not provided.
 """
 
-import os
-import sys
-import subprocess
-import tempfile
 import logging
+import os
+import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
-from typing import Dict, Optional, List, Set
 
 import pandas as pd
 
 # Add LLM_placement_solver to path (submodule in repo root)
-LLM_SOLVER_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../LLM_placement_solver")
-)
+LLM_SOLVER_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../LLM_placement_solver"))
 if LLM_SOLVER_PATH not in sys.path:
     sys.path.insert(0, LLM_SOLVER_PATH)
 
@@ -36,9 +33,7 @@ from solver import LLMPlacementSolverWithTP
 logger = logging.getLogger(__name__)
 
 
-def load_supported_instances(
-    cloud_specs_path: str, cloud_provider: str = "AWS"
-) -> Set[str]:
+def load_supported_instances(cloud_specs_path: str, cloud_provider: str = "AWS") -> set[str]:
     """
     Load the set of supported instance names from cloud_instances_specs.csv.
 
@@ -188,7 +183,7 @@ class PlacementSolverAdapter:
 
     def __init__(
         self,
-        gpu_pool: Optional[Dict[str, int]] = None,
+        gpu_pool: dict[str, int] | None = None,
         cloud_provider: str = "AWS",
     ):
         """
@@ -201,7 +196,7 @@ class PlacementSolverAdapter:
         """
         self.gpu_pool = gpu_pool
         self.cloud_provider = cloud_provider
-        self._temp_files: List[str] = []
+        self._temp_files: list[str] = []
 
     def _normalize_model_name(self, model_name: str) -> str:
         """Normalize model name to match solver config directory."""
@@ -231,13 +226,10 @@ class PlacementSolverAdapter:
             available = [
                 d
                 for d in os.listdir(self.SOLVER_CONFIG_BASE)
-                if os.path.isdir(os.path.join(self.SOLVER_CONFIG_BASE, d))
-                and not d.startswith(".")
-                and d != "outdated"
+                if os.path.isdir(os.path.join(self.SOLVER_CONFIG_BASE, d)) and not d.startswith(".") and d != "outdated"
             ]
             raise ValueError(
-                f"No config found for model '{model_name}' (normalized: '{normalized}'). "
-                f"Available configs: {available}"
+                f"No config found for model '{model_name}' (normalized: '{normalized}'). Available configs: {available}"
             )
 
         return config_dir
@@ -264,9 +256,7 @@ class PlacementSolverAdapter:
             for instance, count in self.gpu_pool.items():
                 f.write(f"{instance},{count}\n")
 
-        logger.info(
-            f"[SolverAdapter] Wrote temp gpu_pool.csv with {len(self.gpu_pool)} instance types"
-        )
+        logger.info(f"[SolverAdapter] Wrote temp gpu_pool.csv with {len(self.gpu_pool)} instance types")
         return temp_path
 
     def _generate_network_bandwidth_temp(self, gpu_pool_path: str) -> str:
@@ -279,12 +269,8 @@ class PlacementSolverAdapter:
         Returns:
             Path to the generated temp network_bandwidth.csv
         """
-        cloud_specs_path = os.path.join(
-            self.SOLVER_CONFIG_BASE, "cloud_instances_specs.csv"
-        )
-        generator_script = os.path.join(
-            self.SOLVER_CONFIG_BASE, "generate_network_bandwidth.py"
-        )
+        cloud_specs_path = os.path.join(self.SOLVER_CONFIG_BASE, "cloud_instances_specs.csv")
+        generator_script = os.path.join(self.SOLVER_CONFIG_BASE, "generate_network_bandwidth.py")
 
         # Create temp file for output
         fd, temp_path = tempfile.mkstemp(suffix=".csv", prefix="network_bandwidth_")
@@ -305,7 +291,7 @@ class PlacementSolverAdapter:
             self.cloud_provider,
         ]
 
-        logger.info(f"[SolverAdapter] Generating network_bandwidth.csv to temp file...")
+        logger.info("[SolverAdapter] Generating network_bandwidth.csv to temp file...")
         try:
             result = subprocess.run(
                 cmd,
@@ -314,12 +300,8 @@ class PlacementSolverAdapter:
                 cwd=self.SOLVER_CONFIG_BASE,
             )
             if result.returncode != 0:
-                logger.error(
-                    f"[SolverAdapter] generate_network_bandwidth.py failed: {result.stderr}"
-                )
-                raise RuntimeError(
-                    f"Network bandwidth generation failed: {result.stderr}"
-                )
+                logger.error(f"[SolverAdapter] generate_network_bandwidth.py failed: {result.stderr}")
+                raise RuntimeError(f"Network bandwidth generation failed: {result.stderr}")
 
             logger.info(f"[SolverAdapter] {result.stdout.strip()}")
 
@@ -357,8 +339,7 @@ class PlacementSolverAdapter:
             if _requested_level == logging.DEBUG:
                 _solver_debug_handler = logging.StreamHandler()
                 _solver_debug_handler.setLevel(logging.DEBUG)
-                _solver_debug_handler.setFormatter(
-                    logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+                _solver_debug_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
                 solver_logger.addHandler(_solver_debug_handler)
                 solver_logger.propagate = False  # Avoid duplicate INFO lines from root
 
@@ -368,22 +349,16 @@ class PlacementSolverAdapter:
             # Prepare optional path arguments for solver
             gpu_pool_file = None
             network_bandwidth_file = None
-            cloud_specs_file = os.path.join(
-                self.SOLVER_CONFIG_BASE, "cloud_instances_specs.csv"
-            )
+            cloud_specs_file = os.path.join(self.SOLVER_CONFIG_BASE, "cloud_instances_specs.csv")
 
             # Handle custom GPU pool
             if self.gpu_pool:
                 # Filter to only supported instances (those in cloud_instances_specs.csv)
-                supported = load_supported_instances(
-                    cloud_specs_file, self.cloud_provider
-                )
+                supported = load_supported_instances(cloud_specs_file, self.cloud_provider)
 
                 if supported:
                     original_count = len(self.gpu_pool)
-                    self.gpu_pool = {
-                        k: v for k, v in self.gpu_pool.items() if k in supported
-                    }
+                    self.gpu_pool = {k: v for k, v in self.gpu_pool.items() if k in supported}
                     filtered_count = len(self.gpu_pool)
                     logger.info(
                         f"[SolverAdapter] Filtered GPU pool: {original_count} -> {filtered_count} instances (only those in cloud_instances_specs.csv)"
@@ -407,17 +382,13 @@ class PlacementSolverAdapter:
                         error_message="No supported instances in GPU pool after filtering",
                     )
 
-                logger.info(
-                    f"[SolverAdapter] Using custom GPU pool: {list(self.gpu_pool.keys())}"
-                )
+                logger.info(f"[SolverAdapter] Using custom GPU pool: {list(self.gpu_pool.keys())}")
 
                 # Write gpu_pool.csv to temp file
                 gpu_pool_file = self._write_gpu_pool_csv_temp()
 
                 # Generate network_bandwidth.csv to temp file
-                network_bandwidth_file = self._generate_network_bandwidth_temp(
-                    gpu_pool_file
-                )
+                network_bandwidth_file = self._generate_network_bandwidth_temp(gpu_pool_file)
 
             # Initialize solver with explicit paths (no chdir needed!)
             solver = LLMPlacementSolverWithTP(
@@ -463,7 +434,7 @@ class PlacementSolverAdapter:
                     gpus_per_instance=0,
                     total_gpus=0,
                     error_message="No valid placement found",
-                    solve_log=getattr(solver, 'solve_log', ''),
+                    solve_log=getattr(solver, "solve_log", ""),
                 )
 
             sol = solver.solution
@@ -478,9 +449,7 @@ class PlacementSolverAdapter:
             if assignments:
                 gpu_type_key = assignments[0].get("gpu_type", "")
                 # gpu_type is like "g6e.48xlarge#0", extract instance family
-                instance_family = (
-                    gpu_type_key.split("#")[0] if "#" in gpu_type_key else gpu_type_key
-                )
+                instance_family = gpu_type_key.split("#")[0] if "#" in gpu_type_key else gpu_type_key
 
                 # Look up GPU model from instance specs
                 from .gpu_specs import AWS_INSTANCE_GPU_MAP
@@ -501,10 +470,7 @@ class PlacementSolverAdapter:
             # Use solver's own max_model_len (consistent memory model, no dual calculation)
             tp_degree = homo_cfg.get("tp_degree", 1)
             pp_stages = homo_cfg.get("pp_stages", 1)
-            max_context = min(
-                sol.get('max_model_len', 8192),
-                solver.config.max_position_embeddings
-            )
+            max_context = min(sol.get("max_model_len", 8192), solver.config.max_position_embeddings)
             logger.info(
                 f"[SolverAdapter] Max context from solver: {sol.get('max_model_len', 'N/A')}, "
                 f"model max: {solver.config.max_position_embeddings}, using {max_context}"
@@ -527,7 +493,7 @@ class PlacementSolverAdapter:
                 max_supported_context=max_context,
                 estimated_runtime_hours=sol.get("estimated_runtime_hours") or 0.0,
                 meets_slo=sol.get("meets_slo", True),
-                solve_log=getattr(solver, 'solve_log', ''),
+                solve_log=getattr(solver, "solve_log", ""),
             )
 
         except Exception as e:
@@ -536,9 +502,9 @@ class PlacementSolverAdapter:
 
             logger.debug(traceback.format_exc())
             # Try to get solve_log even on exception (solver may have been partially created)
-            _log = ''
+            _log = ""
             try:
-                _log = getattr(solver, 'solve_log', '')
+                _log = getattr(solver, "solve_log", "")
             except Exception:
                 pass
             return SolverOutput(
@@ -567,7 +533,7 @@ class PlacementSolverAdapter:
                 solver_logger.removeHandler(_solver_debug_handler)
             self._cleanup_temp_files()
 
-    def solve_multi(self, input: SolverInput, top_k: int = 5) -> List[SolverOutput]:
+    def solve_multi(self, input: SolverInput, top_k: int = 5) -> list[SolverOutput]:
         """
         Solve placement and return top K solutions sorted by cost.
 

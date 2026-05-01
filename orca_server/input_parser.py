@@ -29,9 +29,7 @@ def extract_prompt_text(entry: dict) -> str:
         return ""
 
 
-def parse_input_file_stats(
-    file_path: str, model_name: str = None, top_k_tokenize: int = 100
-) -> tuple[int, int, int]:
+def parse_input_file_stats(file_path: str, model_name: str = None, top_k_tokenize: int = 100) -> tuple[int, int, int]:
     """
     Parse a local JSONL file to extract real stats.
 
@@ -50,7 +48,7 @@ def parse_input_file_stats(
     # Parse JSONL: collect prompt texts and chars/4 estimates
     prompt_texts = []
     char_estimates = []
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -70,17 +68,14 @@ def parse_input_file_stats(
     max_input_tokens = max(char_estimates)  # fallback if tokenizer unavailable
     if model_name and top_k_tokenize > 0:
         try:
-            from transformers import AutoTokenizer, logging as hf_logging
+            from transformers import AutoTokenizer
+            from transformers import logging as hf_logging
 
             hf_logging.set_verbosity_error()  # Suppress warn msgs about hf key
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_name, trust_remote_code=True
-            )
+            tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
             # Sort indices by character length descending, take top-K
-            sorted_indices = sorted(
-                range(num_lines), key=lambda i: len(prompt_texts[i]), reverse=True
-            )
+            sorted_indices = sorted(range(num_lines), key=lambda i: len(prompt_texts[i]), reverse=True)
             top_indices = sorted_indices[:top_k_tokenize]
 
             max_tokenized = 0
@@ -94,12 +89,8 @@ def parse_input_file_stats(
             )
             max_input_tokens = max_tokenized
         except Exception as e:
-            logger.warning(
-                f"[InputParser] Tokenizer failed ({e}), using chars/4 estimate for max_input_tokens"
-            )
+            logger.warning(f"[InputParser] Tokenizer failed ({e}), using chars/4 estimate for max_input_tokens")
 
-    logger.info(
-        f"[InputParser] Parsed {num_lines} lines: avg_input={avg_input_tokens}, max_input={max_input_tokens}"
-    )
+    logger.info(f"[InputParser] Parsed {num_lines} lines: avg_input={avg_input_tokens}, max_input={max_input_tokens}")
 
     return num_lines, avg_input_tokens, max_input_tokens

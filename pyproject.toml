@@ -1,0 +1,92 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = [
+    ".venv",
+    "venv",
+    "temp",
+    "outputs",
+    "data",
+    "profiling",
+    "LLM_placement_solver",
+    "__pycache__",
+    ".pytest_cache",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+# E: pycodestyle errors, F: pyflakes, I: isort, B: flake8-bugbear,
+# UP: pyupgrade, SIM: flake8-simplify
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = [
+    "E501",  # line-too-long (handled by formatter)
+    "E402",  # module-level import not at top (intentional logger placement throughout repo)
+    "B008",  # function-call-in-default-arg (FastAPI dependency injection idiom)
+    "B904",  # raise-without-from (cleanup deferred)
+    "B007",  # unused loop control variable (intentional in some places)
+    "B905",  # zip without strict= (deferred; needs case-by-case review)
+    "F401",  # unused import (vllm_compat_patch is imported for side effects)
+    "F841",  # unused local variable (cleanup deferred)
+    "SIM102", # nested if (sometimes clearer)
+    "SIM105", # contextlib.suppress (try/except/pass is fine)
+    "SIM108", # use ternary (sometimes hurts readability)
+    "SIM115", # context manager for open() (deferred)
+    "SIM118", # key in dict.keys() (cosmetic)
+    "UP042", # str + Enum vs StrEnum (deferred)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B", "SIM"]
+"**/__init__.py" = ["F401"]
+# TODO: utils/utils.py:get_vcpu_count_from_gpu has undefined names (tp, pp, replicas)
+# that look like a real bug. Tracked separately; do not fix in the tooling-baseline PR.
+"utils/utils.py" = ["F821"]
+
+[tool.ruff.format]
+# Defaults (black-compatible).
+
+# ─── mypy ──────────────────────────────────────────────────────────────────────
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+files = [
+    "orca_server",
+    "models",
+    "placement",
+    "quota",
+    "utils",
+    "storage",
+]
+exclude = [
+    "profiling/",
+    "LLM_placement_solver/",
+    "tests/",
+    "\\.venv/",
+    "venv/",
+    "temp/",
+    "build/",
+    "dist/",
+]
+# Lenient defaults for gradual adoption. Tighten later.
+check_untyped_defs = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+no_implicit_optional = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ─── pytest (migrated from pytest.ini) ─────────────────────────────────────────
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "LLM_placement_solver/tests"]
+markers = [
+    "solver: tests needing full deps (gurobipy, torch, sky)",
+]
+addopts = "-m \"not solver\" --tb=short -q"

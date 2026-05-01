@@ -28,11 +28,10 @@ import asyncio
 import csv
 import gc
 import json
-import sys
-import time
 import os
+import time
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import Any
 
 # Note: Let vLLM handle torch CUDA initialization to avoid conflicts
 
@@ -55,7 +54,7 @@ def write_progress(done: int, total: int, status: str = "running"):
         pass  # Don't fail on progress write errors
 
 
-def write_metrics_csv(output_path: str, metrics: Dict[str, Any]):
+def write_metrics_csv(output_path: str, metrics: dict[str, Any]):
     """
     Write performance metrics to CSV file in same directory as output.
 
@@ -81,7 +80,7 @@ def write_metrics_csv(output_path: str, metrics: Dict[str, Any]):
         print(f"[BatchRunner] Warning: Failed to write metrics: {e}")
 
 
-def calculate_percentiles(values: List[int]) -> Dict[str, float]:
+def calculate_percentiles(values: list[int]) -> dict[str, float]:
     """Calculate p50, p90, p99 percentiles for a list of values."""
     if not values:
         return {"p50": 0, "p90": 0, "p99": 0}
@@ -110,7 +109,9 @@ def parse_args():
     parser.add_argument("--model", required=True, help="Model name/path")
     parser.add_argument("-tp", "--tensor-parallel-size", type=int, default=1)
     parser.add_argument("-pp", "--pipeline-parallel-size", type=int, default=1)
-    parser.add_argument("--max-model-len", type=int, default=None, help="Max context length. If not set, vLLM auto-detects.")
+    parser.add_argument(
+        "--max-model-len", type=int, default=None, help="Max context length. If not set, vLLM auto-detects."
+    )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
     parser.add_argument("--max-num-seqs", type=int, default=32)
     # Infrastructure configuration
@@ -126,10 +127,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_requests(input_file: str) -> List[Dict[str, Any]]:
+def load_requests(input_file: str) -> list[dict[str, Any]]:
     """Load requests from OpenAI batch format JSONL."""
     requests = []
-    with open(input_file, "r") as f:
+    with open(input_file) as f:
         for line_num, line in enumerate(f, 1):
             if line.strip():
                 try:
@@ -139,7 +140,7 @@ def load_requests(input_file: str) -> List[Dict[str, Any]]:
     return requests
 
 
-def format_chat_prompt(messages: List[Dict], tokenizer) -> str:
+def format_chat_prompt(messages: list[dict], tokenizer) -> str:
     """Format chat messages using the model's chat template."""
     try:
         # Use the tokenizer's chat template if available
@@ -160,7 +161,7 @@ def format_chat_prompt(messages: List[Dict], tokenizer) -> str:
         return prompt
 
 
-async def run_async_generation(engine, prompts: List[str], sampling_params) -> List:
+async def run_async_generation(engine, prompts: list[str], sampling_params) -> list:
     """
     Run batch generation using AsyncLLMEngine.
     Required for pipeline parallelism (PP>1).
@@ -208,8 +209,10 @@ def main():
     try:
         from vllm.distributed import cleanup_dist_env_and_memory
     except ImportError:
+
         def cleanup_dist_env_and_memory(shutdown_ray=True):
             import torch
+
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -237,15 +240,18 @@ def main():
 
     # Get model's max supported context length from config
     from transformers import AutoConfig
+
     model_config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
-    model_max_len = getattr(model_config, 'max_position_embeddings', None)
+    model_max_len = getattr(model_config, "max_position_embeddings", None)
     print(f"[BatchRunner] Model max_position_embeddings={model_max_len}")
 
     # Cap max_model_len by model's supported context length
     effective_max_model_len = args.max_model_len
     if args.max_model_len is not None and model_max_len is not None:
         if args.max_model_len > model_max_len:
-            print(f"[BatchRunner] WARNING: Requested max_model_len={args.max_model_len} exceeds model limit={model_max_len}, capping to {model_max_len}")
+            print(
+                f"[BatchRunner] WARNING: Requested max_model_len={args.max_model_len} exceeds model limit={model_max_len}, capping to {model_max_len}"
+            )
             effective_max_model_len = model_max_len
 
     # Build engine args - only include max_model_len if explicitly set
@@ -317,27 +323,33 @@ def main():
         # Validate: input_len + max_output_tokens must fit within max_model_len
         total_required = prompt_len + req_max_tokens
         if total_required > max_model_len:
-            print(f"[BatchRunner] WARNING: Skipping request {custom_id} - "
-                  f"input({prompt_len}) + output({req_max_tokens}) = {total_required} > max_model_len({max_model_len})")
-            skipped_requests.append({
-                "custom_id": custom_id,
-                "prompt_len": prompt_len,
-                "max_tokens": req_max_tokens,
-                "total_required": total_required,
-                "max_model_len": max_model_len,
-                "error": f"input_len({prompt_len}) + max_tokens({req_max_tokens}) = {total_required} exceeds max_model_len({max_model_len})"
-            })
+            print(
+                f"[BatchRunner] WARNING: Skipping request {custom_id} - "
+                f"input({prompt_len}) + output({req_max_tokens}) = {total_required} > max_model_len({max_model_len})"
+            )
+            skipped_requests.append(
+                {
+                    "custom_id": custom_id,
+                    "prompt_len": prompt_len,
+                    "max_tokens": req_max_tokens,
+                    "total_required": total_required,
+                    "max_model_len": max_model_len,
+                    "error": f"input_len({prompt_len}) + max_tokens({req_max_tokens}) = {total_required} exceeds max_model_len({max_model_len})",
+                }
+            )
             continue
 
         prompts.append(prompt)
 
         # Store sampling parameters per request
-        request_metadata.append({
-            "custom_id": custom_id,
-            "max_tokens": req_max_tokens,
-            "temperature": req_temperature,
-            "model": body.get("model", args.model),
-        })
+        request_metadata.append(
+            {
+                "custom_id": custom_id,
+                "max_tokens": req_max_tokens,
+                "temperature": req_temperature,
+                "model": body.get("model", args.model),
+            }
+        )
 
     print(f"[BatchRunner] {len(prompts)} prompts to process, {len(skipped_requests)} skipped (too long)")
 
@@ -364,12 +376,16 @@ def main():
         # Use async generation for pipeline parallelism
         outputs = asyncio.run(run_async_generation(llm, prompts, sampling_params))
         generation_time = time.time() - generation_start_time
-        print(f"[BatchRunner] Generation complete in {generation_time:.2f}s ({len(prompts)/generation_time:.1f} req/s)")
+        print(
+            f"[BatchRunner] Generation complete in {generation_time:.2f}s ({len(prompts) / generation_time:.1f} req/s)"
+        )
     else:
         # Use sync generation for TP-only
         outputs = llm.generate(prompts, sampling_params)
         generation_time = time.time() - generation_start_time
-        print(f"[BatchRunner] Generation complete in {generation_time:.2f}s ({len(prompts)/generation_time:.1f} req/s)")
+        print(
+            f"[BatchRunner] Generation complete in {generation_time:.2f}s ({len(prompts) / generation_time:.1f} req/s)"
+        )
 
     write_progress(len(prompts), len(prompts), "completed")
 
@@ -386,8 +402,10 @@ def main():
         output_text = output.outputs[0].text if output.outputs else ""
 
         # Count tokens
-        prompt_tokens = len(output.prompt_token_ids) if hasattr(output, 'prompt_token_ids') else 0
-        completion_tokens = len(output.outputs[0].token_ids) if output.outputs and hasattr(output.outputs[0], 'token_ids') else 0
+        prompt_tokens = len(output.prompt_token_ids) if hasattr(output, "prompt_token_ids") else 0
+        completion_tokens = (
+            len(output.outputs[0].token_ids) if output.outputs and hasattr(output.outputs[0], "token_ids") else 0
+        )
 
         total_prompt_tokens += prompt_tokens
         total_completion_tokens += completion_tokens
@@ -395,7 +413,7 @@ def main():
         completion_token_counts.append(completion_tokens)
 
         result = {
-            "id": f"vllm-{output.request_id}" if hasattr(output, 'request_id') else f"vllm-{i}",
+            "id": f"vllm-{output.request_id}" if hasattr(output, "request_id") else f"vllm-{i}",
             "custom_id": meta["custom_id"],
             "response": {
                 "status_code": 200,
@@ -405,20 +423,22 @@ def main():
                     "object": "chat.completion",
                     "created": int(time.time()),
                     "model": meta["model"],
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": output_text,
-                        },
-                        "finish_reason": output.outputs[0].finish_reason if output.outputs else "stop",
-                    }],
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": output_text,
+                            },
+                            "finish_reason": output.outputs[0].finish_reason if output.outputs else "stop",
+                        }
+                    ],
                     "usage": {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
-                    }
-                }
+                    },
+                },
             },
             "error": None,
         }
@@ -429,19 +449,15 @@ def main():
         result = {
             "id": f"vllm-skipped-{skipped['custom_id']}",
             "custom_id": skipped["custom_id"],
-            "response": {
-                "status_code": 400,
-                "request_id": f"vllm-skipped-{skipped['custom_id']}",
-                "body": None
-            },
+            "response": {"status_code": 400, "request_id": f"vllm-skipped-{skipped['custom_id']}", "body": None},
             "error": {
                 "type": "context_length_exceeded",
                 "message": skipped["error"],
                 "input_tokens": skipped["prompt_len"],
                 "max_output_tokens": skipped["max_tokens"],
                 "total_required": skipped["total_required"],
-                "max_model_len": skipped["max_model_len"]
-            }
+                "max_model_len": skipped["max_model_len"],
+            },
         }
         results.append(result)
 
@@ -470,12 +486,10 @@ def main():
         # === TIMESTAMPS ===
         "job_start_timestamp": job_start_timestamp,
         "job_end_timestamp": datetime.now().isoformat(),
-
         # === RUNTIME METRICS (seconds) ===
         "total_runtime_sec": total_runtime,
         "model_load_time_sec": model_load_time,
         "generation_time_sec": generation_time,
-
         # === WORKLOAD METRICS ===
         "num_requests_total": len(results),
         "num_requests_completed": len(results) - len(skipped_requests),
@@ -498,28 +512,27 @@ def main():
         "max_output_tokens": max(completion_token_counts) if completion_token_counts else 0,
         # Total tokens
         "total_tokens": total_tokens,
-
         # === THROUGHPUT METRICS ===
         "throughput_requests_per_sec": len(prompt_token_counts) / generation_time if generation_time > 0 else 0,
         "throughput_tokens_per_sec": total_tokens / generation_time if generation_time > 0 else 0,
         "throughput_output_tokens_per_sec": total_completion_tokens / generation_time if generation_time > 0 else 0,
-
         # === MODEL CONFIGURATION ===
         "model_name": args.model,
         "quantization": args.quantization,
-
         # === INFRASTRUCTURE CONFIGURATION ===
         "cloud_provider": args.cloud,
         "instance_type": args.instance_type,
         "gpu_name": args.gpu_name,
-
         # === ENGINE CONFIGURATION ===
         "engine": args.engine,
         "tensor_parallel_size": args.tensor_parallel_size,
         "pipeline_parallel_size": args.pipeline_parallel_size,
         # Get actual max_model_len from vLLM (may differ from args if auto-detected)
-        "max_model_len": (llm.engine.model_config.max_model_len if use_async_engine else
-                         (llm.llm_engine.model_config.max_model_len if hasattr(llm, 'llm_engine') else args.max_model_len)),
+        "max_model_len": (
+            llm.engine.model_config.max_model_len
+            if use_async_engine
+            else (llm.llm_engine.model_config.max_model_len if hasattr(llm, "llm_engine") else args.max_model_len)
+        ),
         "max_num_seqs": args.max_num_seqs,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "dtype": args.dtype,
@@ -531,13 +544,15 @@ def main():
     write_metrics_csv(args.output, metrics)
 
     # Print summary
-    print(f"\n[BatchRunner] === Performance Summary ===")
+    print("\n[BatchRunner] === Performance Summary ===")
     print(f"  Total runtime: {total_runtime:.2f}s")
     print(f"  Model load time: {model_load_time:.2f}s")
     print(f"  Generation time: {generation_time:.2f}s")
     print(f"  Requests: {len(results)}")
-    print(f"  Total tokens: {total_tokens:,} (prompt: {total_prompt_tokens:,}, completion: {total_completion_tokens:,})")
-    print(f"  Throughput: {len(results)/generation_time:.2f} req/s, {total_tokens/generation_time:.2f} tok/s")
+    print(
+        f"  Total tokens: {total_tokens:,} (prompt: {total_prompt_tokens:,}, completion: {total_completion_tokens:,})"
+    )
+    print(f"  Throughput: {len(results) / generation_time:.2f} req/s, {total_tokens / generation_time:.2f} tok/s")
 
     # =========================================================================
     # CRITICAL: Proper cleanup to avoid NCCL/TCPStore errors
@@ -565,6 +580,7 @@ def main():
 
     # Final GPU cleanup
     import torch
+
     gc.collect()
     torch.cuda.empty_cache()
     if torch.cuda.is_available():

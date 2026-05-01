@@ -16,20 +16,26 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 from orca_server.config import AWS_INSTANCES
-from placement.roofline.gpu_specs import GPU_SPECS, GPU_MEMORY_GB
+from placement.advisor._utils import active_params_from_config, instance_price, safe_float
 from placement.advisor.model_arch_fetcher import ModelArchFeatures
 from placement.advisor.perf_rag import retrieve
-from placement.advisor._utils import safe_float, active_params_from_config, instance_price
 
 # Multi-GPU instances only (single-GPU not useful for large models)
 _MULTI_GPU_PREFIXES = (
-    "p5.", "p4d.", "p4de.",
-    "g6e.12xlarge", "g6e.24xlarge", "g6e.48xlarge",
-    "g5.12xlarge", "g5.24xlarge", "g5.48xlarge",
-    "g6.12xlarge", "g6.24xlarge", "g6.48xlarge",
+    "p5.",
+    "p4d.",
+    "p4de.",
+    "g6e.12xlarge",
+    "g6e.24xlarge",
+    "g6e.48xlarge",
+    "g5.12xlarge",
+    "g5.24xlarge",
+    "g5.48xlarge",
+    "g6.12xlarge",
+    "g6.24xlarge",
+    "g6.48xlarge",
 )
 
 # GPU names available in the perf database
@@ -49,20 +55,20 @@ _PP_OPTIONS = [1, 2, 4]
 
 @dataclass
 class OracleCandidate:
-    gpu_type: str                   # Orca GPU name e.g. "A100"
-    instance_type: str              # AWS instance e.g. "p4de.24xlarge"
-    gpu_count: int                  # GPUs per instance
+    gpu_type: str  # Orca GPU name e.g. "A100"
+    instance_type: str  # AWS instance e.g. "p4de.24xlarge"
+    gpu_count: int  # GPUs per instance
     tp: int
     pp: int
-    num_instances: int              # instances needed for tp*pp GPUs
-    predicted_tps: Optional[float]  # None if no DB match
+    num_instances: int  # instances needed for tp*pp GPUs
+    predicted_tps: float | None  # None if no DB match
     predicted_cost_per_hour: float
-    estimated_runtime_hours: Optional[float]
-    meets_slo: Optional[bool]
-    confidence: float               # 0.0 = no data, 0.50-0.85 = interpolated
-    tier: str                       # "T1_exact" | "T2_arch_class" | "T3_gpu_scaling" | "none"
-    nearest_db_entry: str           # human-readable for LLM context
-    rag_records: List[dict] = field(default_factory=list)
+    estimated_runtime_hours: float | None
+    meets_slo: bool | None
+    confidence: float  # 0.0 = no data, 0.50-0.85 = interpolated
+    tier: str  # "T1_exact" | "T2_arch_class" | "T3_gpu_scaling" | "none"
+    nearest_db_entry: str  # human-readable for LLM context
+    rag_records: list[dict] = field(default_factory=list)
 
 
 _safe_float = safe_float  # local alias for brevity
@@ -79,7 +85,7 @@ def _kv_cache_gb_per_token(arch: ModelArchFeatures, tp: int) -> float:
     kv_heads_per_tp = max(1, arch.num_kv_heads // tp)
     bytes_per_token_per_layer = 2 * kv_heads_per_tp * head_dim * 2  # K+V, bf16
     total_bytes = bytes_per_token_per_layer * arch.num_layers
-    return total_bytes / (1024 ** 3)
+    return total_bytes / (1024**3)
 
 
 def _is_feasible(
@@ -114,8 +120,9 @@ def _is_feasible(
     return True, ""
 
 
-def _scale_tps_for_io(base_tps: float, base_input: float, base_output: float,
-                       target_input: float, target_output: float) -> float:
+def _scale_tps_for_io(
+    base_tps: float, base_input: float, base_output: float, target_input: float, target_output: float
+) -> float:
     """Scale throughput for different I/O lengths using dampened sqrt."""
     base_work = 0.3 * base_input + 1.0 * base_output
     target_work = 0.3 * target_input + 1.0 * target_output
@@ -129,6 +136,7 @@ def _scale_tps_for_io(base_tps: float, base_input: float, base_output: float,
 def _ref_active_params(record: dict) -> float:
     """Active params per token for a CSV reference record. Falls back to total params."""
     import json
+
     total = _safe_float(record.get("params_billion"))
     if total <= 0 or not _safe_float(record.get("is_moe")):
         return total
@@ -145,14 +153,14 @@ def _ref_active_params(record: dict) -> float:
 
 
 def _predict_from_records(
-    records: List[dict],
+    records: list[dict],
     arch: ModelArchFeatures,
     gpu_type: str,
     tp: int,
     pp: int,
     avg_input: int,
     avg_output: int,
-) -> tuple[Optional[float], float, str, str]:
+) -> tuple[float | None, float, str, str]:
     """
     Return (predicted_tps, confidence, tier, nearest_entry_description).
     Tries T1 → T2 → T3 in order, returns (None, 0.0, 'none', '') if nothing matches.
@@ -161,7 +169,8 @@ def _predict_from_records(
 
     # Filter to matching gpu+tp+pp
     matching = [
-        r for r in records
+        r
+        for r in records
         if r.get("gpu_model") == perfdb_gpu
         and _safe_float(r.get("tp")) == tp
         and _safe_float(r.get("pp")) == pp
@@ -182,7 +191,8 @@ def _predict_from_records(
 
     # T1: same architecture class + params within 15% (near-exact model match)
     t1_records = [
-        r for r in matching
+        r
+        for r in matching
         if r.get("model_architecture") == arch.architecture_class
         and abs(_safe_float(r.get("params_billion")) - arch.params_billion) < arch.params_billion * 0.15
     ]
@@ -192,8 +202,10 @@ def _predict_from_records(
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps, base_in, base_out, avg_input, avg_output)
-        desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"({int(base_in)} in/{int(base_out)} out, {base_tps:.0f} tok/s measured)")
+        desc = (
+            f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
+            f"({int(base_in)} in/{int(base_out)} out, {base_tps:.0f} tok/s measured)"
+        )
         return tps, 0.85, "T1_exact", desc
 
     # T2: same architecture class, different size — scale by active params ratio
@@ -207,8 +219,10 @@ def _predict_from_records(
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps * param_scale, base_in, base_out, avg_input, avg_output)
-        desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"(T2: {arch.architecture_class}, {ref_active:.0f}B→{arch.active_params_billion:.0f}B active)")
+        desc = (
+            f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
+            f"(T2: {arch.architecture_class}, {ref_active:.0f}B→{arch.active_params_billion:.0f}B active)"
+        )
         return tps, 0.65, "T2_arch_class", desc
 
     # T3: same gpu+tp+pp, different arch — scale by active params ratio
@@ -222,8 +236,10 @@ def _predict_from_records(
         base_in = _safe_float(best.get("input_len_tokens_avg") or best.get("input_len_tokens_fixed"), 512)
         base_out = _safe_float(best.get("output_len_tokens_avg") or best.get("output_len_tokens_fixed"), 256)
         tps = _scale_tps_for_io(base_tps * param_scale, base_in, base_out, avg_input, avg_output)
-        desc = (f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
-                f"(T3: cross-arch, {ref_active:.0f}B→{arch.active_params_billion:.0f}B active)")
+        desc = (
+            f"{best.get('model_name')} on {perfdb_gpu} TP={tp} PP={pp} "
+            f"(T3: cross-arch, {ref_active:.0f}B→{arch.active_params_billion:.0f}B active)"
+        )
         return tps, 0.50, "T3_gpu_scaling", desc
 
     return None, 0.0, "none", ""
@@ -235,8 +251,8 @@ def get_candidates(
     avg_output: int,
     num_requests: int,
     slo_hours: float,
-    gpu_pool: Optional[dict] = None,  # {instance_type: available_count}, None = all AWS_INSTANCES
-) -> List[OracleCandidate]:
+    gpu_pool: dict | None = None,  # {instance_type: available_count}, None = all AWS_INSTANCES
+) -> list[OracleCandidate]:
     """
     Return all feasible OracleCandidates sorted by predicted cost (cheapest first).
     gpu_pool restricts which instance types are considered.
@@ -289,6 +305,7 @@ def get_candidates(
 
     # Pre-index RAG records by (gpu, tp, pp) to avoid re-scanning per combo
     from collections import defaultdict
+
     _rag_by_key: dict[tuple, list[dict]] = defaultdict(list)
     _rag_by_gpu: dict[str, list[dict]] = defaultdict(list)
     for r in rag_records:
@@ -327,26 +344,30 @@ def get_candidates(
         if not candidate_rag:
             candidate_rag = _rag_by_gpu.get(perfdb_gpu, [])[:5]
 
-        candidates.append(OracleCandidate(
-            gpu_type=gpu_name,
-            instance_type=inst,
-            gpu_count=gpu_count,
-            tp=tp,
-            pp=pp,
-            num_instances=num_instances,
-            predicted_tps=predicted_tps,
-            predicted_cost_per_hour=cost_per_hour,
-            estimated_runtime_hours=runtime_h,
-            meets_slo=meets_slo,
-            confidence=confidence,
-            tier=tier,
-            nearest_db_entry=nearest_entry,
-            rag_records=candidate_rag,
-        ))
+        candidates.append(
+            OracleCandidate(
+                gpu_type=gpu_name,
+                instance_type=inst,
+                gpu_count=gpu_count,
+                tp=tp,
+                pp=pp,
+                num_instances=num_instances,
+                predicted_tps=predicted_tps,
+                predicted_cost_per_hour=cost_per_hour,
+                estimated_runtime_hours=runtime_h,
+                meets_slo=meets_slo,
+                confidence=confidence,
+                tier=tier,
+                nearest_db_entry=nearest_entry,
+                rag_records=candidate_rag,
+            )
+        )
 
     # Sort: SLO-meeting first, then by cost
-    candidates.sort(key=lambda c: (
-        0 if c.meets_slo else (1 if c.meets_slo is None else 2),
-        c.predicted_cost_per_hour,
-    ))
+    candidates.sort(
+        key=lambda c: (
+            0 if c.meets_slo else (1 if c.meets_slo is None else 2),
+            c.predicted_cost_per_hour,
+        )
+    )
     return candidates[:20]  # top-20 to LLM

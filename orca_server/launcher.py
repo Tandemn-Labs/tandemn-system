@@ -11,19 +11,19 @@ from threading import Event, Lock, Thread
 
 logger = logging.getLogger(__name__)
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import requests
 import sky
 import yaml
 
+from models.requests import BatchedRequest, OnlineServingRequest
+from models.resources import MagicOutput
 from orca_server import config as _cfg
 from orca_server.config import (
     HF_TOKEN,
     VLLM_PORT,
     YAML_OUTPUT,
 )
-from orca_server.koi_contract import ReasonCode, TERMINAL_PHASES
 from orca_server.job_manager import (
     close_job_logger,
     download_output_from_s3,
@@ -34,17 +34,16 @@ from orca_server.job_manager import (
     setup_job_logger,
     sky_down_with_retry,
 )
-from models.requests import BatchedRequest, OnlineServingRequest
-from models.resources import MagicOutput
-from quota.region_selector import (
-    get_cached_quotas,
-    get_instance_family,
-    get_ordered_regions,
-)
 from orca_server.job_templates import (
     get_vllm_config_template,
     replace_run_vllm,
     replace_run_vllm_online,
+)
+from orca_server.koi_contract import TERMINAL_PHASES, ReasonCode
+from quota.region_selector import (
+    get_cached_quotas,
+    get_instance_family,
+    get_ordered_regions,
 )
 from utils.utils import split_uri, update_template, update_yaml_file
 
@@ -56,9 +55,7 @@ _koi_launch_heartbeats = {}
 _koi_launch_heartbeat_lock = Lock()
 
 
-def _requested_market(
-    request: BatchedRequest, config: Optional[MagicOutput] = None
-) -> Optional[str]:
+def _requested_market(request: BatchedRequest, config: MagicOutput | None = None) -> str | None:
     """Resolve the intended market for a launch attempt.
 
     planned_market is the exact market selected by Koi for this config.
@@ -114,8 +111,8 @@ def _post_koi_webhook(
     payload: dict,
     event: str,
     *,
-    dedup_key: Optional[str] = None,
-    correlation_id: Optional[str] = None,
+    dedup_key: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Deliver a webhook to Koi through the durable outbox.
 
@@ -140,12 +137,7 @@ def _post_koi_webhook(
 
         outbox = get_outbox()
         if outbox is not None:
-            job_id = (
-                payload.get("replica_id")
-                or payload.get("group_id")
-                or payload.get("job_id")
-                or "unknown"
-            )
+            job_id = payload.get("replica_id") or payload.get("group_id") or payload.get("job_id") or "unknown"
             event_type = event.replace("-", "_")
             outbox.enqueue(
                 path,
@@ -162,12 +154,7 @@ def _post_koi_webhook(
 
         _req.post(f"{KOI_SERVICE_URL}{path}", json=payload, timeout=5)
     except Exception as exc:
-        ident = (
-            payload.get("replica_id")
-            or payload.get("job_id")
-            or payload.get("group_id")
-            or "unknown"
-        )
+        ident = payload.get("replica_id") or payload.get("job_id") or payload.get("group_id") or "unknown"
         logger.warning("[Koi] Failed to notify %s for %s: %s", event, ident, exc)
 
 
@@ -189,9 +176,7 @@ def _notify_koi_config_attempted(
         "/job/config-attempted",
         {
             "job_id": parent_job_id,
-            "decision_id": koi_webhook_info.get("decision_id")
-            if koi_webhook_info
-            else None,
+            "decision_id": koi_webhook_info.get("decision_id") if koi_webhook_info else None,
             "instance_type": instance_type,
             "gpu_type": INSTANCE_TO_GPU.get(instance_type, "unknown"),
             "region": region,
@@ -334,13 +319,13 @@ def _stop_koi_launch_heartbeat(replica_id: str) -> bool:
 
 async def sp_launch_vllm_batch_with_fallback(
     request: BatchedRequest,
-    configs: List[MagicOutput],
+    configs: list[MagicOutput],
     solver: str = "roofline",
     early_messages: list = None,
     quota_tracker=None,
     persist: bool = False,
     timeout_seconds: float = 300.0,  # 5-minute total timeout
-) -> Tuple[bool, MagicOutput]:
+) -> tuple[bool, MagicOutput]:
     """Launch vLLM batch job with fallback to alternative instance types.
 
     Tries each config in order. If all fail or 5 minutes elapse, returns failure.
@@ -361,21 +346,19 @@ async def sp_launch_vllm_batch_with_fallback(
             ),
             timeout=timeout_seconds,
         )
-    except asyncio.TimeoutError:
-        logger.error(
-            f"[Launch] Timeout after {timeout_seconds:.0f}s, tried {len(configs)} configs"
-        )
+    except TimeoutError:
+        logger.error(f"[Launch] Timeout after {timeout_seconds:.0f}s, tried {len(configs)} configs")
         return (False, configs[0])
 
 
 async def _launch_with_fallback_inner(
     request: BatchedRequest,
-    configs: List[MagicOutput],
+    configs: list[MagicOutput],
     solver: str,
     early_messages: list,
     quota_tracker,
     persist: bool,
-) -> Tuple[bool, MagicOutput]:
+) -> tuple[bool, MagicOutput]:
     """Inner loop — tries each config in order until one succeeds."""
     for i, config in enumerate(configs):
         msg = f"[Launch] Trying config {i + 1}/{len(configs)}: {config.instance_type} TP={config.tp_size} PP={config.pp_size}"
@@ -413,9 +396,7 @@ async def sp_launch_vllm_batch(
     persist: bool = False,
 ):
     # Generate informative job directory name
-    job_dirname = generate_job_dirname(
-        request, solver, config.tp_size, config.pp_size, config.instance_type
-    )
+    job_dirname = generate_job_dirname(request, solver, config.tp_size, config.pp_size, config.instance_type)
 
     # Create output dir and job logger early
     output_dir = Path(f"outputs/{job_dirname}")
@@ -441,10 +422,7 @@ async def sp_launch_vllm_batch(
             timeout=15,
         )
         if s3_check.returncode != 0 or not s3_check.stdout.strip():
-            job_logger.warning(
-                f"[S3] Model not found at {s3_model_path}. "
-                f"Falling back to HuggingFace download."
-            )
+            job_logger.warning(f"[S3] Model not found at {s3_model_path}. Falling back to HuggingFace download.")
             request = request.model_copy(update={"s3_model_path": None})
         else:
             job_logger.info(f"[S3] Verified model exists at {s3_model_path}")
@@ -519,9 +497,7 @@ async def sp_launch_vllm_batch(
 
         # If template has a specific image_id, use its region and don't do quota-based fallback
         if template_image_id:
-            job_logger.info(
-                f"[Template] Using custom AMI: {template_image_id} in {template_region}"
-            )
+            job_logger.info(f"[Template] Using custom AMI: {template_image_id} in {template_region}")
             resources_config = {
                 "cloud": "aws",
                 "accelerators": yaml_data["resources"].get("accelerators", "A100:8"),
@@ -557,9 +533,7 @@ async def sp_launch_vllm_batch(
             yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
     else:
         # Generic template - use old substitution method
-        replace_run_dict = replace_run_vllm(
-            request, config, job_dirname, logger=job_logger
-        )
+        replace_run_dict = replace_run_vllm(request, config, job_dirname, logger=job_logger)
         run_string = update_template("templates/vllm_run", replace_run_dict)
 
         replace_yaml = {
@@ -572,9 +546,7 @@ async def sp_launch_vllm_batch(
             "envs.TD_SERVER_URL": _cfg.TD_SERVER_URL,
             "envs.JOB_ID": config.decision_id,
             "envs.ORCA_API_KEY": _cfg.ORCA_API_KEY,
-            "envs.VLLM_USE_V1": "1"
-            if _cfg.supports_vllm_v1(config.instance_type)
-            else "0",
+            "envs.VLLM_USE_V1": "1" if _cfg.supports_vllm_v1(config.instance_type) else "0",
         }
 
         # Add S3 model weight mount if requested
@@ -606,32 +578,22 @@ async def sp_launch_vllm_batch(
         """Background thread: stream logs, then download output when done."""
         try:
             sky.tail_logs(cluster_name=config.decision_id, job_id=job_id, follow=True)
-            job_logger.info(
-                f"[Job] {config.decision_id} completed. Downloading output..."
-            )
+            job_logger.info(f"[Job] {config.decision_id} completed. Downloading output...")
 
             # Download output from S3 to local dir (base name, no prefix yet)
-            local_path = download_output_from_s3(
-                output_s3_path, job_dirname, logger=job_logger
-            )
+            local_path = download_output_from_s3(output_s3_path, job_dirname, logger=job_logger)
 
             # Determine success: both output file and metrics.csv must exist
             base_dir = Path(f"outputs/{job_dirname}")
-            is_success = (
-                local_path is not None
-                and base_dir.exists()
-                and (base_dir / "metrics.csv").exists()
-            )
+            is_success = local_path is not None and base_dir.exists() and (base_dir / "metrics.csv").exists()
 
             # Update job tracker
             get_job_tracker().update_progress(config.decision_id, 1.0)
-            get_job_tracker().update_status(
-                config.decision_id, "succeeded" if is_success else "failed"
-            )
+            get_job_tracker().update_status(config.decision_id, "succeeded" if is_success else "failed")
 
             if is_success:
-                from orca_server.monitoring import get_metrics_collector
                 from orca_server.metrics_db import get_metrics_db
+                from orca_server.monitoring import get_metrics_collector
 
                 last_snap = get_metrics_collector().get_latest(config.decision_id)
                 db = get_metrics_db()
@@ -657,15 +619,11 @@ async def sp_launch_vllm_batch(
                         ts_path = base_dir / "timeseries.csv"
                         all_keys = list(ts_data[0].keys())
                         with open(ts_path, "w", newline="") as tf:
-                            writer = _csv.DictWriter(
-                                tf, fieldnames=all_keys, extrasaction="ignore"
-                            )
+                            writer = _csv.DictWriter(tf, fieldnames=all_keys, extrasaction="ignore")
                             writer.writeheader()
                             for row in ts_data:
                                 writer.writerow(row)
-                        job_logger.info(
-                            f"[Job] Saved timeseries.csv ({len(ts_data)} samples) to {ts_path}"
-                        )
+                        job_logger.info(f"[Job] Saved timeseries.csv ({len(ts_data)} samples) to {ts_path}")
 
                         # Generate timeseries PDF
                         try:
@@ -675,19 +633,13 @@ async def sp_launch_vllm_batch(
 
                             pdf_path = base_dir / "timeseries.pdf"
                             _metrics_csv = str(base_dir / "metrics.csv")
-                            _metrics_arg = (
-                                _metrics_csv
-                                if (base_dir / "metrics.csv").exists()
-                                else None
-                            )
+                            _metrics_arg = _metrics_csv if (base_dir / "metrics.csv").exists() else None
                             _plot_ts(
                                 str(ts_path),
                                 str(pdf_path),
                                 metrics_csv_path=_metrics_arg,
                             )
-                            job_logger.info(
-                                f"[Job] Generated timeseries.pdf at {pdf_path}"
-                            )
+                            job_logger.info(f"[Job] Generated timeseries.pdf at {pdf_path}")
                         except Exception as pe:
                             job_logger.warning(f"[Job] Timeseries plot failed: {pe}")
                 except Exception as te:
@@ -727,9 +679,7 @@ async def sp_launch_vllm_batch(
             if not persist:
                 sky_down_with_retry(config.decision_id)
             else:
-                job_logger.info(
-                    f"[Teardown] --persist: keeping cluster {config.decision_id} alive"
-                )
+                job_logger.info(f"[Teardown] --persist: keeping cluster {config.decision_id} alive")
 
     try:
         job_logger.info(f"[SkyPilot] Launching cluster {config.decision_id}...")
@@ -757,9 +707,7 @@ async def sp_launch_vllm_batch(
             instance_type=config.instance_type,
             num_instances=num_nodes,
         )
-        job_logger.info(
-            f"[Quota] Reserved {config.instance_type} x{num_nodes} in {actual_region}/{actual_market}"
-        )
+        job_logger.info(f"[Quota] Reserved {config.instance_type} x{num_nodes} in {actual_region}/{actual_market}")
 
         # Update job tracker: running + head IP
         jt.update_status(config.decision_id, "running")
@@ -776,9 +724,7 @@ async def sp_launch_vllm_batch(
         t = threading.Thread(
             target=monitor_and_download,
             args=(job_id,),
-            kwargs=dict(
-                actual_region=actual_region, actual_market=actual_market, solver=solver
-            ),
+            kwargs=dict(actual_region=actual_region, actual_market=actual_market, solver=solver),
             daemon=False,
             name=f"orca-monitor-{config.decision_id[:12]}",
         )
@@ -788,9 +734,7 @@ async def sp_launch_vllm_batch(
         t.start()
 
     except Exception as e:
-        job_logger.error(
-            f"[SkyPilot] Failed to launch cluster {config.decision_id}: {e}"
-        )
+        job_logger.error(f"[SkyPilot] Failed to launch cluster {config.decision_id}: {e}")
         jt.update_status(config.decision_id, "failed")
         close_job_logger(job_logger)
         raise Exception(f"Failed to launch cluster {config.decision_id}: {e}")
@@ -798,7 +742,7 @@ async def sp_launch_vllm_batch(
 
 async def launch_chunked_replicas(
     request: BatchedRequest,
-    configs: List[MagicOutput],
+    configs: list[MagicOutput],
     num_replicas: int,
     solver: str = "roofline",
     early_messages: list = None,
@@ -825,15 +769,14 @@ async def launch_chunked_replicas(
 
     primary = configs[0]
 
-    from orca_server.job_manager import (
-        setup_job_logger,
-        generate_job_dirname,
-    )
     from pathlib import Path
 
-    job_dirname = generate_job_dirname(
-        request, solver, primary.tp_size, primary.pp_size, primary.instance_type
+    from orca_server.job_manager import (
+        generate_job_dirname,
+        setup_job_logger,
     )
+
+    job_dirname = generate_job_dirname(request, solver, primary.tp_size, primary.pp_size, primary.instance_type)
     output_dir = Path(f"outputs/{job_dirname}")
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "replicas").mkdir(exist_ok=True)
@@ -859,9 +802,7 @@ async def launch_chunked_replicas(
     # Koi webhook info — job-level fields shared by all replicas.
     # Config-specific fields (gpu_type, instance_type, tp, pp) are added
     # by _launch_chunked_replica based on whichever config actually succeeds.
-    total_tokens = (request.num_lines or 0) * (
-        (request.avg_input_tokens or 0) + (request.avg_output_tokens or 0)
-    )
+    total_tokens = (request.num_lines or 0) * ((request.avg_input_tokens or 0) + (request.avg_output_tokens or 0))
     koi_webhook_info = {
         "decision_id": request.koi_decision_id,
         "group_id": parent_job_id,
@@ -885,9 +826,7 @@ async def launch_chunked_replicas(
     # Pre-register all replicas as "launching"
     for i in range(num_replicas):
         rid = f"{parent_job_id}-r{i}"
-        cm.set_replica_state(
-            parent_job_id, rid, phase="launching", launched_at=time.time()
-        )
+        cm.set_replica_state(parent_job_id, rid, phase="launching", launched_at=time.time())
         cm.register_for_job(parent_job_id, rid)
 
     def _launch_replica_thread(i):
@@ -954,9 +893,7 @@ async def launch_chunked_replicas(
                 with _attempt_log_lock:
                     _attempt_log.append(
                         {
-                            "gpu_type": _cfg.INSTANCE_TO_GPU.get(
-                                cfg.instance_type, "unknown"
-                            ),
+                            "gpu_type": _cfg.INSTANCE_TO_GPU.get(cfg.instance_type, "unknown"),
                             "instance_type": cfg.instance_type,
                             "region": "unknown",
                             "market": requested_market,
@@ -964,27 +901,19 @@ async def launch_chunked_replicas(
                         }
                     )
                 if j < len(configs) - 1:
-                    job_logger.warning(
-                        f"[Chunked] Replica {i} config {j + 1} failed: {e}. Trying next..."
-                    )
+                    job_logger.warning(f"[Chunked] Replica {i} config {j + 1} failed: {e}. Trying next...")
                     # Clean up partial cluster state before retrying
                     try:
                         sky_down_with_retry(replica_id)
                     except Exception:
                         pass
                 else:
-                    job_logger.error(
-                        f"[Chunked] Replica {i} all {len(configs)} configs failed: {e}"
-                    )
+                    job_logger.error(f"[Chunked] Replica {i} all {len(configs)} configs failed: {e}")
                     cm.set_replica_state(parent_job_id, replica_id, phase="failed")
                     # Check if ALL replicas failed at launch → fire /job/launch-failed
                     states = cm.get_replica_states(parent_job_id)
-                    if states and all(
-                        s.get("phase") in TERMINAL_PHASES for s in states.values()
-                    ):
-                        any_ok = any(
-                            s.get("phase") == "completed" for s in states.values()
-                        )
+                    if states and all(s.get("phase") in TERMINAL_PHASES for s in states.values()):
+                        any_ok = any(s.get("phase") == "completed" for s in states.values())
                         if not any_ok and not _launch_failed_fired.is_set():
                             _launch_failed_fired.set()
                             jt_tmp = get_job_tracker()
@@ -994,9 +923,7 @@ async def launch_chunked_replicas(
                                 "loading_model",
                             ):
                                 jt_tmp.update_status(parent_job_id, "failed")
-                                job_logger.warning(
-                                    "[Chunked] All replicas failed at launch — marking job as failed"
-                                )
+                                job_logger.warning("[Chunked] All replicas failed at launch — marking job as failed")
                             with _attempt_log_lock:
                                 attempts = list(_attempt_log)
                             _post_koi_webhook(
@@ -1006,9 +933,7 @@ async def launch_chunked_replicas(
                                     "decision_id": request.koi_decision_id,
                                     "configs_tried": attempts,
                                     "failure_reasons": [a["reason"] for a in attempts],
-                                    "total_time_seconds": round(
-                                        time.time() - _launch_start_time, 2
-                                    ),
+                                    "total_time_seconds": round(time.time() - _launch_start_time, 2),
                                 },
                                 "launch-failed",
                                 dedup_key=f"launch_failed:{parent_job_id}",
@@ -1047,7 +972,6 @@ async def _launch_chunked_replica(
 ):
     """Launch a single replica cluster for chunked batch inference."""
     _launch_start = time.time()
-    from pathlib import Path
 
     hf_token = request.hf_token or HF_TOKEN or ""
     _validate_parallelism_topology(config)
@@ -1057,11 +981,7 @@ async def _launch_chunked_replica(
     instance_family = get_instance_family(config.instance_type)
     quotas = get_cached_quotas(instance_family)
     requested_market = _requested_market(request, config)
-    prefer_spot = (
-        requested_market == "spot"
-        if requested_market is not None
-        else getattr(request, "prefer_spot", True)
-    )
+    prefer_spot = requested_market == "spot" if requested_market is not None else getattr(request, "prefer_spot", True)
     ordered_regions = get_ordered_regions(
         instance_type=config.instance_type,
         num_nodes=num_nodes,
@@ -1087,9 +1007,7 @@ async def _launch_chunked_replica(
         resources_config = {"any_of": any_of_resources}
     else:
         if requested_market is not None:
-            raise RuntimeError(
-                f"No {requested_market} quota candidates for {config.instance_type}"
-            )
+            raise RuntimeError(f"No {requested_market} quota candidates for {config.instance_type}")
         resources_config = {
             "infra": "aws",
             "instance_type": config.instance_type,
@@ -1221,9 +1139,7 @@ async def _launch_chunked_replica(
             "/job/launching",
             {
                 "job_id": replica_id,
-                "decision_id": koi_webhook_info.get("decision_id")
-                if koi_webhook_info
-                else None,
+                "decision_id": koi_webhook_info.get("decision_id") if koi_webhook_info else None,
                 "group_id": parent_job_id,
                 "gpu_type": INSTANCE_TO_GPU.get(config.instance_type, "unknown"),
                 "instance_type": config.instance_type,
@@ -1317,18 +1233,14 @@ async def _launch_chunked_replica(
             current = cm.get_replica_states(parent_job_id).get(replica_id, {})
             cur_phase = current.get("phase", "")
             err_str = str(e)
-            is_log_cancel = (
-                "cancelled" in err_str.lower() or "cancel" in err_str.lower()
-            )
+            is_log_cancel = "cancelled" in err_str.lower() or "cancel" in err_str.lower()
             jt_tmp = get_job_tracker()
             rec_tmp = jt_tmp.get(parent_job_id)
             job_done = rec_tmp and rec_tmp.status in ("succeeded", "failed")
 
             if cur_phase in TERMINAL_PHASES:
                 if job_logger:
-                    job_logger.info(
-                        f"[Chunked] Replica {replica_id} log stream ended (phase={cur_phase})"
-                    )
+                    job_logger.info(f"[Chunked] Replica {replica_id} log stream ended (phase={cur_phase})")
             elif is_log_cancel or job_done:
                 # Log cancellation or job already finished — not a real failure
                 if job_logger:
@@ -1363,10 +1275,7 @@ async def _launch_chunked_replica(
                     if phase not in TERMINAL_PHASES:
                         _emit_replica_failed(
                             ReasonCode.MONITOR_THREAD_EXITED,
-                            (
-                                "Monitor thread exited without an explicit "
-                                f"failure emit and phase was {phase!r}"
-                            ),
+                            (f"Monitor thread exited without an explicit failure emit and phase was {phase!r}"),
                         )
             except Exception as fb_exc:
                 logger.error(
@@ -1381,18 +1290,12 @@ async def _launch_chunked_replica(
             rec = jt.get(parent_job_id)
             if rec and rec.status in ("launching", "loading_model"):
                 states = cm.get_replica_states(parent_job_id)
-                if states and all(
-                    s.get("phase") in TERMINAL_PHASES for s in states.values()
-                ):
-                    any_success = any(
-                        s.get("phase") == "completed" for s in states.values()
-                    )
+                if states and all(s.get("phase") in TERMINAL_PHASES for s in states.values()):
+                    any_success = any(s.get("phase") == "completed" for s in states.values())
                     if not any_success:
                         jt.update_status(parent_job_id, "failed")
                         if job_logger:
-                            job_logger.warning(
-                                "[Chunked] All replicas failed — marking job as failed"
-                            )
+                            job_logger.warning("[Chunked] All replicas failed — marking job as failed")
 
     t = threading.Thread(
         target=monitor_replica,
@@ -1419,9 +1322,7 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
     }
     update_yaml_file("templates/vllm_online.yaml", replace_yaml, YAML_OUTPUT)
     task = sky.Task.from_yaml(YAML_OUTPUT)
-    result_id = sky.launch(
-        task, cluster_name=config.decision_id, down=False
-    )  # do not LET IT DIE!
+    result_id = sky.launch(task, cluster_name=config.decision_id, down=False)  # do not LET IT DIE!
 
     # return the public IP of the deployment
     job_id, handle = sky.stream_and_get(result_id, follow=True)
@@ -1435,9 +1336,7 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
 
     url = f"http://{public_ip}:{VLLM_PORT}/v1/models"
     response = requests.get(url, timeout=5)
-    if (
-        response.status_code == 200
-    ):  # do sth here for a valid API up and sth else otherwise
+    if response.status_code == 200:  # do sth here for a valid API up and sth else otherwise
         logger.info(f"vLLM server API is up at {endpoint_url}")
         return endpoint_url
     else:

@@ -1,14 +1,12 @@
-import math
 import re
-import yaml
-import pandas as pd
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
+
+import pandas as pd
+import yaml
 
 
-def update_yaml_file(
-    yaml_path: str, replace_dict: Dict[str, Any], output_path: str
-) -> Dict[str, Any]:
+def update_yaml_file(yaml_path: str, replace_dict: dict[str, Any], output_path: str) -> dict[str, Any]:
     """
     Read a YAML file and update specified fields at runtime.
 
@@ -19,7 +17,7 @@ def update_yaml_file(
     Returns:
         The updated YAML data as a dictionary
     """
-    with open(yaml_path, "r") as f:
+    with open(yaml_path) as f:
         data = yaml.safe_load(f)
 
     # Loop through dict of items to replace
@@ -45,7 +43,7 @@ def update_yaml_file(
     return data
 
 
-def update_template(template_file: str, replace_dict: Dict[str, str]) -> str:
+def update_template(template_file: str, replace_dict: dict[str, str]) -> str:
     """
     Read a template file and replace placeholders with values from a dictionary.
 
@@ -145,9 +143,7 @@ def load_all_perfdb_files(perfdb_dir):
                 "mem_per_gpu_gb": df_raw["Mem Per GPU GB"].astype(float),
             }
         )
-        models = set(
-            df["model_name"].unique()
-        )  # TODO: Do we have multiple models per file?
+        models = set(df["model_name"].unique())  # TODO: Do we have multiple models per file?
         model_size_b = get_num_params_from_text(df["model_name"].iloc[0])
         print("Model size b:", model_size_b)
         all_results.append(
@@ -188,9 +184,7 @@ def load_aws_quota_csv(
 
     df = pd.read_csv(quota_csv)
     df["gpu_base"] = df["GPU_Type"].apply(normalize_gpu_name)
-    df["gpu_count"] = (
-        df["GPU_Type"].str.extract(r"(\d+)\s*x\s*")[0].fillna(1.0).astype(float)
-    )  # get the 4 in 4XA100
+    df["gpu_count"] = df["GPU_Type"].str.extract(r"(\d+)\s*x\s*")[0].fillna(1.0).astype(float)  # get the 4 in 4XA100
     print("Detected the GPU Types in your Quota: ", df["gpu_base"].unique())
     print("Detected the GPU Count: ", df["gpu_count"].unique())
     return df
@@ -219,9 +213,7 @@ def sort_perf_entries_io_length(df, job_avg_input, job_avg_output):
     return df
 
 
-def get_vcpu_count_from_gpu(
-    quota_df, gpu_base, gpus_needed, prefer_single_instance=False
-):
+def get_vcpu_count_from_gpu(quota_df, gpu_base, gpus_needed, prefer_single_instance=False):
     """
     Given the GPU base and parallelism configuration (tp, pp, replicas),
     filters instances where the GPU count matches the TP number.
@@ -233,9 +225,7 @@ def get_vcpu_count_from_gpu(
     passes activations between pipeline stages.
     """
     # Filter by GPU base and GPU count matching TP
-    instances = quota_df[
-        (quota_df["gpu_base"] == gpu_base) & (quota_df["gpu_count"] == tp)
-    ].copy()
+    instances = quota_df[(quota_df["gpu_base"] == gpu_base) & (quota_df["gpu_count"] == tp)].copy()
     if instances.empty:
         return []
     packings = []

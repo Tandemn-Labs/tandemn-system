@@ -11,7 +11,6 @@ import json
 import logging
 import time
 from collections import deque
-from dataclasses import asdict
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -46,6 +45,7 @@ def _get_cached_price(instance_type: str, region: str, market: str) -> float | N
         return cached[0]
     try:
         from sky import catalog
+
         price = catalog.get_hourly_cost(
             instance_type=instance_type,
             use_spot=(market == "spot"),
@@ -62,12 +62,15 @@ def _get_cached_price(instance_type: str, region: str, market: str) -> float | N
 
 def _emit_event(level: str, message: str, job_id: str = ""):
     """Append a synthetic event to the module-level log."""
-    _event_log.append({
-        "ts": time.time(),
-        "level": level,
-        "job_id": job_id,
-        "message": message,
-    })
+    _event_log.append(
+        {
+            "ts": time.time(),
+            "level": level,
+            "job_id": job_id,
+            "message": message,
+        }
+    )
+
 
 dashboard_router = APIRouter()
 
@@ -76,18 +79,19 @@ dashboard_router = APIRouter()
 # ---------------------------------------------------------------------------
 
 from pathlib import Path as _Path
-DASHBOARD_HTML = (_Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
 
+DASHBOARD_HTML = (_Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 def _build_dashboard_payload(app_state) -> dict:
     """Build the dashboard payload dict (shared by SSE stream and poll endpoint)."""
-    from orca_server.job_manager import get_job_tracker
     from orca_server.chunk_manager import get_chunk_manager
+    from orca_server.job_manager import get_job_tracker
 
     payload = {"jobs": [], "metrics": {}, "chunks": {}, "replicas": {}, "quota": []}
     mc = getattr(app_state, "metrics_collector", None)
@@ -101,27 +105,29 @@ def _build_dashboard_payload(app_state) -> dict:
 
         for job_id, rec in job_items:
             try:
-                payload["jobs"].append({
-                    "job_id": job_id,
-                    "status": rec.status,
-                    "progress": round(rec.state.progress_frac, 4),
-                    "model_name": rec.state.spec.model_name,
-                    "num_lines": rec.state.spec.num_lines,
-                    "created_at": rec.created_at,
-                    "last_updated_at": rec.last_updated_at,
-                    "head_ip": rec.head_ip,
-                    "endpoint_url": rec.endpoint_url,
-                    "instance_type": rec.state.instance_types,
-                    "tp": rec.state.tp,
-                    "pp": rec.state.pp,
-                    "slo_hours": rec.state.spec.slo_hours,
-                    "avg_input_tokens": rec.state.spec.avg_input_tokens,
-                    "avg_output_tokens": rec.state.spec.avg_output_tokens,
-                    "market": rec.state.spec.market,
-                    "submitted_at": rec.state.submitted_at,
-                    "num_replicas": getattr(rec, "num_replicas", 1),
-                    "is_chunked": getattr(rec, "is_chunked", False),
-                })
+                payload["jobs"].append(
+                    {
+                        "job_id": job_id,
+                        "status": rec.status,
+                        "progress": round(rec.state.progress_frac, 4),
+                        "model_name": rec.state.spec.model_name,
+                        "num_lines": rec.state.spec.num_lines,
+                        "created_at": rec.created_at,
+                        "last_updated_at": rec.last_updated_at,
+                        "head_ip": rec.head_ip,
+                        "endpoint_url": rec.endpoint_url,
+                        "instance_type": rec.state.instance_types,
+                        "tp": rec.state.tp,
+                        "pp": rec.state.pp,
+                        "slo_hours": rec.state.spec.slo_hours,
+                        "avg_input_tokens": rec.state.spec.avg_input_tokens,
+                        "avg_output_tokens": rec.state.spec.avg_output_tokens,
+                        "market": rec.state.spec.market,
+                        "submitted_at": rec.state.submitted_at,
+                        "num_replicas": getattr(rec, "num_replicas", 1),
+                        "is_chunked": getattr(rec, "is_chunked", False),
+                    }
+                )
             except Exception:
                 logger.debug("dashboard: error serialising job %s", job_id, exc_info=True)
 
@@ -208,7 +214,9 @@ def _build_dashboard_payload(app_state) -> dict:
                                 rsnap = mc.get_replica_latest(job_id, rid)
                                 if rsnap:
                                     rep_info["request_success_total"] = rsnap.request_success_total
-                                    rep_info["throughput_toks"] = getattr(rsnap, "avg_generation_throughput_toks_per_s", None)
+                                    rep_info["throughput_toks"] = getattr(
+                                        rsnap, "avg_generation_throughput_toks_per_s", None
+                                    )
                             replicas.append(rep_info)
                         if replicas:
                             payload["replicas"][job_id] = replicas
@@ -241,11 +249,7 @@ def _build_dashboard_payload(app_state) -> dict:
                         for _rid, rs in cluster_mgr.get_replica_states(job_id).items():
                             if rs.get("phase") in TERMINAL_REPLICA_PHASES:
                                 continue
-                            start_ts = (
-                                rs.get("launched_at")
-                                or rs.get("running_since")
-                                or rec.state.submitted_at
-                            )
+                            start_ts = rs.get("launched_at") or rs.get("running_since") or rec.state.submitted_at
                             elapsed_hours = max(0.0, now - start_ts) / 3600
                             total_hours += elapsed_hours * max(1, rs.get("num_instances") or 1)
                             num_running += 1
@@ -291,7 +295,9 @@ def _build_dashboard_payload(app_state) -> dict:
             ch = payload["chunks"].get(job_id)
             if ch and ch.get("total", 0) > 0:
                 prev_ch = _prev_chunk_progress.get(job_id, {})
-                prev_pct = prev_ch.get("completed", 0) / ch["total"] * 100 if prev_ch.get("completed") is not None else 0
+                prev_pct = (
+                    prev_ch.get("completed", 0) / ch["total"] * 100 if prev_ch.get("completed") is not None else 0
+                )
                 cur_pct = ch["completed"] / ch["total"] * 100
                 for ms in (25, 50, 75, 100):
                     if prev_pct < ms <= cur_pct:
@@ -304,7 +310,9 @@ def _build_dashboard_payload(app_state) -> dict:
                 rid, phase = r["replica_id"], r["phase"]
                 cur_phases[rid] = phase
                 if rid in prev_phases and prev_phases[rid] != phase:
-                    _emit_event("error" if phase in ("failed", "dead") else "info", f"replica {rid[-8:]} -> {phase}", job_id)
+                    _emit_event(
+                        "error" if phase in ("failed", "dead") else "info", f"replica {rid[-8:]} -> {phase}", job_id
+                    )
             _prev_replica_phases[job_id] = cur_phases
         payload["events"] = list(_event_log)[-50:]
 

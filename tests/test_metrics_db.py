@@ -1,5 +1,5 @@
 """Unit tests for orca_server.metrics_db."""
-import json
+
 import time
 
 import pytest
@@ -65,6 +65,7 @@ total_tokens_per_sec,622.5
 # ---------------------------------------------------------------------------
 # TestPushRun
 # ---------------------------------------------------------------------------
+
 
 class TestPushRun:
     def test_push_run_returns_positive_int(self, db, tmp_path):
@@ -183,6 +184,7 @@ class TestPushRun:
 # TestTimeseries
 # ---------------------------------------------------------------------------
 
+
 class TestTimeseries:
     def test_append_and_retrieve(self, db):
         snapshots = [
@@ -201,10 +203,7 @@ class TestTimeseries:
         assert result[-1]["timestamp"] == pytest.approx(1004.0)
 
     def test_time_range_filter(self, db):
-        snapshots = [
-            {"job_id": "job-ts2", "timestamp": float(i), "num_requests_running": i}
-            for i in range(10)
-        ]
+        snapshots = [{"job_id": "job-ts2", "timestamp": float(i), "num_requests_running": i} for i in range(10)]
         db.append_timeseries("job-ts2", snapshots)
         result = db.get_timeseries("job-ts2", start=3.0, end=6.0)
         timestamps = [r["timestamp"] for r in result]
@@ -213,10 +212,7 @@ class TestTimeseries:
 
     def test_ordered_by_timestamp(self, db):
         # Insert in reverse order
-        snapshots = [
-            {"job_id": "job-ts3", "timestamp": float(9 - i), "num_requests_running": i}
-            for i in range(10)
-        ]
+        snapshots = [{"job_id": "job-ts3", "timestamp": float(9 - i), "num_requests_running": i} for i in range(10)]
         db.append_timeseries("job-ts3", snapshots)
         result = db.get_timeseries("job-ts3")
         timestamps = [r["timestamp"] for r in result]
@@ -229,6 +225,7 @@ class TestTimeseries:
 # ---------------------------------------------------------------------------
 # TestSchedulerAggregates
 # ---------------------------------------------------------------------------
+
 
 class TestSchedulerAggregates:
     def test_aggregates_computed_from_timeseries(self, db, tmp_path):
@@ -256,17 +253,14 @@ class TestSchedulerAggregates:
             job_dirname="test",
         )
         run = db.get_run(run_id)
-        assert run["running_avg"] == pytest.approx(30.0)   # avg(10,20,30,40,50)
+        assert run["running_avg"] == pytest.approx(30.0)  # avg(10,20,30,40,50)
         assert run["running_max"] == pytest.approx(50.0)
         assert run["scheduler_samples"] == 5
         assert run["kv_cache_util_pct_avg"] == pytest.approx(30.0)  # avg(10,20,30,40,50)%
 
     def test_kv_pct_converted_from_fraction(self, db, tmp_path):
         """gpu_cache_usage_perc is 0-1 in snapshots; stored as 0-100 pct."""
-        snapshots = [
-            {"job_id": "job-kv", "timestamp": float(i), "gpu_cache_usage_perc": 0.5}
-            for i in range(3)
-        ]
+        snapshots = [{"job_id": "job-kv", "timestamp": float(i), "gpu_cache_usage_perc": 0.5} for i in range(3)]
         db.append_timeseries("job-kv", snapshots)
         csv_file = tmp_path / "metrics.csv"
         csv_file.write_text("")
@@ -286,6 +280,7 @@ class TestSchedulerAggregates:
 # TestListRuns
 # ---------------------------------------------------------------------------
 
+
 class TestListRuns:
     def test_list_runs_empty(self, db):
         assert db.list_runs() == []
@@ -295,8 +290,12 @@ class TestListRuns:
         csv1.write_text("model_name,Qwen/Qwen2.5-72B\n")
         csv2 = tmp_path / "m2.csv"
         csv2.write_text("model_name,meta-llama/Llama-3-70B\n")
-        db.push_run("job-q", str(csv1), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname="a")
-        db.push_run("job-l", str(csv2), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname="b")
+        db.push_run(
+            "job-q", str(csv1), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname="a"
+        )
+        db.push_run(
+            "job-l", str(csv2), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname="b"
+        )
 
         runs = db.list_runs(model="Qwen")
         assert len(runs) == 1
@@ -307,8 +306,12 @@ class TestListRuns:
         csv1.write_text("model_name,ModelA\ngpu_name,L40S\n")
         csv2 = tmp_path / "g2.csv"
         csv2.write_text("model_name,ModelB\ngpu_name,A100\n")
-        db.push_run("job-g1", str(csv1), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname="c")
-        db.push_run("job-g2", str(csv2), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname="d")
+        db.push_run(
+            "job-g1", str(csv1), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname="c"
+        )
+        db.push_run(
+            "job-g2", str(csv2), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname="d"
+        )
 
         runs = db.list_runs(gpu="L40S")
         assert len(runs) == 1
@@ -318,7 +321,14 @@ class TestListRuns:
         for i in range(5):
             csv_file = tmp_path / f"m{i}.csv"
             csv_file.write_text(f"model_name,Model{i}\n")
-            db.push_run(f"job-{i}", str(csv_file), actual_region="us-east-1", actual_market="spot", solver="roofline", job_dirname=f"run-{i}")
+            db.push_run(
+                f"job-{i}",
+                str(csv_file),
+                actual_region="us-east-1",
+                actual_market="spot",
+                solver="roofline",
+                job_dirname=f"run-{i}",
+            )
         runs = db.list_runs(limit=3)
         assert len(runs) == 3
 
@@ -326,6 +336,7 @@ class TestListRuns:
 # ---------------------------------------------------------------------------
 # TestGetRun
 # ---------------------------------------------------------------------------
+
 
 class TestGetRun:
     def test_get_run_none_for_unknown(self, db):

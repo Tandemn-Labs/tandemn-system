@@ -20,7 +20,6 @@ from __future__ import annotations
 import csv
 import os
 import pickle
-from typing import List
 
 import numpy as np
 
@@ -57,6 +56,7 @@ EMBED_DIM = 9  # pure architecture + I/O shape
 # Embedding — pure architecture features, no hardware
 # ---------------------------------------------------------------------------
 
+
 def _embed(
     params_b: float,
     num_layers: float,
@@ -68,17 +68,20 @@ def _embed(
     avg_input: float,
     avg_output: float,
 ) -> np.ndarray:
-    vec = np.array([
-        min(params_b / _MAX_PARAMS, 1.0),
-        min(num_layers / _MAX_LAYERS, 1.0),
-        min(hidden_size / _MAX_HIDDEN, 1.0),
-        min(gqa_ratio / _MAX_GQA, 1.0),
-        min(intermediate_ratio / _MAX_INTERMEDIATE_RATIO, 1.0),
-        float(bool(is_moe)),
-        min(num_experts_active / _MAX_EXPERTS, 1.0),
-        min(avg_input / _MAX_INPUT, 1.0),
-        min(avg_output / _MAX_OUTPUT, 1.0),
-    ], dtype=np.float32)
+    vec = np.array(
+        [
+            min(params_b / _MAX_PARAMS, 1.0),
+            min(num_layers / _MAX_LAYERS, 1.0),
+            min(hidden_size / _MAX_HIDDEN, 1.0),
+            min(gqa_ratio / _MAX_GQA, 1.0),
+            min(intermediate_ratio / _MAX_INTERMEDIATE_RATIO, 1.0),
+            float(bool(is_moe)),
+            min(num_experts_active / _MAX_EXPERTS, 1.0),
+            min(avg_input / _MAX_INPUT, 1.0),
+            min(avg_output / _MAX_OUTPUT, 1.0),
+        ],
+        dtype=np.float32,
+    )
 
     norm = np.linalg.norm(vec)
     if norm > 0:
@@ -89,6 +92,7 @@ def _embed(
 # ---------------------------------------------------------------------------
 # Index build / load
 # ---------------------------------------------------------------------------
+
 
 def _build_index(data_csv: str):
     """Read data.csv, build FAISS flat-IP index on arch features, return (index, rows)."""
@@ -101,20 +105,15 @@ def _build_index(data_csv: str):
         reader = csv.DictReader(f)
         for row in reader:
             params = _safe_float(row.get("params_billion"))
-            hidden = _safe_float(row.get("hidden_size") or
-                                 _extract_from_config(row, "hidden_size"), 4096)
-            num_layers = _safe_float(row.get("num_hidden_layers") or
-                                     _extract_from_config(row, "num_hidden_layers"), 32)
+            hidden = _safe_float(row.get("hidden_size") or _extract_from_config(row, "hidden_size"), 4096)
+            num_layers = _safe_float(row.get("num_hidden_layers") or _extract_from_config(row, "num_hidden_layers"), 32)
             gqa = _safe_float(row.get("attention_heads_per_kv_head"), 1.0)
-            intermediate = _safe_float(
-                _extract_from_config(row, "intermediate_size"), hidden * 4)
+            intermediate = _safe_float(_extract_from_config(row, "intermediate_size"), hidden * 4)
             intermediate_ratio = intermediate / max(hidden, 1)
             is_moe = _safe_float(row.get("is_moe"))
             experts_active = _safe_float(row.get("num_experts_active"))
-            avg_in = _safe_float(row.get("input_len_tokens_avg") or
-                                 row.get("input_len_tokens_fixed"))
-            avg_out = _safe_float(row.get("output_len_tokens_avg") or
-                                  row.get("output_len_tokens_fixed"))
+            avg_in = _safe_float(row.get("input_len_tokens_avg") or row.get("input_len_tokens_fixed"))
+            avg_out = _safe_float(row.get("output_len_tokens_avg") or row.get("output_len_tokens_fixed"))
 
             vec = _embed(
                 params_b=params,
@@ -139,6 +138,7 @@ def _build_index(data_csv: str):
 def _extract_from_config(row: dict, key: str, default=None):
     """Try to extract a field from the model_config_json column."""
     import json
+
     cfg_str = row.get("model_config_json", "")
     if not cfg_str:
         return default
@@ -163,9 +163,13 @@ def _get_index():
     os.makedirs(_CACHE_DIR, exist_ok=True)
 
     # Invalidate cache if CSV is newer
-    if (os.path.exists(_INDEX_PATH) and os.path.exists(_META_PATH)
-            and os.path.getmtime(_INDEX_PATH) >= os.path.getmtime(_DATA_CSV)):
+    if (
+        os.path.exists(_INDEX_PATH)
+        and os.path.exists(_META_PATH)
+        and os.path.getmtime(_INDEX_PATH) >= os.path.getmtime(_DATA_CSV)
+    ):
         import faiss
+
         index = faiss.read_index(_INDEX_PATH)
         with open(_META_PATH, "rb") as f:
             rows = pickle.load(f)
@@ -175,6 +179,7 @@ def _get_index():
     index, rows = _build_index(_DATA_CSV)
 
     import faiss
+
     faiss.write_index(index, _INDEX_PATH)
     with open(_META_PATH, "wb") as f:
         pickle.dump(rows, f)
@@ -185,6 +190,7 @@ def _get_index():
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def retrieve(
     params_billion: float,
@@ -197,7 +203,7 @@ def retrieve(
     avg_input: int,
     avg_output: int,
     k: int = 50,
-) -> List[dict]:
+) -> list[dict]:
     """
     Find the k most architecturally similar profiled records.
 

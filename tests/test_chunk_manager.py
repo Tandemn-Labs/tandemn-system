@@ -3,6 +3,7 @@
 Requires a running Redis at REDIS_URL (default localhost:6379).
 Use: docker-compose up -d redis && .venv/bin/python -m pytest tests/test_chunk_manager.py -v
 """
+
 import time
 import uuid
 
@@ -163,6 +164,7 @@ def test_chunk_info_updated_on_complete(cm, job_id):
 # Lease / fault tolerance tests
 # ---------------------------------------------------------------------------
 
+
 def test_pull_chunk_sets_lease(cm, job_id):
     cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
     before = time.time()
@@ -178,6 +180,7 @@ def test_reclaim_expired_chunk(cm, job_id):
 
     # Force lease expiry on c0000
     from orca_server.chunk_manager import _chunk_key
+
     cm._r.hset(_chunk_key(job_id, "c0000"), "lease_until", time.time() - 1)
 
     result = cm.reclaim_expired_chunks(job_id)
@@ -195,6 +198,7 @@ def test_reclaim_respects_valid_lease(cm, job_id):
 
     # Lease is still valid (set far in future)
     from orca_server.chunk_manager import _chunk_key
+
     cm._r.hset(_chunk_key(job_id, "c0000"), "lease_until", time.time() + 600)
 
     result = cm.reclaim_expired_chunks(job_id)
@@ -213,10 +217,13 @@ def test_reclaim_max_retries(cm, job_id):
     cm.pull_chunk(job_id, "replica-0")
 
     # Set retry_count to max_retries - 1 and expire the lease so one more reclaim hits the limit
-    cm._r.hset(_chunk_key(job_id, "c0000"), mapping={
-        "lease_until": time.time() - 1,
-        "retry_count": CHUNK_MAX_RETRIES - 1,
-    })
+    cm._r.hset(
+        _chunk_key(job_id, "c0000"),
+        mapping={
+            "lease_until": time.time() - 1,
+            "retry_count": CHUNK_MAX_RETRIES - 1,
+        },
+    )
 
     result = cm.reclaim_expired_chunks(job_id)
     assert result["failed"] == 1
@@ -240,6 +247,7 @@ def test_renew_lease_success(cm, job_id):
     assert result["lease_until"] > before
 
     from orca_server.chunk_manager import _chunk_key
+
     stored = float(cm._r.hget(_chunk_key(job_id, "c0000"), "lease_until"))
     assert abs(stored - result["lease_until"]) < 1.0
 
@@ -277,10 +285,13 @@ def test_all_done_with_failed_chunks(cm, job_id):
     cm.complete_chunk(job_id, "c0001", "replica-1")
 
     # Force c0002 to fail via max retries
-    cm._r.hset(_chunk_key(job_id, "c0002"), mapping={
-        "lease_until": time.time() - 1,
-        "retry_count": CHUNK_MAX_RETRIES - 1,
-    })
+    cm._r.hset(
+        _chunk_key(job_id, "c0002"),
+        mapping={
+            "lease_until": time.time() - 1,
+            "retry_count": CHUNK_MAX_RETRIES - 1,
+        },
+    )
     cm.reclaim_expired_chunks(job_id)
 
     progress = cm.get_progress(job_id)
@@ -299,10 +310,13 @@ def test_complete_promotes_from_failed(cm, job_id):
     cm.pull_chunk(job_id, "replica-0")
 
     # Force c0000 into failed set
-    cm._r.hset(_chunk_key(job_id, "c0000"), mapping={
-        "lease_until": time.time() - 1,
-        "retry_count": CHUNK_MAX_RETRIES - 1,
-    })
+    cm._r.hset(
+        _chunk_key(job_id, "c0000"),
+        mapping={
+            "lease_until": time.time() - 1,
+            "retry_count": CHUNK_MAX_RETRIES - 1,
+        },
+    )
     cm.reclaim_expired_chunks(job_id)
     assert "c0000" in cm.get_failed_chunk_ids(job_id)
 
@@ -317,14 +331,15 @@ def test_complete_promotes_from_failed(cm, job_id):
 # force_reclaim tests — immediate reclaim by replica ID (ignores lease expiry)
 # ---------------------------------------------------------------------------
 
+
 def test_force_reclaim_specific_replica(cm, job_id):
     """Force-reclaim only chunks owned by a specific replica; others untouched."""
     cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
 
     # r0 pulls c0000 and c0002, r1 pulls c0001
-    cm.pull_chunk(job_id, "replica-0")   # c0000
-    cm.pull_chunk(job_id, "replica-1")   # c0001
-    cm.pull_chunk(job_id, "replica-0")   # c0002
+    cm.pull_chunk(job_id, "replica-0")  # c0000
+    cm.pull_chunk(job_id, "replica-1")  # c0001
+    cm.pull_chunk(job_id, "replica-0")  # c0002
 
     progress = cm.get_progress(job_id)
     assert progress["inflight"] == 3
@@ -334,8 +349,8 @@ def test_force_reclaim_specific_replica(cm, job_id):
     assert result["failed"] == 0
 
     progress = cm.get_progress(job_id)
-    assert progress["inflight"] == 1   # only r1's c0001 still inflight
-    assert progress["pending"] == 2    # c0000 and c0002 back in pending
+    assert progress["inflight"] == 1  # only r1's c0001 still inflight
+    assert progress["pending"] == 2  # c0000 and c0002 back in pending
 
     # r1's chunk is untouched
     info = cm.get_chunk_info(job_id, "c0001")
@@ -428,14 +443,14 @@ def test_force_reclaim_multiple_replicas(cm, job_id):
     """Force-reclaim chunks from multiple replica IDs simultaneously."""
     cm.create_job_queue(job_id, SAMPLE_CHUNKS, "test-model", "s3://bucket/output")
 
-    cm.pull_chunk(job_id, "replica-0")   # c0000
-    cm.pull_chunk(job_id, "replica-1")   # c0001
-    cm.pull_chunk(job_id, "replica-2")   # c0002
+    cm.pull_chunk(job_id, "replica-0")  # c0000
+    cm.pull_chunk(job_id, "replica-1")  # c0001
+    cm.pull_chunk(job_id, "replica-2")  # c0002
 
     result = cm.force_reclaim(job_id, ["replica-0", "replica-1"])
     assert result["reclaimed"] == 2
     assert result["failed"] == 0
 
     progress = cm.get_progress(job_id)
-    assert progress["inflight"] == 1   # only r2's c0002 still inflight
-    assert progress["pending"] == 2    # c0000 and c0001 back in pending
+    assert progress["inflight"] == 1  # only r2's c0002 still inflight
+    assert progress["pending"] == 2  # c0000 and c0001 back in pending

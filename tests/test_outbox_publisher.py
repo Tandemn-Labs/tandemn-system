@@ -14,7 +14,6 @@ Invariants proven:
   - Prune is throttled: runs at most once per prune_interval.
 """
 
-import threading
 import time
 from types import SimpleNamespace
 
@@ -213,9 +212,7 @@ class TestBackgroundThreadLifecycle:
         def post(url, payload, timeout):
             return _FakeResponse(200)
 
-        pub = OutboxPublisher(
-            outbox, koi_base_url="http://koi.test", post_fn=post, poll_interval=0.02
-        )
+        pub = OutboxPublisher(outbox, koi_base_url="http://koi.test", post_fn=post, poll_interval=0.02)
         pub.start()
         time.sleep(0.05)
         pub.stop(timeout=1.0)
@@ -226,9 +223,7 @@ class TestBackgroundThreadLifecycle:
         def post(url, payload, timeout):
             return _FakeResponse(200)
 
-        pub = OutboxPublisher(
-            outbox, koi_base_url="http://koi.test", post_fn=post, poll_interval=0.05
-        )
+        pub = OutboxPublisher(outbox, koi_base_url="http://koi.test", post_fn=post, poll_interval=0.05)
         pub.start()
         t1 = pub._thread
         pub.start()

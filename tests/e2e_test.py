@@ -35,7 +35,7 @@ WORKLOAD = "examples/workloads/sharegpt-numreq_200-avginputlen_956-avgoutputlen_
 GPU = "L40S"
 TP = 1
 TIMEOUT_MIN = 25  # max wait for job to finish
-POLL_SEC = 5      # polling interval
+POLL_SEC = 5  # polling interval
 DB_PATH = "temp/metrics_db.sqlite"
 
 # ANSI
@@ -49,14 +49,15 @@ RST = "\033[0m"
 
 def api(method, path, **kwargs):
     import requests
+
     url = f"{BASE_URL}{path}"
     return getattr(requests, method)(url, timeout=15, **kwargs)
 
 
 def step(msg):
-    print(f"\n{BOLD}{'='*60}{RST}")
+    print(f"\n{BOLD}{'=' * 60}{RST}")
     print(f"  {BOLD}{msg}{RST}")
-    print(f"{BOLD}{'='*60}{RST}")
+    print(f"{BOLD}{'=' * 60}{RST}")
 
 
 def check(label, ok, detail=""):
@@ -79,15 +80,23 @@ def launch_job():
         assert r.status_code == 200
     except Exception as e:
         print(f"\n  {R}Server not reachable at {BASE_URL}: {e}{RST}")
-        print(f"  Start it: ORCA_API_KEY=test123 python server.py &")
+        print("  Start it: ORCA_API_KEY=test123 python server.py &")
         sys.exit(1)
     print(f"  Server OK at {BASE_URL}")
 
     # Deploy via CLI (captures job_id from output)
     print(f"  Deploying {MODEL} with {WORKLOAD}...")
     cmd = [
-        sys.executable, "orca", "deploy", MODEL, WORKLOAD,
-        "--gpu", GPU, "--tp", str(TP), "--force",
+        sys.executable,
+        "orca",
+        "deploy",
+        MODEL,
+        WORKLOAD,
+        "--gpu",
+        GPU,
+        "--tp",
+        str(TP),
+        "--force",
     ]
     env = {**os.environ, "ORCA_SERVER": BASE_URL, "PYTHONUNBUFFERED": "1"}
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)
@@ -99,6 +108,7 @@ def launch_job():
 
     # Extract job_id
     import re
+
     match = re.search(r"(mo-[a-f0-9-]+)", result.stdout)
     if not match:
         print(f"  {R}Could not find job_id in deploy output{RST}")
@@ -130,7 +140,7 @@ def monitor_job(job_id):
             r = api("get", f"/job/{job_id}")
             job = r.json()
         except Exception as e:
-            print(f"  [{i*POLL_SEC:>4}s] poll error: {e}")
+            print(f"  [{i * POLL_SEC:>4}s] poll error: {e}")
             continue
 
         status = job.get("status", "?")
@@ -160,7 +170,7 @@ def monitor_job(job_id):
 
         # Progress bar
         filled = int(progress * 30)
-        bar = "[" + "█" * filled + "░" * (30 - filled) + f"] {progress*100:.1f}%"
+        bar = "[" + "█" * filled + "░" * (30 - filled) + f"] {progress * 100:.1f}%"
         elapsed = (i + 1) * POLL_SEC
         print(f"  [{elapsed:>4}s] {bar}  {status}{metrics_line}")
 
@@ -191,86 +201,75 @@ def verify_results(job_id, metrics_seen, had_nonzero_progress, had_live_metrics)
     # 1. Job status
     r = api("get", f"/job/{job_id}")
     job = r.json()
-    results.append(check(
-        "Job completed successfully",
-        job["status"] == "succeeded",
-        f"status={job['status']}"
-    ))
+    results.append(check("Job completed successfully", job["status"] == "succeeded", f"status={job['status']}"))
 
     # 2. Live metrics streamed during generation
-    results.append(check(
-        "Live metrics received during generation",
-        had_live_metrics,
-        f"{metrics_seen} snapshots with tok/s > 0"
-    ))
+    results.append(
+        check("Live metrics received during generation", had_live_metrics, f"{metrics_seen} snapshots with tok/s > 0")
+    )
 
     # 3. Incremental progress (not stuck at 0%)
-    results.append(check(
-        "Incremental progress observed (not 0→100 jump)",
-        had_nonzero_progress,
-        "Progress updated between 0% and 100%"
-    ))
+    results.append(
+        check(
+            "Incremental progress observed (not 0→100 jump)",
+            had_nonzero_progress,
+            "Progress updated between 0% and 100%",
+        )
+    )
 
     # 4. Timeseries rows in DB
     ts_count = 0
     try:
         conn = sqlite3.connect(DB_PATH)
-        ts_count = conn.execute(
-            "SELECT count(*) FROM timeseries WHERE job_id=?", (job_id,)
-        ).fetchone()[0]
+        ts_count = conn.execute("SELECT count(*) FROM timeseries WHERE job_id=?", (job_id,)).fetchone()[0]
         conn.close()
     except Exception as e:
         print(f"         {DIM}DB error: {e}{RST}")
-    results.append(check(
-        "Timeseries rows accumulated in DB",
-        ts_count > 0,
-        f"{ts_count} rows"
-    ))
+    results.append(check("Timeseries rows accumulated in DB", ts_count > 0, f"{ts_count} rows"))
 
     # 5. Final summary row in DB
     run = None
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        run = conn.execute(
-            "SELECT * FROM runs WHERE job_id=?", (job_id,)
-        ).fetchone()
+        run = conn.execute("SELECT * FROM runs WHERE job_id=?", (job_id,)).fetchone()
         conn.close()
     except Exception:
         pass
 
-    results.append(check(
-        "Summary run row in DB",
-        run is not None,
-        f"run_id={run['id']}" if run else "no row found"
-    ))
+    results.append(check("Summary run row in DB", run is not None, f"run_id={run['id']}" if run else "no row found"))
 
     # 5b. Key fields populated in DB
     if run:
         key_fields = [
-            "total_tokens_per_sec", "ttft_ms_p50", "tpot_ms_p50", "e2e_ms_p50",
-            "num_preemptions", "model_name", "instance_type", "actual_region",
+            "total_tokens_per_sec",
+            "ttft_ms_p50",
+            "tpot_ms_p50",
+            "e2e_ms_p50",
+            "num_preemptions",
+            "model_name",
+            "instance_type",
+            "actual_region",
         ]
         populated = {f: run[f] for f in key_fields if run[f] is not None}
         missing = [f for f in key_fields if run[f] is None]
-        results.append(check(
-            "Key latency/throughput fields populated in DB",
-            len(missing) == 0,
-            f"populated={list(populated.keys())}" + (f" missing={missing}" if missing else "")
-        ))
+        results.append(
+            check(
+                "Key latency/throughput fields populated in DB",
+                len(missing) == 0,
+                f"populated={list(populated.keys())}" + (f" missing={missing}" if missing else ""),
+            )
+        )
 
         # Scheduler fields from timeseries-derived or metrics.csv
         sched_fields = ["running_avg", "kv_cache_util_pct_avg", "scheduler_samples"]
         sched_ok = {f: run[f] for f in sched_fields if run[f] is not None}
-        results.append(check(
-            "Scheduler/KV cache fields in DB",
-            len(sched_ok) > 0,
-            f"{list(sched_ok.keys())}"
-        ))
+        results.append(check("Scheduler/KV cache fields in DB", len(sched_ok) > 0, f"{list(sched_ok.keys())}"))
 
     # 6. Output files on disk
     import glob
-    output_dirs = glob.glob(f"outputs/**/success-*", recursive=True)
+
+    output_dirs = glob.glob("outputs/**/success-*", recursive=True)
     # Find the one matching this job
     job_dir = None
     for d in output_dirs:
@@ -284,19 +283,12 @@ def verify_results(job_id, metrics_seen, had_nonzero_progress, had_live_metrics)
     if job_dir:
         has_output = os.path.exists(os.path.join(job_dir, "output.jsonl"))
         has_metrics = os.path.exists(os.path.join(job_dir, "metrics.csv"))
-        results.append(check(
-            "output.jsonl exists",
-            has_output,
-            job_dir
-        ))
-        results.append(check(
-            "metrics.csv exists",
-            has_metrics,
-            job_dir
-        ))
+        results.append(check("output.jsonl exists", has_output, job_dir))
+        results.append(check("metrics.csv exists", has_metrics, job_dir))
 
         if has_metrics:
             import csv
+
             rows = {}
             with open(os.path.join(job_dir, "metrics.csv")) as f:
                 for row in csv.reader(f):
@@ -304,30 +296,42 @@ def verify_results(job_id, metrics_seen, had_nonzero_progress, had_live_metrics)
                         rows[row[0]] = row[1]
 
             canon_sample = [
-                "ttft_ms_p50", "tpot_client_ms_p50", "tpot_ms_p50",
-                "e2e_ms_p50", "avg_sm_util_pct", "running_avg",
-                "kv_cache_util_pct_avg", "scheduler_samples",
-                "params_billion", "model_architecture",
-                "gpu_bandwidth_gbps", "bandwidth_per_param",
-                "cost_for_run_usd", "tokens_per_dollar",
+                "ttft_ms_p50",
+                "tpot_client_ms_p50",
+                "tpot_ms_p50",
+                "e2e_ms_p50",
+                "avg_sm_util_pct",
+                "running_avg",
+                "kv_cache_util_pct_avg",
+                "scheduler_samples",
+                "params_billion",
+                "model_architecture",
+                "gpu_bandwidth_gbps",
+                "bandwidth_per_param",
+                "cost_for_run_usd",
+                "tokens_per_dollar",
             ]
             present = [f for f in canon_sample if rows.get(f) and rows[f] not in ("", "None")]
             absent = [f for f in canon_sample if f not in present]
-            results.append(check(
-                f"Canonical fields in metrics.csv ({len(present)}/{len(canon_sample)})",
-                len(present) >= 10,  # some need real GPU/Prometheus
-                f"present={present}" + (f"\n         absent={absent}" if absent else "")
-            ))
+            results.append(
+                check(
+                    f"Canonical fields in metrics.csv ({len(present)}/{len(canon_sample)})",
+                    len(present) >= 10,  # some need real GPU/Prometheus
+                    f"present={present}" + (f"\n         absent={absent}" if absent else ""),
+                )
+            )
 
         if has_output:
             with open(os.path.join(job_dir, "output.jsonl")) as f:
                 lines = f.readlines()
             first = json.loads(lines[0])
-            results.append(check(
-                f"output.jsonl has {len(lines)} results",
-                len(lines) >= 100,
-                f"first: custom_id={first.get('custom_id')} status={first['response']['status_code']}"
-            ))
+            results.append(
+                check(
+                    f"output.jsonl has {len(lines)} results",
+                    len(lines) >= 100,
+                    f"first: custom_id={first.get('custom_id')} status={first['response']['status_code']}",
+                )
+            )
     else:
         results.append(check("Output directory found", False, "no success-* dir with this job_id"))
 
@@ -357,7 +361,7 @@ def main():
 
     if passed < total:
         print(f"  {Y}Note: avg_sm_util_pct and some Prometheus fields require")
-        print(f"  real GPU hardware + vLLM histogram data. These are expected")
+        print("  real GPU hardware + vLLM histogram data. These are expected")
         print(f"  to be None in stub/local environments.{RST}\n")
 
     sys.exit(0 if passed >= total - 2 else 1)  # allow 2 soft failures

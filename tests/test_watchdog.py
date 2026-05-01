@@ -12,7 +12,6 @@ import redis as _redis
 
 from orca_server.watchdog import ReplicaWatchdog
 
-
 # ---------------------------------------------------------------------------
 # Minimal stubs that replicate the structures the watchdog reads
 # ---------------------------------------------------------------------------
@@ -107,9 +106,7 @@ def chunk_mgr():
         "inflight": 5,
         "all_done": False,
     }
-    mock.get_replica_inflight_count.return_value = (
-        3  # default: has inflight work → not graceful
-    )
+    mock.get_replica_inflight_count.return_value = 3  # default: has inflight work → not graceful
     return mock
 
 
@@ -142,14 +139,10 @@ class TestDeadDetection:
 
         watchdog._check_all_jobs()
 
-        cm_cluster.set_replica_state.assert_called_with(
-            job_id, "job-1-r0", phase="dead"
-        )
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
         chunk_mgr.force_reclaim.assert_called_once_with(job_id, ["job-1-r0"])
 
-    def test_dead_replica_notifies_koi_with_watchdog_payload(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_dead_replica_notifies_koi_with_watchdog_payload(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Watchdog death path should emit the real /job/replica-failed payload."""
         import orca_server.config as cfg
 
@@ -200,9 +193,7 @@ class TestDeadDetection:
 
 
 class TestNoSelfRecovery:
-    def test_dead_replica_no_recovery_attempted(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_dead_replica_no_recovery_attempted(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Dead replica: force-reclaim and webhook fire, but NO recovery launched.
         Recovery is Koi's responsibility via scale_chain_tool."""
         job_id = "job-1"
@@ -217,18 +208,14 @@ class TestNoSelfRecovery:
         # Force-reclaim happened
         chunk_mgr.force_reclaim.assert_called_once()
         # Phase set to dead
-        cm_cluster.set_replica_state.assert_called_with(
-            job_id, "job-1-r0", phase="dead"
-        )
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
         # No recovery attributes exist on watchdog
         assert not hasattr(watchdog, "_recover_callback")
         assert not hasattr(watchdog, "_last_recovery")
 
 
 class TestAllReplicasDie:
-    def test_all_replicas_die_simultaneously(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_all_replicas_die_simultaneously(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """3 replicas all stale → all 3 detected dead, force_reclaim called for each."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running")
@@ -245,16 +232,12 @@ class TestAllReplicasDie:
         watchdog._check_all_jobs()
 
         assert chunk_mgr.force_reclaim.call_count == 3
-        reclaimed_replicas = {
-            call.args[1][0] for call in chunk_mgr.force_reclaim.call_args_list
-        }
+        reclaimed_replicas = {call.args[1][0] for call in chunk_mgr.force_reclaim.call_args_list}
         assert reclaimed_replicas == {"job-1-r0", "job-1-r1", "job-1-r2"}
 
 
 class TestIdempotency:
-    def test_dead_replica_not_reprocessed(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_dead_replica_not_reprocessed(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """_handle_dead_replica called twice for same ID → force_reclaim only once."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running")
@@ -275,18 +258,14 @@ class TestIdempotency:
 
 
 class TestIsChunkedGuard:
-    def test_non_chunked_job_still_monitored(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_non_chunked_job_still_monitored(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """is_chunked guard was removed — watchdog monitors ALL jobs (all jobs are chunked now)."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running", is_chunked=False)
         cm_cluster.get_replica_states.return_value = {
             "job-1-r0": {"phase": "running"},
         }
-        mc.add_replica(
-            f"{job_id}:job-1-r0", [time.time() - 120]
-        )  # stale, should be dead
+        mc.add_replica(f"{job_id}:job-1-r0", [time.time() - 120])  # stale, should be dead
 
         watchdog._check_all_jobs()
 
@@ -305,16 +284,12 @@ class TestIsChunkedGuard:
 
         watchdog._check_all_jobs()
 
-        cm_cluster.set_replica_state.assert_called_with(
-            job_id, "job-1-r0", phase="dead"
-        )
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
         chunk_mgr.force_reclaim.assert_called_once()
 
 
 class TestLaunchingGuard:
-    def test_launching_replica_not_flagged(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_launching_replica_not_flagged(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Replica with phase='launching' and no heartbeat → NOT marked dead."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running")
@@ -328,9 +303,7 @@ class TestLaunchingGuard:
         cm_cluster.set_replica_state.assert_not_called()
         chunk_mgr.force_reclaim.assert_not_called()
 
-    def test_running_no_heartbeat_flagged(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_running_no_heartbeat_flagged(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Replica phase='running' with running_since set but no heartbeat → marked dead."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running")
@@ -341,9 +314,7 @@ class TestLaunchingGuard:
 
         watchdog._check_all_jobs()
 
-        cm_cluster.set_replica_state.assert_called_with(
-            job_id, "job-1-r0", phase="dead"
-        )
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
         chunk_mgr.force_reclaim.assert_called_once()
 
 
@@ -385,9 +356,7 @@ class TestAssemblyTrigger:
 
 
 class TestGracefulCompletionPerReplica:
-    def test_replica_with_zero_inflight_is_graceful(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_replica_with_zero_inflight_is_graceful(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Replica owns 0 inflight chunks → graceful completion, not dead."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running")
@@ -400,14 +369,10 @@ class TestGracefulCompletionPerReplica:
         watchdog._check_all_jobs()
 
         # Graceful: phase=completed, NOT dead
-        cm_cluster.set_replica_state.assert_called_with(
-            job_id, "job-1-r0", phase="completed"
-        )
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="completed")
         chunk_mgr.force_reclaim.assert_not_called()
 
-    def test_replica_with_inflight_is_dead(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_replica_with_inflight_is_dead(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Replica owns 3 inflight chunks → dead, not graceful."""
         job_id = "job-1"
         jt.jobs[job_id] = FakeJobRecord(status="running")
@@ -419,14 +384,10 @@ class TestGracefulCompletionPerReplica:
 
         watchdog._check_all_jobs()
 
-        cm_cluster.set_replica_state.assert_called_with(
-            job_id, "job-1-r0", phase="dead"
-        )
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
         chunk_mgr.force_reclaim.assert_called_once()
 
-    def test_job_all_done_but_replica_has_inflight_is_dead(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_job_all_done_but_replica_has_inflight_is_dead(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Critical race: job all_done=True (other replicas finished) but THIS
         replica still has 3 inflight chunks → DEAD, not graceful. Chunks must
         be force-reclaimed."""
@@ -450,16 +411,12 @@ class TestGracefulCompletionPerReplica:
         watchdog._check_all_jobs()
 
         # Dead, not graceful — force_reclaim must be called
-        cm_cluster.set_replica_state.assert_called_with(
-            job_id, "job-1-r0", phase="dead"
-        )
+        cm_cluster.set_replica_state.assert_called_with(job_id, "job-1-r0", phase="dead")
         chunk_mgr.force_reclaim.assert_called_once()
 
 
 class TestProvisionedPhase:
-    def test_provisioned_replica_not_flagged_dead(
-        self, watchdog, mc, cm_cluster, jt, chunk_mgr
-    ):
+    def test_provisioned_replica_not_flagged_dead(self, watchdog, mc, cm_cluster, jt, chunk_mgr):
         """Replica in 'provisioned' phase (vLLM loading) → watchdog skips it.
         Previously monitor_replica set phase='running' immediately, causing
         false dead detection during model load."""

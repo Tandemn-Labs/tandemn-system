@@ -10,7 +10,6 @@ Uses the roofline model to estimate throughput based on:
 Ported from: ../LLM_placement_solver/solver.py
 """
 
-from typing import Optional
 from dataclasses import dataclass
 
 from .gpu_specs import get_gpu_specs, get_ridge_point
@@ -77,8 +76,8 @@ class ThroughputCalculator:
         bytes_per_element: int,
         tp_degree: int = 1,
         phase: str = "prefill",
-        num_attention_heads: Optional[int] = None,
-        num_kv_heads: Optional[int] = None,
+        num_attention_heads: int | None = None,
+        num_kv_heads: int | None = None,
     ) -> float:
         """
         Calculate arithmetic intensity (FLOPs / Byte) using roofline model.
@@ -118,9 +117,7 @@ class ThroughputCalculator:
             flops_v = 2 * batch_size * seq_len * d_model * (kv_dim / tp_degree)
             flops_o = 2 * batch_size * seq_len * d_model * (d_model / tp_degree)
             flops_attn_proj = flops_q + flops_k + flops_v + flops_o
-            flops_attn_scores = (
-                4 * batch_size * seq_len * seq_len * (d_model / tp_degree)
-            )  # O(n²)
+            flops_attn_scores = 4 * batch_size * seq_len * seq_len * (d_model / tp_degree)  # O(n²)
             flops_attention = flops_attn_proj + flops_attn_scores
 
             # FFN for all tokens
@@ -142,9 +139,7 @@ class ThroughputCalculator:
             flops_v = 2 * batch_size * 1 * d_model * (kv_dim / tp_degree)
             flops_o = 2 * batch_size * 1 * d_model * (d_model / tp_degree)
             flops_attn_proj = flops_q + flops_k + flops_v + flops_o
-            flops_attn_scores = (
-                4 * batch_size * 1 * kv_cache_len * (d_model / tp_degree)
-            )  # O(n)
+            flops_attn_scores = 4 * batch_size * 1 * kv_cache_len * (d_model / tp_degree)  # O(n)
             flops_attention = flops_attn_proj + flops_attn_scores
 
             # FFN for 1 token
@@ -176,27 +171,17 @@ class ThroughputCalculator:
 
         if phase == "prefill":
             # KV cache being written
-            bytes_kv_cache_per_layer = (
-                2 * batch_size * seq_len * kv_dim * bytes_per_element / tp_degree
-            )
+            bytes_kv_cache_per_layer = 2 * batch_size * seq_len * kv_dim * bytes_per_element / tp_degree
             # Activations for all tokens
-            bytes_activations_per_layer = (
-                batch_size * seq_len * d_model * bytes_per_element
-            )
+            bytes_activations_per_layer = batch_size * seq_len * d_model * bytes_per_element
         else:  # decode
             # KV cache being READ (full cached context!)
             kv_cache_len = seq_len
-            bytes_kv_cache_per_layer = (
-                2 * batch_size * kv_cache_len * kv_dim * bytes_per_element / tp_degree
-            )
+            bytes_kv_cache_per_layer = 2 * batch_size * kv_cache_len * kv_dim * bytes_per_element / tp_degree
             # Activations for 1 token only
             bytes_activations_per_layer = batch_size * 1 * d_model * bytes_per_element
 
-        bytes_per_layer = (
-            bytes_weights_per_layer
-            + bytes_kv_cache_per_layer
-            + bytes_activations_per_layer
-        )
+        bytes_per_layer = bytes_weights_per_layer + bytes_kv_cache_per_layer + bytes_activations_per_layer
         total_bytes = bytes_per_layer * num_layers
 
         # Arithmetic Intensity = FLOPs / Bytes
@@ -233,8 +218,8 @@ class ThroughputCalculator:
         nvlink_bw_gbps: float = 300.0,
         phase: str = "prefill",
         output_length: int = 0,
-        num_attention_heads: Optional[int] = None,
-        num_kv_heads: Optional[int] = None,
+        num_attention_heads: int | None = None,
+        num_kv_heads: int | None = None,
         interference_factor: float = 0.80,
     ) -> ThroughputResult:
         """
@@ -310,11 +295,7 @@ class ThroughputCalculator:
             return ThroughputResult(
                 throughput_tokens_per_sec=aggregated_tps,
                 regime="AGGREGATED",
-                arithmetic_intensity=(
-                    prefill_result.arithmetic_intensity
-                    + decode_result.arithmetic_intensity
-                )
-                / 2,
+                arithmetic_intensity=(prefill_result.arithmetic_intensity + decode_result.arithmetic_intensity) / 2,
                 ridge_point=prefill_result.ridge_point,
                 bottleneck=f"Prefill: {prefill_result.bottleneck}, Decode: {decode_result.bottleneck}",
             )
@@ -355,9 +336,7 @@ class ThroughputCalculator:
             flops_v = 2 * batch_size * seq_len * d_model * (kv_dim / tp_degree)
             flops_o = 2 * batch_size * seq_len * d_model * (d_model / tp_degree)
             attn_proj_flops = flops_q + flops_k + flops_v + flops_o
-            attn_score_flops = (
-                4 * batch_size * seq_len * seq_len * (d_model / tp_degree)
-            )
+            attn_score_flops = 4 * batch_size * seq_len * seq_len * (d_model / tp_degree)
 
             ffn_flops = (
                 2
@@ -381,9 +360,7 @@ class ThroughputCalculator:
             flops_v = 2 * batch_size * 1 * d_model * (kv_dim / tp_degree)
             flops_o = 2 * batch_size * 1 * d_model * (d_model / tp_degree)
             attn_proj_flops = flops_q + flops_k + flops_v + flops_o
-            attn_score_flops = (
-                4 * batch_size * 1 * avg_kv_cache_len * (d_model / tp_degree)
-            )
+            attn_score_flops = 4 * batch_size * 1 * avg_kv_cache_len * (d_model / tp_degree)
 
             ffn_flops = (
                 2
@@ -411,44 +388,24 @@ class ThroughputCalculator:
         )
 
         if phase == "prefill":
-            activation_bytes = (
-                num_layers * batch_size * seq_len * d_model * bytes_per_element
-            )
-            kv_cache_bytes = (
-                num_layers
-                * 2
-                * batch_size
-                * seq_len
-                * (kv_dim / tp_degree)
-                * bytes_per_element
-            )
+            activation_bytes = num_layers * batch_size * seq_len * d_model * bytes_per_element
+            kv_cache_bytes = num_layers * 2 * batch_size * seq_len * (kv_dim / tp_degree) * bytes_per_element
         else:
             activation_bytes = num_layers * batch_size * 1 * d_model * bytes_per_element
             if output_length > 0:
                 avg_kv_cache_len = seq_len + (output_length - 1) / 2.0
             else:
                 avg_kv_cache_len = seq_len
-            kv_cache_bytes = (
-                num_layers
-                * 2
-                * batch_size
-                * avg_kv_cache_len
-                * (kv_dim / tp_degree)
-                * bytes_per_element
-            )
+            kv_cache_bytes = num_layers * 2 * batch_size * avg_kv_cache_len * (kv_dim / tp_degree) * bytes_per_element
 
         total_bytes_per_gpu = weight_bytes + activation_bytes + kv_cache_bytes
 
         # === Calculate BASE time ===
         if regime == "COMPUTE_BOUND":
-            base_time_per_batch = total_flops_per_gpu / (
-                specs["tflops"] * 1e12 * specs["efficiency"]
-            )
+            base_time_per_batch = total_flops_per_gpu / (specs["tflops"] * 1e12 * specs["efficiency"])
             bottleneck = "GPU Compute (TFLOPS)"
         else:
-            base_time_per_batch = total_bytes_per_gpu / (
-                specs["mem_bw"] * 1e9 * specs["efficiency"]
-            )
+            base_time_per_batch = total_bytes_per_gpu / (specs["mem_bw"] * 1e9 * specs["efficiency"])
             bottleneck = "Memory Bandwidth (GB/s)"
 
         # === TP Communication Overhead ===
@@ -457,22 +414,14 @@ class ThroughputCalculator:
         else:
             activation_size_bytes = batch_size * 1 * d_model * bytes_per_element
 
-        comm_time_per_layer = (
-            2
-            * activation_size_bytes
-            / (nvlink_bw_gbps * 1e9)
-            * (tp_degree - 1)
-            / tp_degree
-        )
+        comm_time_per_layer = 2 * activation_size_bytes / (nvlink_bw_gbps * 1e9) * (tp_degree - 1) / tp_degree
         total_comm_time = num_layers * comm_time_per_layer
 
         # TP Efficiency Factor
         if tp_degree == 1:
             tp_efficiency = 1.0
         else:
-            additional_overhead = {1: 0.00, 2: 0.05, 4: 0.10, 8: 0.15, 16: 0.20}.get(
-                tp_degree, 0.25
-            )
+            additional_overhead = {1: 0.00, 2: 0.05, 4: 0.10, 8: 0.15, 16: 0.20}.get(tp_degree, 0.25)
             tp_efficiency = max(0.30, 1.0 - additional_overhead)
 
         # Apply TP efficiency

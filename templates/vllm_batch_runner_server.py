@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any
 
 import aiohttp
 import requests
@@ -46,6 +46,7 @@ WARMUP_REQUESTS = 0  # disabled — batch jobs maximize utilization, no spare re
 # Progress
 # ---------------------------------------------------------------------------
 
+
 def write_progress(done: int, total: int, status: str = "running"):
     try:
         with open(PROGRESS_FILE, "w") as f:
@@ -65,8 +66,7 @@ def _report_phase(phase: str):
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        requests.post(f"{url}/job/{job_id}/phase",
-                      json={"phase": phase}, headers=headers, timeout=5)
+        requests.post(f"{url}/job/{job_id}/phase", json={"phase": phase}, headers=headers, timeout=5)
     except Exception:
         pass
 
@@ -106,12 +106,12 @@ def sum_metric(text: str, metric_name: str) -> float:
 
 _METRIC_ALIASES = {
     "vllm:generation_tokens_total": "vllm:generation_tokens",
-    "vllm:prompt_tokens_total":     "vllm:prompt_tokens",
-    "vllm:request_success_total":   "vllm:request_success",
-    "vllm:num_preemptions_total":   "vllm:num_preemptions",
-    "vllm:gpu_cache_usage_perc":    "vllm:kv_cache_usage_perc",
+    "vllm:prompt_tokens_total": "vllm:prompt_tokens",
+    "vllm:request_success_total": "vllm:request_success",
+    "vllm:num_preemptions_total": "vllm:num_preemptions",
+    "vllm:gpu_cache_usage_perc": "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries_total": "vllm:prefix_cache_queries",
-    "vllm:prefix_cache_hits_total":    "vllm:prefix_cache_hits",
+    "vllm:prefix_cache_hits_total": "vllm:prefix_cache_hits",
 }
 
 
@@ -126,6 +126,7 @@ def sum_metric_compat(text: str, name: str) -> float:
 class LiveTokenCounter:
     """Cumulative token counter — incremented per-SSE-token by async send_one(),
     read by sidecar thread. GIL-safe: single writer (event loop), single reader (sidecar)."""
+
     __slots__ = ("_gen", "_prompt")
 
     def __init__(self):
@@ -165,7 +166,7 @@ def _parse_histogram_buckets(text: str, metric_name: str) -> list:
     return sorted(buckets.items())
 
 
-def histogram_quantile_from_buckets(buckets: list, quantile: float) -> Optional[float]:
+def histogram_quantile_from_buckets(buckets: list, quantile: float) -> float | None:
     """Compute quantile from [(le, count), ...] pairs. Returns seconds or None."""
     if not buckets or buckets[-1][1] == 0:
         return None
@@ -186,14 +187,14 @@ def histogram_quantile_from_buckets(buckets: list, quantile: float) -> Optional[
     return prev_le
 
 
-def histogram_quantile(text: str, metric_name: str, quantile: float) -> Optional[float]:
+def histogram_quantile(text: str, metric_name: str, quantile: float) -> float | None:
     """Compute a quantile from a Prometheus histogram. Returns ms or None if no data."""
     buckets = _parse_histogram_buckets(text, metric_name)
     val = histogram_quantile_from_buckets(buckets, quantile)
     return val * 1000.0 if val is not None else None
 
 
-def _percentile(lst: list, p: int) -> Optional[float]:
+def _percentile(lst: list, p: int) -> float | None:
     """Compute percentile p (0-100) of a list of floats. Returns None if empty."""
     if not lst:
         return None
@@ -210,6 +211,7 @@ def _percentile(lst: list, p: int) -> Optional[float]:
 # Prometheus delta helpers — warmup subtraction (matches profiling repo)
 # ---------------------------------------------------------------------------
 
+
 def _scrape_prom() -> str:
     """Scrape the local vLLM /metrics endpoint. Returns raw text or empty string."""
     try:
@@ -218,7 +220,7 @@ def _scrape_prom() -> str:
         return ""
 
 
-def _parse_prom_counters(text: str) -> Dict[str, float]:
+def _parse_prom_counters(text: str) -> dict[str, float]:
     """Extract all counter/gauge values from Prometheus text."""
     counters = {}
     for line in text.splitlines():
@@ -254,13 +256,14 @@ def _delta_counter(pre_text: str, post_text: str, metric_name: str) -> float:
 # GPU hardware monitor (pynvml) — matches profiling GPUMonitorActor
 # ---------------------------------------------------------------------------
 
+
 class GPUMonitor:
     """Sample GPU SM%, memory bandwidth%, memory usage via pynvml every 0.5s."""
 
     def __init__(self, sample_interval: float = 0.5):
         self._interval = sample_interval
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._timeseries: list = []
         self._pynvml = None
         self._device_count = 0
@@ -268,6 +271,7 @@ class GPUMonitor:
 
         try:
             import pynvml
+
             pynvml.nvmlInit()
             self._pynvml = pynvml
             self._device_count = pynvml.nvmlDeviceGetCount()
@@ -300,7 +304,7 @@ class GPUMonitor:
                     util = pynvml.nvmlDeviceGetUtilizationRates(handle)
                     sample[f"gpu{i}_sm_pct"] = util.gpu
                     sample[f"gpu{i}_membw_pct"] = util.memory
-                    sample[f"gpu{i}_mem_gb"] = round(mem.used / (1024 ** 3), 2)
+                    sample[f"gpu{i}_mem_gb"] = round(mem.used / (1024**3), 2)
                     sample[f"gpu{i}_mem_pct"] = round((mem.used / mem.total) * 100, 1) if mem.total else 0
                 except Exception:
                     pass
@@ -340,13 +344,14 @@ class GPUMonitor:
 # Scheduler / Prometheus metrics poller — local timeseries (matches profiling)
 # ---------------------------------------------------------------------------
 
+
 class MetricsPoller:
     """Poll /metrics every 0.5s for scheduler state + KV cache utilization."""
 
     def __init__(self, interval: float = 0.5):
         self._interval = interval
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._timeseries: list = []
         self._start_time = 0.0
 
@@ -402,7 +407,15 @@ class MetricsPoller:
 # Sidecar — push to control plane (bonus, works when reachable)
 # ---------------------------------------------------------------------------
 
-def _sidecar_loop(stop_event: threading.Event, orca_url: str, orca_key: str, job_id: str, live_counter: Optional[LiveTokenCounter] = None, gpu_monitor_ref: list | None = None):
+
+def _sidecar_loop(
+    stop_event: threading.Event,
+    orca_url: str,
+    orca_key: str,
+    job_id: str,
+    live_counter: LiveTokenCounter | None = None,
+    gpu_monitor_ref: list | None = None,
+):
     """gpu_monitor_ref is a mutable [GPUMonitor | None] list so the monitor can be set after thread start."""
     if not orca_url:
         return
@@ -467,7 +480,8 @@ def _sidecar_loop(stop_event: threading.Event, orca_url: str, orca_key: str, job
 # CSV / JSONL helpers
 # ---------------------------------------------------------------------------
 
-def write_metrics_csv(output_path: str, metrics: Dict[str, Any]):
+
+def write_metrics_csv(output_path: str, metrics: dict[str, Any]):
     output_dir = os.path.dirname(output_path)
     metrics_file = os.path.join(output_dir, "metrics.csv") if output_dir else "metrics.csv"
     try:
@@ -485,7 +499,7 @@ def write_metrics_csv(output_path: str, metrics: Dict[str, Any]):
         print(f"[Runner] Warning: Failed to write metrics: {e}")
 
 
-def calculate_percentiles(values: List[int]) -> Dict[str, float]:
+def calculate_percentiles(values: list[int]) -> dict[str, float]:
     if not values:
         return {"p50": 0, "p90": 0, "p99": 0}
     sorted_vals = sorted(values)
@@ -501,9 +515,9 @@ def calculate_percentiles(values: List[int]) -> Dict[str, float]:
     return {"p50": percentile(50), "p90": percentile(90), "p99": percentile(99)}
 
 
-def load_requests(input_file: str) -> List[Dict[str, Any]]:
+def load_requests(input_file: str) -> list[dict[str, Any]]:
     reqs = []
-    with open(input_file, "r") as f:
+    with open(input_file) as f:
         for line_num, line in enumerate(f, 1):
             if line.strip():
                 try:
@@ -517,18 +531,30 @@ def load_requests(input_file: str) -> List[Dict[str, Any]]:
 # vLLM server lifecycle
 # ---------------------------------------------------------------------------
 
+
 def start_vllm_server(args) -> subprocess.Popen:
     cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-        "--model", args.model,
-        "--host", "0.0.0.0",
-        "--port", str(SERVER_PORT),
-        "--tensor-parallel-size", str(args.tensor_parallel_size),
-        "--pipeline-parallel-size", str(args.pipeline_parallel_size),
-        "--gpu-memory-utilization", str(args.gpu_memory_utilization),
-        "--max-num-seqs", str(args.max_num_seqs),
-        "--dtype", args.dtype,
-        "--kv-cache-dtype", args.kv_cache_dtype,
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        args.model,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(SERVER_PORT),
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
+        "--pipeline-parallel-size",
+        str(args.pipeline_parallel_size),
+        "--gpu-memory-utilization",
+        str(args.gpu_memory_utilization),
+        "--max-num-seqs",
+        str(args.max_num_seqs),
+        "--dtype",
+        args.dtype,
+        "--kv-cache-dtype",
+        args.kv_cache_dtype,
         "--disable-log-requests",
         "--trust-remote-code",
     ]
@@ -567,12 +593,13 @@ def shutdown_server(proc: subprocess.Popen, timeout: int = 60):
 # Async benchmark client — per-request TTFT / E2E / client-side TPOT via SSE
 # ---------------------------------------------------------------------------
 
+
 async def send_one(
     session: aiohttp.ClientSession,
     semaphore: asyncio.Semaphore,
     req_dict: dict,
     model_name: str,
-    live_counter: Optional[LiveTokenCounter] = None,
+    live_counter: LiveTokenCounter | None = None,
 ) -> dict:
     body = req_dict.get("body", {})
     payload = {
@@ -660,7 +687,9 @@ async def send_one(
     }
 
 
-async def run_benchmark(requests_list: List[Dict], model_name: str, live_counter: Optional[LiveTokenCounter] = None) -> List[Dict]:
+async def run_benchmark(
+    requests_list: list[dict], model_name: str, live_counter: LiveTokenCounter | None = None
+) -> list[dict]:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT)
     total = len(requests_list)
@@ -681,7 +710,7 @@ async def run_benchmark(requests_list: List[Dict], model_name: str, live_counter
     return results
 
 
-async def run_warmup(requests_list: List[Dict], model_name: str, n: int = 5):
+async def run_warmup(requests_list: list[dict], model_name: str, n: int = 5):
     """Send a few warmup requests so Prometheus histograms don't include cold-start latency."""
     if not requests_list or n <= 0:
         return
@@ -697,7 +726,8 @@ async def run_warmup(requests_list: List[Dict], model_name: str, n: int = 5):
 # Output JSONL writer
 # ---------------------------------------------------------------------------
 
-def write_output_jsonl(results: List[Dict], output_path: str, model_name: str):
+
+def write_output_jsonl(results: list[dict], output_path: str, model_name: str):
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -716,14 +746,16 @@ def write_output_jsonl(results: List[Dict], output_path: str, model_name: str):
                             "object": "chat.completion",
                             "created": int(time.time()),
                             "model": model_name,
-                            "choices": [{
-                                "index": 0,
-                                "message": {
-                                    "role": "assistant",
-                                    "content": r.get("content", ""),
-                                },
-                                "finish_reason": r.get("finish_reason", "stop"),
-                            }],
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": r.get("content", ""),
+                                    },
+                                    "finish_reason": r.get("finish_reason", "stop"),
+                                }
+                            ],
                             "usage": {
                                 "prompt_tokens": r.get("prompt_tokens", 0),
                                 "completion_tokens": r.get("output_tokens", 0),
@@ -754,8 +786,9 @@ def write_output_jsonl(results: List[Dict], output_path: str, model_name: str):
 # Metrics builder — profiling-equivalent CSV
 # ---------------------------------------------------------------------------
 
+
 def build_metrics(
-    results: List[Dict],
+    results: list[dict],
     pre_prom_text: str,
     post_prom_text: str,
     args,
@@ -766,7 +799,7 @@ def build_metrics(
     gpu_summary: dict,
     scheduler_summary: dict,
     model_info: dict | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     job_end_time = time.time()
     total_runtime = job_end_time - job_start_time
 
@@ -838,12 +871,10 @@ def build_metrics(
         # === TIMESTAMPS ===
         "job_start_timestamp": job_start_timestamp,
         "job_end_timestamp": datetime.now().isoformat(),
-
         # === RUNTIME ===
         "total_runtime_sec": total_runtime,
         "model_load_time_sec": model_load_sec,
         "generation_time_sec": generation_time,
-
         # === WORKLOAD ===
         "num_requests_total": len(results),
         "num_requests_completed": len(successes),
@@ -863,13 +894,11 @@ def build_metrics(
         "min_output_tokens": min(output_counts) if output_counts else 0,
         "max_output_tokens": max(output_counts) if output_counts else 0,
         "total_tokens": total_tokens,
-
         # === THROUGHPUT (server-side ground truth) ===
         "throughput_requests_per_sec": req_per_sec,
         "throughput_tokens_per_sec": tok_per_sec,
         "throughput_output_tokens_per_sec": out_tok_per_sec,
         "throughput_input_tokens_per_sec": in_tok_per_sec,
-
         # === CLIENT-SIDE LATENCY (ms) ===
         "ttft_ms_p50": _percentile(ttfts_ms, 50),
         "ttft_ms_p95": _percentile(ttfts_ms, 95),
@@ -880,7 +909,6 @@ def build_metrics(
         "tpot_client_ms_p50": _percentile(tpots_client_ms, 50),
         "tpot_client_ms_p95": _percentile(tpots_client_ms, 95),
         "tpot_client_ms_p99": _percentile(tpots_client_ms, 99),
-
         # === SERVER-SIDE LATENCY FROM PROMETHEUS HISTOGRAM DELTAS (ms) ===
         "tpot_ms_p50": _hq(delta_tpot, 0.50),
         "tpot_ms_p95": _hq(delta_tpot, 0.95),
@@ -891,7 +919,6 @@ def build_metrics(
         "e2e_server_ms_p50": _hq(delta_e2e, 0.50),
         "e2e_server_ms_p95": _hq(delta_e2e, 0.95),
         "e2e_server_ms_p99": _hq(delta_e2e, 0.99),
-
         # === PER-PHASE LATENCY (V1 histograms, warmup-subtracted, ms) ===
         "queue_time_ms_p50": _hq(delta_queue, 0.50),
         "queue_time_ms_p95": _hq(delta_queue, 0.95),
@@ -906,10 +933,8 @@ def build_metrics(
         "inference_time_ms_p95": _hq(delta_inference, 0.95),
         "inference_time_ms_p99": _hq(delta_inference, 0.99),
         "prefix_cache_hit_rate": prefix_cache_hit_rate,
-
         # === PREEMPTIONS ===
         "num_preemptions": num_preemptions,
-
         # === GPU HARDWARE UTILIZATION (pynvml) ===
         "avg_sm_util_pct": gpu_summary.get("avg_sm_util_pct"),
         "max_sm_util_pct": gpu_summary.get("max_sm_util_pct"),
@@ -918,7 +943,6 @@ def build_metrics(
         "avg_mem_util_pct": gpu_summary.get("avg_mem_util_pct"),
         "max_mem_util_pct": gpu_summary.get("max_mem_util_pct"),
         "gpu_samples": gpu_summary.get("gpu_samples", 0),
-
         # === SCHEDULER TIMESERIES (from local MetricsPoller) ===
         "running_avg": scheduler_summary.get("running_avg"),
         "running_max": scheduler_summary.get("running_max"),
@@ -927,21 +951,17 @@ def build_metrics(
         "kv_cache_util_pct_avg": scheduler_summary.get("kv_cache_util_pct_avg"),
         "kv_cache_util_pct_max": scheduler_summary.get("kv_cache_util_pct_max"),
         "scheduler_samples": scheduler_summary.get("scheduler_samples", 0),
-
         # === COST EFFICIENCY ===
         "price_per_hour": price_per_hour,
         "cost_for_run_usd": cost_for_run,
         "tokens_per_dollar": tokens_per_dollar,
-
         # === MODEL CONFIG ===
         "model_name": args.model,
         "quantization": args.quantization,
-
         # === INFRASTRUCTURE ===
         "cloud_provider": args.cloud,
         "instance_type": args.instance_type,
         "gpu_name": args.gpu_name,
-
         # === ENGINE CONFIG ===
         "engine": args.engine,
         "tensor_parallel_size": args.tensor_parallel_size,
@@ -955,8 +975,7 @@ def build_metrics(
 
     # === MODEL METADATA (from HuggingFace AutoConfig) ===
     if model_info:
-        for k in ("model_architecture", "params_billion", "is_moe",
-                   "num_experts_active", "vocab_size"):
+        for k in ("model_architecture", "params_billion", "is_moe", "num_experts_active", "vocab_size"):
             if k in model_info:
                 metrics[k] = model_info[k]
 
@@ -1028,13 +1047,62 @@ def build_metrics(
 
 # Confirmed against tandemn-profiling/roofline/vllm/automatic_launch_1.py GPU_CONFIGS
 GPU_SPECS = {
-    "L40S":     {"gpu_mem_gb": 48, "gpu_tflops_fp16": 362, "gpu_bandwidth_gbps": 864, "generation": "Ada Lovelace", "interconnect": "PCIe", "model": "NVIDIA L40S"},
-    "L4":       {"gpu_mem_gb": 24, "gpu_tflops_fp16": 121, "gpu_bandwidth_gbps": 300, "generation": "Ada Lovelace", "interconnect": "PCIe", "model": "NVIDIA L4"},
-    "A10G":     {"gpu_mem_gb": 24, "gpu_tflops_fp16": 125, "gpu_bandwidth_gbps": 600, "generation": "Ampere", "interconnect": "PCIe", "model": "NVIDIA A10G"},
-    "A100":     {"gpu_mem_gb": 80, "gpu_tflops_fp16": 312, "gpu_bandwidth_gbps": 2039, "generation": "Ampere", "interconnect": "NVLink", "model": "NVIDIA A100 80GB"},  # p4de
-    "A100-40GB":{"gpu_mem_gb": 40, "gpu_tflops_fp16": 312, "gpu_bandwidth_gbps": 1555, "generation": "Ampere", "interconnect": "NVLink", "model": "NVIDIA A100 40GB"},  # p4d
-    "H100":     {"gpu_mem_gb": 80, "gpu_tflops_fp16": 989, "gpu_bandwidth_gbps": 3350, "generation": "Hopper", "interconnect": "NVLink", "model": "NVIDIA H100 SXM"},
-    "V100":     {"gpu_mem_gb": 16, "gpu_tflops_fp16": 125, "gpu_bandwidth_gbps": 900, "generation": "Volta", "interconnect": "NVLink", "model": "NVIDIA V100"},
+    "L40S": {
+        "gpu_mem_gb": 48,
+        "gpu_tflops_fp16": 362,
+        "gpu_bandwidth_gbps": 864,
+        "generation": "Ada Lovelace",
+        "interconnect": "PCIe",
+        "model": "NVIDIA L40S",
+    },
+    "L4": {
+        "gpu_mem_gb": 24,
+        "gpu_tflops_fp16": 121,
+        "gpu_bandwidth_gbps": 300,
+        "generation": "Ada Lovelace",
+        "interconnect": "PCIe",
+        "model": "NVIDIA L4",
+    },
+    "A10G": {
+        "gpu_mem_gb": 24,
+        "gpu_tflops_fp16": 125,
+        "gpu_bandwidth_gbps": 600,
+        "generation": "Ampere",
+        "interconnect": "PCIe",
+        "model": "NVIDIA A10G",
+    },
+    "A100": {
+        "gpu_mem_gb": 80,
+        "gpu_tflops_fp16": 312,
+        "gpu_bandwidth_gbps": 2039,
+        "generation": "Ampere",
+        "interconnect": "NVLink",
+        "model": "NVIDIA A100 80GB",
+    },  # p4de
+    "A100-40GB": {
+        "gpu_mem_gb": 40,
+        "gpu_tflops_fp16": 312,
+        "gpu_bandwidth_gbps": 1555,
+        "generation": "Ampere",
+        "interconnect": "NVLink",
+        "model": "NVIDIA A100 40GB",
+    },  # p4d
+    "H100": {
+        "gpu_mem_gb": 80,
+        "gpu_tflops_fp16": 989,
+        "gpu_bandwidth_gbps": 3350,
+        "generation": "Hopper",
+        "interconnect": "NVLink",
+        "model": "NVIDIA H100 SXM",
+    },
+    "V100": {
+        "gpu_mem_gb": 16,
+        "gpu_tflops_fp16": 125,
+        "gpu_bandwidth_gbps": 900,
+        "generation": "Volta",
+        "interconnect": "NVLink",
+        "model": "NVIDIA V100",
+    },
 }
 
 
@@ -1046,6 +1114,7 @@ def _get_model_info(model_name: str) -> dict:
     info: dict = {}
     try:
         from transformers import AutoConfig
+
         cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
 
         # Architecture
@@ -1082,6 +1151,7 @@ def _get_model_info(model_name: str) -> dict:
         # Method 1: safetensors index (works for local/S3 model paths)
         try:
             import os as _os
+
             if _os.path.isdir(model_name):
                 idx_path = _os.path.join(model_name, "model.safetensors.index.json")
                 if _os.path.exists(idx_path):
@@ -1110,21 +1180,31 @@ def _get_model_info(model_name: str) -> dict:
     return info
 
 
-def _get_price_per_hour(instance_type: str) -> Optional[float]:
+def _get_price_per_hour(instance_type: str) -> float | None:
     """Best-effort pricing lookup. Returns None if unavailable."""
     try:
         from sky import catalog
+
         return catalog.get_hourly_cost(
-            instance_type=instance_type, use_spot=True,
-            region=None, zone=None, clouds="aws",
+            instance_type=instance_type,
+            use_spot=True,
+            region=None,
+            zone=None,
+            clouds="aws",
         )
     except Exception:
         pass
     # Fallback table for common GPU instances
     PRICES = {
-        "g6e.xlarge": 0.54, "g6e.2xlarge": 0.99, "g6e.12xlarge": 4.68,
-        "g6e.48xlarge": 13.35, "g5.xlarge": 0.50, "g5.2xlarge": 1.01,
-        "g5.12xlarge": 4.10, "g5.48xlarge": 16.38, "p4d.24xlarge": 32.77,
+        "g6e.xlarge": 0.54,
+        "g6e.2xlarge": 0.99,
+        "g6e.12xlarge": 4.68,
+        "g6e.48xlarge": 13.35,
+        "g5.xlarge": 0.50,
+        "g5.2xlarge": 1.01,
+        "g5.12xlarge": 4.10,
+        "g5.48xlarge": 16.38,
+        "p4d.24xlarge": 32.77,
         "p5.48xlarge": 98.32,
     }
     return PRICES.get(instance_type)
@@ -1133,6 +1213,7 @@ def _get_price_per_hour(instance_type: str) -> Optional[float]:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run vLLM batch inference via HTTP server mode")
@@ -1159,6 +1240,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     args = parse_args()
@@ -1196,16 +1278,19 @@ def main():
         sidecar_thread = threading.Thread(
             target=_sidecar_loop,
             args=(stop_sidecar, orca_url, orca_key, job_id, live_counter, gpu_monitor_ref),
-            daemon=True, name="orca-sidecar",
+            daemon=True,
+            name="orca-sidecar",
         )
         sidecar_thread.start()
 
         # 4. Introspect model metadata (while server warms up)
         model_info = _get_model_info(args.model)
         if model_info.get("params_billion"):
-            print(f"[Runner] Model: {model_info.get('model_architecture', '?')} "
-                  f"{model_info['params_billion']}B "
-                  f"{'MoE' if model_info.get('is_moe') else 'dense'}")
+            print(
+                f"[Runner] Model: {model_info.get('model_architecture', '?')} "
+                f"{model_info['params_billion']}B "
+                f"{'MoE' if model_info.get('is_moe') else 'dense'}"
+            )
 
         # 5. Load requests
         all_requests = load_requests(args.input)
@@ -1247,13 +1332,17 @@ def main():
         scheduler_summary = metrics_poller.get_summary()
 
         if gpu_summary:
-            print(f"[Runner] GPU: SM={gpu_summary.get('avg_sm_util_pct', '?')}% avg, "
-                  f"MemBW={gpu_summary.get('avg_mem_bw_util_pct', '?')}% avg "
-                  f"({gpu_summary.get('gpu_samples', 0)} samples)")
+            print(
+                f"[Runner] GPU: SM={gpu_summary.get('avg_sm_util_pct', '?')}% avg, "
+                f"MemBW={gpu_summary.get('avg_mem_bw_util_pct', '?')}% avg "
+                f"({gpu_summary.get('gpu_samples', 0)} samples)"
+            )
         if scheduler_summary:
-            print(f"[Runner] Scheduler: running={scheduler_summary.get('running_avg', '?')} avg, "
-                  f"KV={scheduler_summary.get('kv_cache_util_pct_avg', '?')}% avg "
-                  f"({scheduler_summary.get('scheduler_samples', 0)} samples)")
+            print(
+                f"[Runner] Scheduler: running={scheduler_summary.get('running_avg', '?')} avg, "
+                f"KV={scheduler_summary.get('kv_cache_util_pct_avg', '?')}% avg "
+                f"({scheduler_summary.get('scheduler_samples', 0)} samples)"
+            )
 
         # 11. Write output JSONL
         write_output_jsonl(results, args.output, args.model)
@@ -1261,32 +1350,46 @@ def main():
 
         # 12. Build and write metrics
         metrics = build_metrics(
-            results, pre_prom_text, post_prom_text, args,
-            job_start_time, job_start_timestamp, model_load_sec, generation_time,
-            gpu_summary, scheduler_summary, model_info,
+            results,
+            pre_prom_text,
+            post_prom_text,
+            args,
+            job_start_time,
+            job_start_timestamp,
+            model_load_sec,
+            generation_time,
+            gpu_summary,
+            scheduler_summary,
+            model_info,
         )
         write_metrics_csv(args.output, metrics)
 
         # Summary
         gen_t = metrics["generation_time_sec"]
         total_tok = metrics["total_tokens"]
-        print(f"\n[Runner] === Performance Summary ===")
+        print("\n[Runner] === Performance Summary ===")
         print(f"  Total runtime: {metrics['total_runtime_sec']:.2f}s")
         print(f"  Model load: {model_load_sec:.2f}s")
         print(f"  Generation: {gen_t:.2f}s")
         print(f"  Requests: {len(results)} ({num_ok} ok, {num_skip} skipped)")
         print(f"  Total tokens: {total_tok:,}")
         if gen_t > 0:
-            print(f"  Throughput: {num_ok/gen_t:.2f} req/s, {total_tok/gen_t:.2f} tok/s")
+            print(f"  Throughput: {num_ok / gen_t:.2f} req/s, {total_tok / gen_t:.2f} tok/s")
         if metrics.get("ttft_ms_p50"):
-            print(f"  TTFT p50/p95/p99: {metrics['ttft_ms_p50']:.1f} / "
-                  f"{metrics['ttft_ms_p95']:.1f} / {metrics['ttft_ms_p99']:.1f} ms (client)")
+            print(
+                f"  TTFT p50/p95/p99: {metrics['ttft_ms_p50']:.1f} / "
+                f"{metrics['ttft_ms_p95']:.1f} / {metrics['ttft_ms_p99']:.1f} ms (client)"
+            )
         if metrics.get("tpot_client_ms_p50"):
-            print(f"  TPOT p50/p95/p99: {metrics['tpot_client_ms_p50']:.1f} / "
-                  f"{metrics['tpot_client_ms_p95']:.1f} / {metrics['tpot_client_ms_p99']:.1f} ms (client)")
+            print(
+                f"  TPOT p50/p95/p99: {metrics['tpot_client_ms_p50']:.1f} / "
+                f"{metrics['tpot_client_ms_p95']:.1f} / {metrics['tpot_client_ms_p99']:.1f} ms (client)"
+            )
         if metrics.get("tpot_ms_p50"):
-            print(f"  TPOT p50/p95/p99: {metrics['tpot_ms_p50']:.1f} / "
-                  f"{metrics['tpot_ms_p95']:.1f} / {metrics['tpot_ms_p99']:.1f} ms (server Prom)")
+            print(
+                f"  TPOT p50/p95/p99: {metrics['tpot_ms_p50']:.1f} / "
+                f"{metrics['tpot_ms_p95']:.1f} / {metrics['tpot_ms_p99']:.1f} ms (server Prom)"
+            )
         if metrics.get("avg_sm_util_pct"):
             print(f"  GPU SM: {metrics['avg_sm_util_pct']:.1f}% avg, {metrics['max_sm_util_pct']:.1f}% max")
         if metrics.get("cost_for_run_usd"):

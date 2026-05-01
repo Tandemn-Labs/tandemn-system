@@ -1,4 +1,5 @@
 """Persistent metrics storage: SQLite with schema mirroring profiling results.json."""
+
 from __future__ import annotations
 
 import csv
@@ -6,17 +7,17 @@ import json
 import logging
 import sqlite3
 import time
+from datetime import UTC
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-def _get_price_per_hour(
-    instance_type: str, region: Optional[str], use_spot: bool
-) -> Optional[float]:
+
+def _get_price_per_hour(instance_type: str, region: str | None, use_spot: bool) -> float | None:
     """Fetch hourly price via SkyPilot's catalog (uses its cached/refreshed data)."""
     try:
         from sky import catalog
+
         return catalog.get_hourly_cost(
             instance_type=instance_type,
             use_spot=use_spot,
@@ -27,6 +28,7 @@ def _get_price_per_hour(
     except Exception as e:
         logger.debug("[MetricsDB] Could not fetch price for %s: %s", instance_type, e)
         return None
+
 
 # Alias: CSV key → schema column name
 FIELD_ALIASES: dict[str, str] = {
@@ -41,52 +43,119 @@ FIELD_ALIASES: dict[str, str] = {
 ISO_TIMESTAMP_FIELDS: set[str] = {"job_start_timestamp", "job_end_timestamp"}
 
 INT_FIELDS: set[str] = {
-    "tp_size", "pp_size", "num_nodes", "gpus_per_node", "gpu_count_total",
-    "num_requests_total", "num_requests_completed",
-    "max_input_tokens", "min_input_tokens",
-    "max_output_tokens", "min_output_tokens",
-    "total_input_tokens", "total_output_tokens", "total_tokens",
-    "max_num_seqs", "max_model_len", "num_preemptions",
-    "vocab_size", "num_experts_active",
-    "is_moe", "model_fits_single_gpu",
-    "is_lmcache", "is_continuous_batching", "spec_decode", "cuda_graphs",
+    "tp_size",
+    "pp_size",
+    "num_nodes",
+    "gpus_per_node",
+    "gpu_count_total",
+    "num_requests_total",
+    "num_requests_completed",
+    "max_input_tokens",
+    "min_input_tokens",
+    "max_output_tokens",
+    "min_output_tokens",
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_tokens",
+    "max_num_seqs",
+    "max_model_len",
+    "num_preemptions",
+    "vocab_size",
+    "num_experts_active",
+    "is_moe",
+    "model_fits_single_gpu",
+    "is_lmcache",
+    "is_continuous_batching",
+    "spec_decode",
+    "cuda_graphs",
     "crosses_node_boundary",
-    "gpu_samples", "scheduler_samples",
+    "gpu_samples",
+    "scheduler_samples",
 }
 
 FLOAT_FIELDS: set[str] = {
-    "params_billion", "gpu_mem_gb",
-    "total_runtime_sec", "model_load_time_sec", "generation_time_sec",
-    "job_start_timestamp", "job_end_timestamp",
-    "avg_input_tokens", "p50_input_tokens", "p90_input_tokens", "p99_input_tokens",
-    "avg_output_tokens", "p50_output_tokens", "p90_output_tokens", "p99_output_tokens",
+    "params_billion",
+    "gpu_mem_gb",
+    "total_runtime_sec",
+    "model_load_time_sec",
+    "generation_time_sec",
+    "job_start_timestamp",
+    "job_end_timestamp",
+    "avg_input_tokens",
+    "p50_input_tokens",
+    "p90_input_tokens",
+    "p99_input_tokens",
+    "avg_output_tokens",
+    "p50_output_tokens",
+    "p90_output_tokens",
+    "p99_output_tokens",
     "gpu_memory_utilization",
-    "throughput_requests_per_sec", "input_tokens_per_sec",
-    "output_tokens_per_sec", "total_tokens_per_sec", "tokens_per_sec_per_gpu",
-    "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
-    "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
-    "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
-    "tpot_client_ms_p50", "tpot_client_ms_p95", "tpot_client_ms_p99",
-    "ttft_server_ms_p50", "ttft_server_ms_p95", "ttft_server_ms_p99",
-    "e2e_server_ms_p50", "e2e_server_ms_p95", "e2e_server_ms_p99",
-    "price_per_hour", "price_per_gpu_hour_usd",
-    "cost_for_run_usd", "tokens_per_dollar", "cost_per_1m_tokens_total",
-    "avg_sm_util_pct", "max_sm_util_pct",
-    "avg_mem_bw_util_pct", "max_mem_bw_util_pct",
-    "avg_mem_util_pct", "max_mem_util_pct",
-    "running_avg", "running_max", "waiting_avg", "waiting_max",
-    "swapped_avg", "swapped_max",
-    "kv_cache_util_pct_avg", "kv_cache_util_pct_max",
-    "model_size_gb", "vram_headroom_gb", "params_per_gpu",
-    "attention_heads_per_kv_head", "kv_heads_per_tp",
-    "bandwidth_per_param", "flops_per_param",
-    "cost_per_1m_tokens_prefill_usd", "cost_per_1m_tokens_decode_usd",
-    "gpu_bandwidth_gbps", "gpu_tflops_fp16",
-    "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
-    "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
-    "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
+    "throughput_requests_per_sec",
+    "input_tokens_per_sec",
+    "output_tokens_per_sec",
+    "total_tokens_per_sec",
+    "tokens_per_sec_per_gpu",
+    "ttft_ms_p50",
+    "ttft_ms_p95",
+    "ttft_ms_p99",
+    "tpot_ms_p50",
+    "tpot_ms_p95",
+    "tpot_ms_p99",
+    "e2e_ms_p50",
+    "e2e_ms_p95",
+    "e2e_ms_p99",
+    "tpot_client_ms_p50",
+    "tpot_client_ms_p95",
+    "tpot_client_ms_p99",
+    "ttft_server_ms_p50",
+    "ttft_server_ms_p95",
+    "ttft_server_ms_p99",
+    "e2e_server_ms_p50",
+    "e2e_server_ms_p95",
+    "e2e_server_ms_p99",
+    "price_per_hour",
+    "price_per_gpu_hour_usd",
+    "cost_for_run_usd",
+    "tokens_per_dollar",
+    "cost_per_1m_tokens_total",
+    "avg_sm_util_pct",
+    "max_sm_util_pct",
+    "avg_mem_bw_util_pct",
+    "max_mem_bw_util_pct",
+    "avg_mem_util_pct",
+    "max_mem_util_pct",
+    "running_avg",
+    "running_max",
+    "waiting_avg",
+    "waiting_max",
+    "swapped_avg",
+    "swapped_max",
+    "kv_cache_util_pct_avg",
+    "kv_cache_util_pct_max",
+    "model_size_gb",
+    "vram_headroom_gb",
+    "params_per_gpu",
+    "attention_heads_per_kv_head",
+    "kv_heads_per_tp",
+    "bandwidth_per_param",
+    "flops_per_param",
+    "cost_per_1m_tokens_prefill_usd",
+    "cost_per_1m_tokens_decode_usd",
+    "gpu_bandwidth_gbps",
+    "gpu_tflops_fp16",
+    "queue_time_ms_p50",
+    "queue_time_ms_p95",
+    "queue_time_ms_p99",
+    "prefill_time_ms_p50",
+    "prefill_time_ms_p95",
+    "prefill_time_ms_p99",
+    "decode_time_ms_p50",
+    "decode_time_ms_p95",
+    "decode_time_ms_p99",
     "prefix_cache_hit_rate",
-    "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+    "inference_time_ms_p50",
+    "inference_time_ms_p95",
+    "inference_time_ms_p99",
 }
 
 _CREATE_RUNS = """
@@ -199,9 +268,7 @@ CREATE TABLE IF NOT EXISTS timeseries (
 )
 """
 
-_CREATE_INDEX = (
-    "CREATE INDEX IF NOT EXISTS idx_ts_job_time ON timeseries (job_id, timestamp)"
-)
+_CREATE_INDEX = "CREATE INDEX IF NOT EXISTS idx_ts_job_time ON timeseries (job_id, timestamp)"
 
 _CREATE_INDEX_REPLICA = (
     "CREATE INDEX IF NOT EXISTS idx_ts_job_replica_time ON timeseries (job_id, replica_id, timestamp)"
@@ -218,9 +285,7 @@ CREATE TABLE IF NOT EXISTS replica_summaries (
 )
 """
 
-_CREATE_INDEX_REPLICA_SUMMARY = (
-    "CREATE INDEX IF NOT EXISTS idx_rs_job ON replica_summaries (job_id)"
-)
+_CREATE_INDEX_REPLICA_SUMMARY = "CREATE INDEX IF NOT EXISTS idx_rs_job ON replica_summaries (job_id)"
 
 
 class MetricsDB:
@@ -236,18 +301,38 @@ class MetricsDB:
 
     # Columns added after initial schema — ALTER TABLE for existing DBs
     _MIGRATE_COLUMNS = [
-        ("tpot_client_ms_p50", "REAL"), ("tpot_client_ms_p95", "REAL"), ("tpot_client_ms_p99", "REAL"),
-        ("ttft_server_ms_p50", "REAL"), ("ttft_server_ms_p95", "REAL"), ("ttft_server_ms_p99", "REAL"),
-        ("e2e_server_ms_p50", "REAL"), ("e2e_server_ms_p95", "REAL"), ("e2e_server_ms_p99", "REAL"),
-        ("params_per_gpu", "REAL"), ("attention_heads_per_kv_head", "REAL"), ("kv_heads_per_tp", "REAL"),
-        ("model_config_json", "TEXT"), ("bandwidth_per_param", "REAL"), ("flops_per_param", "REAL"),
-        ("crosses_node_boundary", "INTEGER"), ("cost_per_1m_tokens_prefill_usd", "REAL"),
-        ("cost_per_1m_tokens_decode_usd", "REAL"), ("kv_offload_target", "TEXT"),
-        ("queue_time_ms_p50", "REAL"), ("queue_time_ms_p95", "REAL"), ("queue_time_ms_p99", "REAL"),
-        ("prefill_time_ms_p50", "REAL"), ("prefill_time_ms_p95", "REAL"), ("prefill_time_ms_p99", "REAL"),
-        ("decode_time_ms_p50", "REAL"), ("decode_time_ms_p95", "REAL"), ("decode_time_ms_p99", "REAL"),
+        ("tpot_client_ms_p50", "REAL"),
+        ("tpot_client_ms_p95", "REAL"),
+        ("tpot_client_ms_p99", "REAL"),
+        ("ttft_server_ms_p50", "REAL"),
+        ("ttft_server_ms_p95", "REAL"),
+        ("ttft_server_ms_p99", "REAL"),
+        ("e2e_server_ms_p50", "REAL"),
+        ("e2e_server_ms_p95", "REAL"),
+        ("e2e_server_ms_p99", "REAL"),
+        ("params_per_gpu", "REAL"),
+        ("attention_heads_per_kv_head", "REAL"),
+        ("kv_heads_per_tp", "REAL"),
+        ("model_config_json", "TEXT"),
+        ("bandwidth_per_param", "REAL"),
+        ("flops_per_param", "REAL"),
+        ("crosses_node_boundary", "INTEGER"),
+        ("cost_per_1m_tokens_prefill_usd", "REAL"),
+        ("cost_per_1m_tokens_decode_usd", "REAL"),
+        ("kv_offload_target", "TEXT"),
+        ("queue_time_ms_p50", "REAL"),
+        ("queue_time_ms_p95", "REAL"),
+        ("queue_time_ms_p99", "REAL"),
+        ("prefill_time_ms_p50", "REAL"),
+        ("prefill_time_ms_p95", "REAL"),
+        ("prefill_time_ms_p99", "REAL"),
+        ("decode_time_ms_p50", "REAL"),
+        ("decode_time_ms_p95", "REAL"),
+        ("decode_time_ms_p99", "REAL"),
         ("prefix_cache_hit_rate", "REAL"),
-        ("inference_time_ms_p50", "REAL"), ("inference_time_ms_p95", "REAL"), ("inference_time_ms_p99", "REAL"),
+        ("inference_time_ms_p50", "REAL"),
+        ("inference_time_ms_p95", "REAL"),
+        ("inference_time_ms_p99", "REAL"),
     ]
 
     def _init_schema(self) -> None:
@@ -275,10 +360,7 @@ class MetricsDB:
     # ------------------------------------------------------------------
 
     def append_timeseries(self, job_id: str, snapshots: list[dict]) -> None:
-        rows = [
-            (job_id, s.get("timestamp", time.time()), json.dumps(s), s.get("replica_id"))
-            for s in snapshots
-        ]
+        rows = [(job_id, s.get("timestamp", time.time()), json.dumps(s), s.get("replica_id")) for s in snapshots]
         try:
             with self._get_conn() as conn:
                 conn.executemany(
@@ -334,12 +416,20 @@ class MetricsDB:
 
     # Sum across ALL replicas (including zero-work)
     _AGG_SUM = {
-        "num_requests_total", "num_requests_completed", "num_requests_skipped",
-        "total_input_tokens", "total_output_tokens", "total_tokens",
-        "num_preemptions", "gpu_samples", "scheduler_samples",
+        "num_requests_total",
+        "num_requests_completed",
+        "num_requests_skipped",
+        "total_input_tokens",
+        "total_output_tokens",
+        "total_tokens",
+        "num_preemptions",
+        "gpu_samples",
+        "scheduler_samples",
         # Throughput sums (each replica adds throughput)
-        "throughput_requests_per_sec", "throughput_tokens_per_sec",
-        "throughput_output_tokens_per_sec", "throughput_input_tokens_per_sec",
+        "throughput_requests_per_sec",
+        "throughput_tokens_per_sec",
+        "throughput_output_tokens_per_sec",
+        "throughput_input_tokens_per_sec",
         # Cost sums (every replica burns money)
         "cost_for_run_usd",
     }
@@ -347,36 +437,72 @@ class MetricsDB:
     # Average across ONLY replicas with num_requests_completed > 0
     # (per-request stats — zero-work replicas have no meaningful values)
     _AGG_AVG_WORK_ONLY = {
-        "avg_input_tokens", "avg_output_tokens",
-        "p50_input_tokens", "p90_input_tokens", "p99_input_tokens",
-        "p50_output_tokens", "p90_output_tokens", "p99_output_tokens",
-        "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
-        "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
-        "tpot_client_ms_p50", "tpot_client_ms_p95", "tpot_client_ms_p99",
-        "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
-        "ttft_server_ms_p50", "ttft_server_ms_p95", "ttft_server_ms_p99",
-        "e2e_server_ms_p50", "e2e_server_ms_p95", "e2e_server_ms_p99",
-        "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
-        "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
-        "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
-        "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+        "avg_input_tokens",
+        "avg_output_tokens",
+        "p50_input_tokens",
+        "p90_input_tokens",
+        "p99_input_tokens",
+        "p50_output_tokens",
+        "p90_output_tokens",
+        "p99_output_tokens",
+        "ttft_ms_p50",
+        "ttft_ms_p95",
+        "ttft_ms_p99",
+        "tpot_ms_p50",
+        "tpot_ms_p95",
+        "tpot_ms_p99",
+        "tpot_client_ms_p50",
+        "tpot_client_ms_p95",
+        "tpot_client_ms_p99",
+        "e2e_ms_p50",
+        "e2e_ms_p95",
+        "e2e_ms_p99",
+        "ttft_server_ms_p50",
+        "ttft_server_ms_p95",
+        "ttft_server_ms_p99",
+        "e2e_server_ms_p50",
+        "e2e_server_ms_p95",
+        "e2e_server_ms_p99",
+        "queue_time_ms_p50",
+        "queue_time_ms_p95",
+        "queue_time_ms_p99",
+        "prefill_time_ms_p50",
+        "prefill_time_ms_p95",
+        "prefill_time_ms_p99",
+        "decode_time_ms_p50",
+        "decode_time_ms_p95",
+        "decode_time_ms_p99",
+        "inference_time_ms_p50",
+        "inference_time_ms_p95",
+        "inference_time_ms_p99",
         "prefix_cache_hit_rate",
     }
 
     # Average across ALL replicas (idle GPU is diagnostic signal)
     _AGG_AVG_ALL = {
-        "avg_sm_util_pct", "max_sm_util_pct",
-        "avg_mem_bw_util_pct", "max_mem_bw_util_pct",
-        "avg_mem_util_pct", "max_mem_util_pct",
-        "running_avg", "running_max", "waiting_avg", "waiting_max",
-        "swapped_avg", "swapped_max",
-        "kv_cache_util_pct_avg", "kv_cache_util_pct_max",
+        "avg_sm_util_pct",
+        "max_sm_util_pct",
+        "avg_mem_bw_util_pct",
+        "max_mem_bw_util_pct",
+        "avg_mem_util_pct",
+        "max_mem_util_pct",
+        "running_avg",
+        "running_max",
+        "waiting_avg",
+        "waiting_max",
+        "swapped_avg",
+        "swapped_max",
+        "kv_cache_util_pct_avg",
+        "kv_cache_util_pct_max",
     }
 
     # Take MAX across all replicas
     _AGG_MAX = {
-        "generation_time_sec", "model_load_time_sec", "total_runtime_sec",
-        "max_input_tokens", "max_output_tokens",
+        "generation_time_sec",
+        "model_load_time_sec",
+        "total_runtime_sec",
+        "max_input_tokens",
+        "max_output_tokens",
     }
 
     # Take MIN across working replicas only
@@ -384,20 +510,46 @@ class MetricsDB:
 
     # Copy from first replica with non-None value (identical across replicas)
     _AGG_COPY = {
-        "model_name", "quantization", "cloud_provider", "instance_type",
-        "gpu_name", "engine", "tensor_parallel_size", "pipeline_parallel_size",
-        "max_model_len", "max_num_seqs", "gpu_memory_utilization",
-        "dtype", "kv_cache_dtype", "model_architecture", "params_billion",
-        "is_moe", "num_experts_active", "vocab_size",
-        "gpu_mem_gb", "gpu_tflops_fp16", "gpu_bandwidth_gbps",
-        "gpu_model", "gpu_generation", "interconnect",
-        "num_nodes", "precision", "runtime_stack",
-        "model_size_gb", "model_config_json",
-        "model_fits_single_gpu", "vram_headroom_gb", "params_per_gpu",
-        "attention_heads_per_kv_head", "kv_heads_per_tp",
-        "bandwidth_per_param", "flops_per_param",
-        "crosses_node_boundary", "kv_offload_target",
-        "cost_per_1m_tokens_prefill_usd", "cost_per_1m_tokens_decode_usd",
+        "model_name",
+        "quantization",
+        "cloud_provider",
+        "instance_type",
+        "gpu_name",
+        "engine",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "max_model_len",
+        "max_num_seqs",
+        "gpu_memory_utilization",
+        "dtype",
+        "kv_cache_dtype",
+        "model_architecture",
+        "params_billion",
+        "is_moe",
+        "num_experts_active",
+        "vocab_size",
+        "gpu_mem_gb",
+        "gpu_tflops_fp16",
+        "gpu_bandwidth_gbps",
+        "gpu_model",
+        "gpu_generation",
+        "interconnect",
+        "num_nodes",
+        "precision",
+        "runtime_stack",
+        "model_size_gb",
+        "model_config_json",
+        "model_fits_single_gpu",
+        "vram_headroom_gb",
+        "params_per_gpu",
+        "attention_heads_per_kv_head",
+        "kv_heads_per_tp",
+        "bandwidth_per_param",
+        "flops_per_param",
+        "crosses_node_boundary",
+        "kv_offload_target",
+        "cost_per_1m_tokens_prefill_usd",
+        "cost_per_1m_tokens_decode_usd",
         "price_per_hour",
     }
 
@@ -513,13 +665,27 @@ class MetricsDB:
         # metrics.csv has more accurate client-side values when available)
         if last_snapshot is not None:
             for f in [
-                "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
-                "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
-                "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
-                "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
-                "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
-                "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
-                "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+                "ttft_ms_p50",
+                "ttft_ms_p95",
+                "ttft_ms_p99",
+                "tpot_ms_p50",
+                "tpot_ms_p95",
+                "tpot_ms_p99",
+                "e2e_ms_p50",
+                "e2e_ms_p95",
+                "e2e_ms_p99",
+                "queue_time_ms_p50",
+                "queue_time_ms_p95",
+                "queue_time_ms_p99",
+                "prefill_time_ms_p50",
+                "prefill_time_ms_p95",
+                "prefill_time_ms_p99",
+                "decode_time_ms_p50",
+                "decode_time_ms_p95",
+                "decode_time_ms_p99",
+                "inference_time_ms_p50",
+                "inference_time_ms_p95",
+                "inference_time_ms_p99",
                 "prefix_cache_hit_rate",
             ]:
                 if row.get(f) is None:
@@ -582,10 +748,11 @@ class MetricsDB:
                     # ISO timestamp fields
                     if key in ISO_TIMESTAMP_FIELDS:
                         try:
-                            from datetime import datetime, timezone
+                            from datetime import datetime
+
                             dt = datetime.fromisoformat(val)
                             if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
+                                dt = dt.replace(tzinfo=UTC)
                             result[key] = dt.timestamp()
                         except (ValueError, TypeError):
                             result[key] = None
@@ -616,20 +783,16 @@ class MetricsDB:
             ts = self.get_timeseries(job_id)
             if ts:
                 running_vals = [
-                    t.get("num_requests_running", 0)
-                    for t in ts if t.get("num_requests_running") is not None
+                    t.get("num_requests_running", 0) for t in ts if t.get("num_requests_running") is not None
                 ]
                 waiting_vals = [
-                    t.get("num_requests_waiting", 0)
-                    for t in ts if t.get("num_requests_waiting") is not None
+                    t.get("num_requests_waiting", 0) for t in ts if t.get("num_requests_waiting") is not None
                 ]
                 swapped_vals = [
-                    t.get("num_requests_swapped", 0)
-                    for t in ts if t.get("num_requests_swapped") is not None
+                    t.get("num_requests_swapped", 0) for t in ts if t.get("num_requests_swapped") is not None
                 ]
                 kv_vals = [
-                    t.get("gpu_cache_usage_perc", 0) * 100
-                    for t in ts if t.get("gpu_cache_usage_perc") is not None
+                    t.get("gpu_cache_usage_perc", 0) * 100 for t in ts if t.get("gpu_cache_usage_perc") is not None
                 ]
                 derived["scheduler_samples"] = len(ts)
                 if running_vals:
@@ -664,7 +827,7 @@ class MetricsDB:
 
         # Cost — use SkyPilot catalog for real per-region prices
         actual_region = row.get("actual_region")
-        use_spot = (row.get("actual_market", "spot") == "spot")
+        use_spot = row.get("actual_market", "spot") == "spot"
         price_per_hour = _get_price_per_hour(instance_type, actual_region, use_spot) if instance_type else None
         if price_per_hour:
             derived["price_per_hour"] = price_per_hour
@@ -686,8 +849,7 @@ class MetricsDB:
     # ------------------------------------------------------------------
 
     def list_runs(
-        self, *, model: Optional[str] = None, gpu: Optional[str] = None,
-        limit: int = 50, offset: int = 0
+        self, *, model: str | None = None, gpu: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[dict]:
         query = "SELECT * FROM runs WHERE 1=1"
         params: list = []
@@ -703,7 +865,7 @@ class MetricsDB:
             rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
-    def get_run(self, run_id: int) -> Optional[dict]:
+    def get_run(self, run_id: int) -> dict | None:
         with self._get_conn() as conn:
             row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         return dict(row) if row else None
@@ -711,8 +873,8 @@ class MetricsDB:
     def get_timeseries(
         self,
         job_id: str,
-        start: Optional[float] = None,
-        end: Optional[float] = None,
+        start: float | None = None,
+        end: float | None = None,
     ) -> list[dict]:
         query = "SELECT timestamp, metrics FROM timeseries WHERE job_id = ?"
         params: list = [job_id]
@@ -736,7 +898,7 @@ class MetricsDB:
         return result
 
 
-_metrics_db: Optional[MetricsDB] = None
+_metrics_db: MetricsDB | None = None
 
 
 def get_metrics_db() -> MetricsDB:

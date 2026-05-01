@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Dict, Literal, Optional
+from typing import Literal
 
 import requests
 
@@ -20,29 +20,38 @@ from models.requests import BatchedRequest
 from models.resources import MagicOutput
 from quota.tracker import JobSpec, JobState
 
+
 # Extended JobRecord that supports chunked jobs
 @dataclass
 class JobRecord:
     state: JobState
     status: Literal[
-        "queued", "launching", "running", "succeeded", "failed", "cancelled",
-        "loading_model", "model_ready", "generating",
+        "queued",
+        "launching",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "loading_model",
+        "model_ready",
+        "generating",
     ] = "queued"
-    endpoint_url: Optional[str] = None
+    endpoint_url: str | None = None
     created_at: float = field(default_factory=time.time)
     last_updated_at: float = field(default_factory=time.time)
-    head_ip: Optional[str] = None
-    output_s3_path: Optional[str] = None
+    head_ip: str | None = None
+    output_s3_path: str | None = None
     # All batch jobs are chunked — non-chunked path is blocked
     is_chunked: bool = True
-    total_chunks: Optional[int] = None
+    total_chunks: int | None = None
     num_replicas: int = 1
-    _job_dirname: Optional[str] = None
+    _job_dirname: str | None = None
 
 
 # --------------------------------------------------------------------------- #
 # Job logging
 # --------------------------------------------------------------------------- #
+
 
 def setup_job_logger(job_id: str, log_file_path: str) -> logging.Logger:
     """Create a named logger that writes to both console and a job-specific log file."""
@@ -77,6 +86,7 @@ def close_job_logger(logger: logging.Logger):
 # Job directory naming
 # --------------------------------------------------------------------------- #
 
+
 def prefix_job_dirname(job_dirname: str, status: str) -> str:
     """Prepend 'success-' or 'failed-' to the leaf directory of a job dirname."""
     if "/" in job_dirname:
@@ -85,9 +95,7 @@ def prefix_job_dirname(job_dirname: str, status: str) -> str:
     return f"{status}-{job_dirname}"
 
 
-def generate_job_dirname(
-    request: BatchedRequest, solver: str, tp_size: int, pp_size: int, instance_type: str
-) -> str:
+def generate_job_dirname(request: BatchedRequest, solver: str, tp_size: int, pp_size: int, instance_type: str) -> str:
     """
     Generate an informative directory name for job outputs.
     Base format: {model_short}/numreq_N-avginputlen_X-avgoutputlen_Y/{solver}-{gpu}-tpT-ppP-YYYYMMDD_HHMMSS
@@ -121,26 +129,37 @@ def generate_job_dirname(
 # Cluster manager
 # --------------------------------------------------------------------------- #
 
+
 class ClusterManager:
     """Manages active SkyPilot clusters to prevent zombie instances."""
 
     def __init__(self):
-        self.active_clusters: Dict[str, dict] = {}
-        self._threads: Dict[str, threading.Thread] = {}
+        self.active_clusters: dict[str, dict] = {}
+        self._threads: dict[str, threading.Thread] = {}
         self._persist_set: set = set()
-        self._job_clusters: Dict[str, list] = {}  # job_id → [cluster_names]
-        self._replica_states: Dict[str, Dict[str, dict]] = {}  # job_id → {replica_id → state}
-        self._swap_in_progress: Dict[str, bool] = {}
-        self._swap_version: Dict[str, int] = {}  # job_id → next version counter
+        self._job_clusters: dict[str, list] = {}  # job_id → [cluster_names]
+        self._replica_states: dict[str, dict[str, dict]] = {}  # job_id → {replica_id → state}
+        self._swap_in_progress: dict[str, bool] = {}
+        self._swap_version: dict[str, int] = {}  # job_id → next version counter
         self.lock = Lock()
 
-    def register(self, cluster_name: str, job_id: str, region: str = None,
-                 market: str = None, instance_type: str = None, num_instances: int = None):
+    def register(
+        self,
+        cluster_name: str,
+        job_id: str,
+        region: str = None,
+        market: str = None,
+        instance_type: str = None,
+        num_instances: int = None,
+    ):
         with self.lock:
             self.active_clusters[cluster_name] = {
-                "job_id": job_id, "status": "active",
-                "region": region, "market": market,
-                "instance_type": instance_type, "num_instances": num_instances,
+                "job_id": job_id,
+                "status": "active",
+                "region": region,
+                "market": market,
+                "instance_type": instance_type,
+                "num_instances": num_instances,
             }
             logger.info(f"[ClusterManager] Registered cluster: {cluster_name}")
 
@@ -181,7 +200,7 @@ class ClusterManager:
                 self._replica_states[job_id][replica_id] = {}
             self._replica_states[job_id][replica_id].update(kwargs)
 
-    def get_replica_states(self, job_id: str) -> Dict[str, dict]:
+    def get_replica_states(self, job_id: str) -> dict[str, dict]:
         with self.lock:
             return dict(self._replica_states.get(job_id, {}))
 
@@ -191,7 +210,7 @@ class ClusterManager:
             self._swap_version[job_id] = v + 1
             return v
 
-    def get_active_threads(self) -> Dict[str, threading.Thread]:
+    def get_active_threads(self) -> dict[str, threading.Thread]:
         with self.lock:
             return dict(self._threads)
 
@@ -225,6 +244,7 @@ def get_cluster_manager() -> ClusterManager:
 def sky_down_with_retry(cluster_name: str, max_attempts: int = 3, delay: float = 10.0) -> bool:
     """Tear down a SkyPilot cluster with retries (handles security-group race)."""
     import sky
+
     for attempt in range(1, max_attempts + 1):
         try:
             logger.info(f"[Teardown] sky.down({cluster_name}) attempt {attempt}/{max_attempts}")
@@ -240,7 +260,9 @@ def sky_down_with_retry(cluster_name: str, max_attempts: int = 3, delay: float =
     try:
         result = subprocess.run(
             ["sky", "down", "-y", cluster_name],
-            capture_output=True, text=True, timeout=300,
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         if result.returncode == 0:
             logger.info(f"[Teardown] Subprocess fallback succeeded for {cluster_name}.")
@@ -267,7 +289,7 @@ def get_job_tracker() -> "JobTracker":
 
 class JobTracker:
     def __init__(self):
-        self.jobs: Dict[str, JobRecord] = {}
+        self.jobs: dict[str, JobRecord] = {}
         self.lock = Lock()
 
     def build_job_state_batched(self, req: BatchedRequest, config: MagicOutput):
@@ -276,12 +298,8 @@ class JobTracker:
                 job_id=config.decision_id,
                 model_name=req.model_name,
                 num_lines=req.num_lines or 1,
-                avg_input_tokens=req.avg_input_tokens
-                if req.avg_input_tokens is not None
-                else 4096,
-                avg_output_tokens=req.avg_output_tokens
-                if req.avg_output_tokens is not None
-                else 2048,
+                avg_input_tokens=req.avg_input_tokens if req.avg_input_tokens is not None else 4096,
+                avg_output_tokens=req.avg_output_tokens if req.avg_output_tokens is not None else 2048,
                 slo_hours=req.slo_deadline_hours or 4,
                 region="us-east-1",
                 market="spot" if getattr(req, "prefer_spot", True) else "on_demand",
@@ -295,7 +313,7 @@ class JobTracker:
             self.jobs[job_state.spec.job_id] = job_record
         return job_record
 
-    def get(self, job_id: str) -> Optional[JobRecord]:
+    def get(self, job_id: str) -> JobRecord | None:
         with self.lock:
             return self.jobs.get(job_id)
 
@@ -320,8 +338,15 @@ class JobTracker:
         self,
         job_id: str,
         status: Literal[
-            "queued", "launching", "loading_model", "model_ready",
-            "generating", "running", "succeeded", "failed", "cancelled",
+            "queued",
+            "launching",
+            "loading_model",
+            "model_ready",
+            "generating",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled",
         ],
     ):
         with self.lock:
@@ -370,9 +395,7 @@ def parse_labels(labels_blob: str) -> dict[str, str]:
     return out
 
 
-def sum_metric(
-    text: str, metric_name: str, *, where: dict[str, str] | None = None
-) -> float:
+def sum_metric(text: str, metric_name: str, *, where: dict[str, str] | None = None) -> float:
     total = 0.0
     for line in text.splitlines():
         if not line or line[0] == "#":
@@ -391,12 +414,12 @@ def sum_metric(
 
 _METRIC_ALIASES = {
     "vllm:generation_tokens_total": "vllm:generation_tokens",
-    "vllm:prompt_tokens_total":     "vllm:prompt_tokens",
-    "vllm:request_success_total":   "vllm:request_success",
-    "vllm:num_preemptions_total":   "vllm:num_preemptions",
-    "vllm:gpu_cache_usage_perc":    "vllm:kv_cache_usage_perc",
+    "vllm:prompt_tokens_total": "vllm:prompt_tokens",
+    "vllm:request_success_total": "vllm:request_success",
+    "vllm:num_preemptions_total": "vllm:num_preemptions",
+    "vllm:gpu_cache_usage_perc": "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries_total": "vllm:prefix_cache_queries",
-    "vllm:prefix_cache_hits_total":    "vllm:prefix_cache_hits",
+    "vllm:prefix_cache_hits_total": "vllm:prefix_cache_hits",
 }
 
 
@@ -408,9 +431,7 @@ def sum_metric_compat(text: str, name: str, **kw) -> float:
     return val
 
 
-def get_vllm_progress(
-    endpoint_url: str, *, model_name: str | None = None
-) -> tuple[int, int]:
+def get_vllm_progress(endpoint_url: str, *, model_name: str | None = None) -> tuple[int, int]:
     r = requests.get(endpoint_url + "/metrics", timeout=5)
     r.raise_for_status()
     text = r.text
@@ -486,9 +507,8 @@ def log_jobtracker_loop(tracker: JobTracker, interval_sec: int = 0.5):
 # S3 output download
 # --------------------------------------------------------------------------- #
 
-def download_output_from_s3(
-    s3_path: str, job_dirname: str, logger=None
-) -> Optional[str]:
+
+def download_output_from_s3(s3_path: str, job_dirname: str, logger=None) -> str | None:
     """Download output file and metrics.csv from S3 to local filesystem."""
     from pathlib import Path
 

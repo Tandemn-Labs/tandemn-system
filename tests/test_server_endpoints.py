@@ -5,7 +5,7 @@ Uses httpx AsyncClient against the real app (no external services called).
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
 
 from server import app
 
@@ -19,6 +19,7 @@ async def client():
 
 
 # ---- /quota/status ----
+
 
 @pytest.mark.asyncio
 async def test_quota_status_returns_success(client):
@@ -34,6 +35,7 @@ async def test_quota_status_returns_success(client):
 
 # ---- /jobs ----
 
+
 @pytest.mark.asyncio
 async def test_list_jobs_empty(client):
     resp = await client.get("/jobs")
@@ -45,6 +47,7 @@ async def test_list_jobs_empty(client):
 
 # ---- /job/{job_id} ----
 
+
 @pytest.mark.asyncio
 async def test_get_job_not_found(client):
     resp = await client.get("/job/nonexistent-job-id")
@@ -52,6 +55,7 @@ async def test_get_job_not_found(client):
 
 
 # ---- /test/placement (roofline solver, no cloud calls) ----
+
 
 @pytest.mark.asyncio
 async def test_placement_roofline(client):
@@ -82,6 +86,7 @@ async def test_placement_roofline(client):
 
 
 # ---- /test/placement (user_specified) ----
+
 
 @pytest.mark.asyncio
 async def test_placement_user_specified(client):
@@ -115,6 +120,7 @@ async def test_placement_user_specified(client):
 
 # ---- /test/placement (llm solver) ----
 
+
 @pytest.mark.asyncio
 async def test_placement_llm_solver(client):
     payload = {
@@ -142,6 +148,7 @@ async def test_placement_llm_solver(client):
 
 # ---- /submit/batch (invalid solver) ----
 
+
 @pytest.mark.asyncio
 async def test_submit_batch_invalid_solver(client):
     payload = {
@@ -166,6 +173,7 @@ async def test_submit_batch_invalid_solver(client):
 
 
 # ---- /submit/batch (user_specified, invalid GPU) ----
+
 
 @pytest.mark.asyncio
 async def test_submit_batch_invalid_gpu(client):

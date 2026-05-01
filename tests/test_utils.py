@@ -1,15 +1,15 @@
 import pytest
+
 from utils.utils import (
-    split_uri,
     get_num_params_from_text,
-    load_aws_quota_csv,
     load_all_perfdb_files,
+    load_aws_quota_csv,
     select_perf_files_closest_to_model_size,
     sort_perf_entries_io_length,
-    update_yaml_file,
+    split_uri,
     update_template,
+    update_yaml_file,
 )
-
 
 # --- split_uri ---
 
@@ -142,9 +142,7 @@ def test_update_yaml_nested(tmp_path):
     yaml_in = tmp_path / "in.yaml"
     yaml_out = tmp_path / "out.yaml"
     yaml_in.write_text("resources:\n  instance_type: old\n  disk: 50\n")
-    result = update_yaml_file(
-        str(yaml_in), {"resources.instance_type": "g6e.12xlarge"}, str(yaml_out)
-    )
+    result = update_yaml_file(str(yaml_in), {"resources.instance_type": "g6e.12xlarge"}, str(yaml_out))
     assert result["resources"]["instance_type"] == "g6e.12xlarge"
     assert result["resources"]["disk"] == 50
 

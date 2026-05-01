@@ -13,12 +13,13 @@ Usage:
 import argparse
 import json
 import random
-from pathlib import Path
-from typing import List, Dict, Any, Tuple
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 try:
     import tiktoken
+
     HAS_TIKTOKEN = True
 except ImportError:
     HAS_TIKTOKEN = False
@@ -39,20 +40,18 @@ def count_tokens(text: str, encoding) -> int:
     return len(encoding.encode(text))
 
 
-def load_sharegpt(filepath: str) -> List[Dict[str, Any]]:
+def load_sharegpt(filepath: str) -> list[dict[str, Any]]:
     """Load ShareGPT JSON file."""
     print(f"Loading ShareGPT data from {filepath}...")
-    with open(filepath, 'r', encoding='utf-8') as f:
+    with open(filepath, encoding="utf-8") as f:
         data = json.load(f)
     print(f"Loaded {len(data)} conversations")
     return data
 
 
 def extract_conversation_samples(
-    conversations: List[Dict[str, Any]],
-    config: WorkloadConfig,
-    encoding
-) -> List[Tuple[List[Dict[str, str]], int]]:
+    conversations: list[dict[str, Any]], config: WorkloadConfig, encoding
+) -> list[tuple[list[dict[str, str]], int]]:
     """
     Extract conversation samples that match the target input token length.
 
@@ -113,9 +112,9 @@ def extract_conversation_samples(
 
 
 def generate_workload(
-    sharegpt_data: List[Dict[str, Any]],
+    sharegpt_data: list[dict[str, Any]],
     config: WorkloadConfig,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Generate workload in OpenAI batch API format.
 
@@ -128,10 +127,12 @@ def generate_workload(
         encoding = tiktoken.get_encoding("cl100k_base")
     else:
         print("Warning: tiktoken not available, using approximate token counting (~4 chars/token)")
+
         # Fallback: approximate tokens as ~4 chars per token (typical for English)
         class ApproxEncoding:
             def encode(self, text):
                 return [0] * (len(text) // 4 + 1)
+
         encoding = ApproxEncoding()
 
     # Extract all valid samples
@@ -156,12 +157,10 @@ def generate_workload(
 
     for i, (messages, token_count) in enumerate(selected):
         request = {
-            "custom_id": f"sharegpt-req-{i+1}",
+            "custom_id": f"sharegpt-req-{i + 1}",
             "method": "POST",
             "url": "/v1/chat/completions",
-            "body": {
-                "messages": messages
-            }
+            "body": {"messages": messages},
         }
         requests.append(request)
         token_counts.append(token_count)
@@ -180,54 +179,27 @@ def generate_workload(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate batch inference workload from ShareGPT dataset"
-    )
+    parser = argparse.ArgumentParser(description="Generate batch inference workload from ShareGPT dataset")
     parser.add_argument(
-        "--input", "-i",
-        default="ShareGPT_V3_unfiltered_cleaned_split.json",
-        help="Path to ShareGPT JSON file"
+        "--input", "-i", default="ShareGPT_V3_unfiltered_cleaned_split.json", help="Path to ShareGPT JSON file"
     )
+    parser.add_argument("--num-requests", "-n", type=int, default=1000, help="Number of requests to generate")
+    parser.add_argument("--avg-input-tokens", type=int, default=512, help="Target average input tokens per request")
     parser.add_argument(
-        "--num-requests", "-n",
-        type=int,
-        default=1000,
-        help="Number of requests to generate"
-    )
-    parser.add_argument(
-        "--avg-input-tokens",
-        type=int,
-        default=512,
-        help="Target average input tokens per request"
-    )
-    parser.add_argument(
-        "--avg-output-tokens",
-        type=int,
-        default=256,
-        help="Target average output tokens (for reference only)"
+        "--avg-output-tokens", type=int, default=256, help="Target average output tokens (for reference only)"
     )
     parser.add_argument(
         "--tolerance",
         type=float,
         default=0.5,
-        help="Tolerance for input token variance (0.0-1.0, default 0.5 = +/-50%%)"
+        help="Tolerance for input token variance (0.0-1.0, default 0.5 = +/-50%%)",
     )
-    parser.add_argument(
-        "--max-context-turns",
-        type=int,
-        default=10,
-        help="Maximum conversation turns to include"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility"
-    )
+    parser.add_argument("--max-context-turns", type=int, default=10, help="Maximum conversation turns to include")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument(
         "--upload-s3",
         action="store_true",
-        help="Upload to S3 (s3://workload/sharegpt-numreq_N-avginputlen_X-avgoutputlen_Y.jsonl)"
+        help="Upload to S3 (s3://workload/sharegpt-numreq_N-avginputlen_X-avgoutputlen_Y.jsonl)",
     )
 
     args = parser.parse_args()
@@ -257,9 +229,9 @@ def main():
     output_path = output_dir / filename
     print(f"\nWriting {len(requests)} requests to {output_path}...")
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         for req in requests:
-            f.write(json.dumps(req, ensure_ascii=False) + '\n')
+            f.write(json.dumps(req, ensure_ascii=False) + "\n")
 
     # Print stats
     print("\n" + "=" * 60)
@@ -279,18 +251,16 @@ def main():
     # Upload to S3 if requested
     if args.upload_s3:
         import subprocess
+
         print(f"\nUploading to {s3_path}...")
-        result = subprocess.run(
-            ["aws", "s3", "cp", str(output_path), s3_path],
-            capture_output=True, text=True
-        )
+        result = subprocess.run(["aws", "s3", "cp", str(output_path), s3_path], capture_output=True, text=True)
         if result.returncode == 0:
-            print(f"Uploaded successfully!")
+            print("Uploaded successfully!")
         else:
             print(f"Upload failed: {result.stderr}")
 
     # Print curl.sh example
-    print(f"\nExample curl.sh config for this workload:")
+    print("\nExample curl.sh config for this workload:")
     print(f'  "input_file": "{s3_path}",')
     print(f'  "num_lines": {stats["num_requests"]},')
     print(f'  "avg_input_tokens": {int(stats["avg_input_tokens"])},')

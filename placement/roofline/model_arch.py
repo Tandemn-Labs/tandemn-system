@@ -9,7 +9,6 @@ Ported from: ../LLM_placement_solver/llm_advisor/model_arch.py
 
 import re
 from dataclasses import dataclass
-from typing import Dict, Optional
 
 
 @dataclass
@@ -20,6 +19,7 @@ class ModelArchitecture:
     Contains all parameters needed for roofline throughput calculation
     and memory feasibility checks.
     """
+
     model_id: str
     num_hidden_layers: int
     hidden_size: int  # d_model
@@ -61,7 +61,7 @@ class ModelArchitecture:
         total_params = qo_params + kv_params + ffn_params
         bytes_per_param = 2  # FP16
 
-        return (total_params * bytes_per_param) / (1024 ** 3)
+        return (total_params * bytes_per_param) / (1024**3)
 
     @property
     def total_params_billions(self) -> float:
@@ -91,7 +91,7 @@ class ModelArchitecture:
 
 # Known model architectures (offline cache)
 # These are used when HuggingFace lookup fails or for speed
-KNOWN_ARCHITECTURES: Dict[str, ModelArchitecture] = {
+KNOWN_ARCHITECTURES: dict[str, ModelArchitecture] = {
     # ============ Llama 3 Family ============
     "llama-3-70b": ModelArchitecture(
         model_id="llama-3-70b",
@@ -143,7 +143,6 @@ KNOWN_ARCHITECTURES: Dict[str, ModelArchitecture] = {
         vocab_size=128256,
         max_position_embeddings=131072,
     ),
-
     # ============ Llama 2 Family ============
     "llama-2-70b": ModelArchitecture(
         model_id="llama-2-70b",
@@ -175,7 +174,6 @@ KNOWN_ARCHITECTURES: Dict[str, ModelArchitecture] = {
         vocab_size=32000,
         max_position_embeddings=4096,
     ),
-
     # ============ DeepSeek Family ============
     # DeepSeek-R1-Distill-Llama uses Llama 3 architecture
     "deepseek-r1-distill-llama-70b": ModelArchitecture(
@@ -198,7 +196,6 @@ KNOWN_ARCHITECTURES: Dict[str, ModelArchitecture] = {
         vocab_size=128256,
         max_position_embeddings=131072,
     ),
-
     # ============ Qwen Family ============
     # Note: Qwen2.5 models have max_position_embeddings=32768 (32K context)
     # Some variants may support longer via RoPE scaling but base is 32K
@@ -222,7 +219,6 @@ KNOWN_ARCHITECTURES: Dict[str, ModelArchitecture] = {
         vocab_size=152064,
         max_position_embeddings=32768,  # Qwen2.5-7B actual limit
     ),
-
     # ============ Mistral Family ============
     "mistral-7b": ModelArchitecture(
         model_id="mistral-7b",
@@ -278,24 +274,19 @@ def normalize_model_name(model_name: str) -> str:
         # DeepSeek Llama distillations
         (r"deepseek.*r1.*distill.*llama.*70b", "deepseek-r1-distill-llama-70b"),
         (r"deepseek.*r1.*distill.*llama.*8b", "deepseek-r1-distill-llama-8b"),
-
         # Llama 3.x variants (all use same 70B arch)
         (r"llama[-.]?3\.?[13]?[-.]?70b", "llama-3-70b"),
         (r"llama[-.]?3\.?[13]?[-.]?8b", "llama-3-8b"),
-
         # Llama 2 variants
         (r"llama[-.]?2[-.]?70b", "llama-2-70b"),
         (r"llama[-.]?2[-.]?13b", "llama-2-13b"),
         (r"llama[-.]?2[-.]?7b", "llama-2-7b"),
-
         # Generic Llama (assume Llama 3)
         (r"^llama[-.]?70b", "llama-3-70b"),
         (r"^llama[-.]?8b", "llama-3-8b"),
-
         # Qwen
         (r"qwen2?[-.]?72b", "qwen2-72b"),
         (r"qwen2?[-.]?7b", "qwen2-7b"),
-
         # Mistral
         (r"mistral[-.]?7b", "mistral-7b"),
         (r"mixtral[-.]?8x7b", "mixtral-8x7b"),
@@ -308,7 +299,7 @@ def normalize_model_name(model_name: str) -> str:
     return name
 
 
-def get_model_architecture(model_name: str) -> Optional[ModelArchitecture]:
+def get_model_architecture(model_name: str) -> ModelArchitecture | None:
     """
     Get model architecture by name.
 
@@ -335,7 +326,7 @@ def get_model_architecture(model_name: str) -> Optional[ModelArchitecture]:
     return None
 
 
-def estimate_model_size_from_name(model_name: str) -> Optional[float]:
+def estimate_model_size_from_name(model_name: str) -> float | None:
     """
     Extract model size in billions from model name.
 
@@ -355,7 +346,7 @@ def estimate_model_size_from_name(model_name: str) -> Optional[float]:
     return None
 
 
-def get_model_architecture_or_estimate(model_name: str) -> Optional[ModelArchitecture]:
+def get_model_architecture_or_estimate(model_name: str) -> ModelArchitecture | None:
     """
     Get model architecture, falling back to size-based estimation.
 

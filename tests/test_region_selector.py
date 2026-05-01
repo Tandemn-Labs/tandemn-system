@@ -1,15 +1,12 @@
-import pytest
+from placement.roofline_magic import AWS_INSTANCE_TO_GPU
 from quota.region_selector import (
-    get_instance_family,
-    get_quota_code,
-    get_ordered_regions,
+    INSTANCE_VCPUS,
     RegionCandidate,
     RegionQuota,
-    INSTANCE_VCPUS,
-    QUOTA_CODES,
+    get_instance_family,
+    get_ordered_regions,
+    get_quota_code,
 )
-from placement.roofline_magic import AWS_INSTANCE_TO_GPU
-
 
 # --- get_instance_family ---
 
@@ -72,18 +69,10 @@ def test_get_ordered_regions_sort_by_quota(region_quotas):
 
 
 def test_get_ordered_regions_spot_preferred(region_quotas):
-    candidates = get_ordered_regions(
-        "g6e.48xlarge", num_nodes=1, quotas=region_quotas, prefer_spot=True
-    )
+    candidates = get_ordered_regions("g6e.48xlarge", num_nodes=1, quotas=region_quotas, prefer_spot=True)
     # At same quota level, spot should come before on-demand
-    spot_indices = [
-        i for i, c in enumerate(candidates) if c.use_spot and c.region == "us-east-1"
-    ]
-    od_indices = [
-        i
-        for i, c in enumerate(candidates)
-        if not c.use_spot and c.region == "us-east-1"
-    ]
+    spot_indices = [i for i, c in enumerate(candidates) if c.use_spot and c.region == "us-east-1"]
+    od_indices = [i for i, c in enumerate(candidates) if not c.use_spot and c.region == "us-east-1"]
     if spot_indices and od_indices:
         assert spot_indices[0] < od_indices[0]
 

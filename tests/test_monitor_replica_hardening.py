@@ -27,9 +27,7 @@ monitor_replica closure can't be unit-tested without mocking sky.tail_logs
 and a full JobTracker — integration coverage is in Phase 6.
 """
 
-import pytest
-
-from orca_server.koi_contract import ReasonCode, TERMINAL_PHASES
+from orca_server.koi_contract import TERMINAL_PHASES, ReasonCode
 
 
 class TestTerminalPhases:

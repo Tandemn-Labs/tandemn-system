@@ -1,6 +1,8 @@
 """Unit tests for templates/vllm_batch_runner_server.py"""
+
 import asyncio
-import json
+import importlib
+import os
 import subprocess
 import threading
 import time
@@ -8,9 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-import importlib
-import os
 
 _runner_path = os.path.join(os.path.dirname(__file__), "..", "templates", "vllm_batch_runner_server.py")
 _spec = importlib.util.spec_from_file_location("vllm_batch_runner_server", _runner_path)
@@ -29,7 +28,7 @@ vllm:time_per_output_token_seconds_bucket{le="1.0",model_name="m"} 98
 vllm:time_per_output_token_seconds_bucket{le="+Inf",model_name="m"} 100
 """
 
-PREEMPTION_TEXT = "vllm:num_preemptions_total{model_name=\"m\"} 7.0\n"
+PREEMPTION_TEXT = 'vllm:num_preemptions_total{model_name="m"} 7.0\n'
 
 COUNTER_TEXT_PRE = """\
 vllm:prompt_tokens_total{model_name="m"} 100.0
@@ -46,10 +45,19 @@ vllm:num_preemptions_total{model_name="m"} 3.0
 
 def _make_args(**kwargs):
     defaults = dict(
-        model="Qwen/Qwen2.5-7B", tensor_parallel_size=1, pipeline_parallel_size=1,
-        gpu_memory_utilization=0.90, max_num_seqs=32, max_model_len=None,
-        dtype="auto", kv_cache_dtype="auto", quantization="none",
-        cloud="aws", instance_type="g6e.12xlarge", gpu_name="L40S", engine="vllm",
+        model="Qwen/Qwen2.5-7B",
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        gpu_memory_utilization=0.90,
+        max_num_seqs=32,
+        max_model_len=None,
+        dtype="auto",
+        kv_cache_dtype="auto",
+        quantization="none",
+        cloud="aws",
+        instance_type="g6e.12xlarge",
+        gpu_name="L40S",
+        engine="vllm",
         hf_token=None,
     )
     defaults.update(kwargs)
@@ -59,6 +67,7 @@ def _make_args(**kwargs):
 # ---------------------------------------------------------------------------
 # wait_for_server
 # ---------------------------------------------------------------------------
+
 
 class TestWaitForServer:
     def test_ready_after_retries(self):
@@ -70,15 +79,16 @@ class TestWaitForServer:
             call_count["n"] += 1
             return r
 
-        with patch.object(runner.requests, "get", side_effect=fake_get), \
-             patch.object(runner.time, "sleep"):
+        with patch.object(runner.requests, "get", side_effect=fake_get), patch.object(runner.time, "sleep"):
             elapsed = runner.wait_for_server(timeout_sec=60)
         assert isinstance(elapsed, float)
 
     def test_raises_timeout(self):
-        with patch.object(runner.requests, "get", return_value=MagicMock(status_code=503)), \
-             patch.object(runner.time, "sleep"), \
-             patch.object(runner.time, "time", side_effect=[0.0, 61.0]):
+        with (
+            patch.object(runner.requests, "get", return_value=MagicMock(status_code=503)),
+            patch.object(runner.time, "sleep"),
+            patch.object(runner.time, "time", side_effect=[0.0, 61.0]),
+        ):
             with pytest.raises(TimeoutError):
                 runner.wait_for_server(timeout_sec=60)
 
@@ -86,6 +96,7 @@ class TestWaitForServer:
 # ---------------------------------------------------------------------------
 # Sidecar
 # ---------------------------------------------------------------------------
+
 
 class TestSidecar:
     def test_silent_when_no_url(self):
@@ -105,7 +116,7 @@ SSE_LINES = [
     b'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n',
     b'data: {"choices":[{"delta":{"content":" world"},"finish_reason":"stop"}]}\n',
     b'data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}\n',
-    b'data: [DONE]\n',
+    b"data: [DONE]\n",
 ]
 
 
@@ -178,6 +189,7 @@ class TestSendOne:
 # Prometheus delta helpers
 # ---------------------------------------------------------------------------
 
+
 class TestPromDelta:
     def test_delta_counter(self):
         delta = runner._delta_counter(COUNTER_TEXT_PRE, COUNTER_TEXT_POST, "vllm:prompt_tokens_total")
@@ -199,6 +211,7 @@ class TestPromDelta:
 # histogram_quantile
 # ---------------------------------------------------------------------------
 
+
 class TestHistogramQuantile:
     def test_p50_in_correct_range(self):
         result = runner.histogram_quantile(HISTOGRAM_TEXT, "vllm:time_per_output_token_seconds", 0.50)
@@ -219,13 +232,30 @@ class TestHistogramQuantile:
 # build_metrics
 # ---------------------------------------------------------------------------
 
+
 class TestBuildMetrics:
     def _sample_results(self):
         return [
-            {"status": "success", "custom_id": "r1", "ttft_s": 0.05, "e2e_s": 0.5,
-             "tpot_client_s": 0.009, "prompt_tokens": 100, "output_tokens": 50, "content": "hi"},
-            {"status": "success", "custom_id": "r2", "ttft_s": 0.08, "e2e_s": 0.8,
-             "tpot_client_s": 0.012, "prompt_tokens": 120, "output_tokens": 60, "content": "hello"},
+            {
+                "status": "success",
+                "custom_id": "r1",
+                "ttft_s": 0.05,
+                "e2e_s": 0.5,
+                "tpot_client_s": 0.009,
+                "prompt_tokens": 100,
+                "output_tokens": 50,
+                "content": "hi",
+            },
+            {
+                "status": "success",
+                "custom_id": "r2",
+                "ttft_s": 0.08,
+                "e2e_s": 0.8,
+                "tpot_client_s": 0.012,
+                "prompt_tokens": 120,
+                "output_tokens": 60,
+                "content": "hello",
+            },
             {"status": "skipped", "custom_id": "r3", "error": "context_length_exceeded"},
         ]
 
@@ -233,14 +263,28 @@ class TestBuildMetrics:
         args = _make_args()
         with patch.object(runner, "_get_price_per_hour", return_value=4.68):
             metrics = runner.build_metrics(
-                self._sample_results(), COUNTER_TEXT_PRE, COUNTER_TEXT_POST, args,
-                time.time() - 100, "2026-01-01T00:00:00", 10.0, 50.0, {}, {},
+                self._sample_results(),
+                COUNTER_TEXT_PRE,
+                COUNTER_TEXT_POST,
+                args,
+                time.time() - 100,
+                "2026-01-01T00:00:00",
+                10.0,
+                50.0,
+                {},
+                {},
             )
         for key in [
-            "ttft_ms_p50", "tpot_client_ms_p50", "tpot_ms_p50",
-            "avg_sm_util_pct", "running_avg", "kv_cache_util_pct_avg",
-            "cost_for_run_usd", "tokens_per_dollar",
-            "throughput_input_tokens_per_sec", "num_preemptions",
+            "ttft_ms_p50",
+            "tpot_client_ms_p50",
+            "tpot_ms_p50",
+            "avg_sm_util_pct",
+            "running_avg",
+            "kv_cache_util_pct_avg",
+            "cost_for_run_usd",
+            "tokens_per_dollar",
+            "throughput_input_tokens_per_sec",
+            "num_preemptions",
         ]:
             assert key in metrics, f"Missing key: {key}"
 
@@ -248,8 +292,16 @@ class TestBuildMetrics:
         args = _make_args()
         with patch.object(runner, "_get_price_per_hour", return_value=None):
             metrics = runner.build_metrics(
-                self._sample_results(), COUNTER_TEXT_PRE, COUNTER_TEXT_POST, args,
-                time.time() - 100, "ts", 10.0, 50.0, {}, {},
+                self._sample_results(),
+                COUNTER_TEXT_PRE,
+                COUNTER_TEXT_POST,
+                args,
+                time.time() - 100,
+                "ts",
+                10.0,
+                50.0,
+                {},
+                {},
             )
         # Server-side: 10000 prompt + 5000 gen = 15000 tokens in 50s = 300 tok/s
         assert metrics["throughput_tokens_per_sec"] == pytest.approx(300.0)
@@ -259,8 +311,16 @@ class TestBuildMetrics:
         args = _make_args()
         with patch.object(runner, "_get_price_per_hour", return_value=None):
             metrics = runner.build_metrics(
-                self._sample_results(), COUNTER_TEXT_PRE, COUNTER_TEXT_POST, args,
-                time.time() - 100, "ts", 10.0, 50.0, {}, {},
+                self._sample_results(),
+                COUNTER_TEXT_PRE,
+                COUNTER_TEXT_POST,
+                args,
+                time.time() - 100,
+                "ts",
+                10.0,
+                50.0,
+                {},
+                {},
             )
         assert metrics["num_preemptions"] == 3
 
@@ -268,20 +328,35 @@ class TestBuildMetrics:
         args = _make_args()
         with patch.object(runner, "_get_price_per_hour", return_value=10.0):
             metrics = runner.build_metrics(
-                self._sample_results(), "", "", args,
-                time.time() - 100, "ts", 10.0, 3600.0, {}, {},
+                self._sample_results(),
+                "",
+                "",
+                args,
+                time.time() - 100,
+                "ts",
+                10.0,
+                3600.0,
+                {},
+                {},
             )
         assert metrics["cost_for_run_usd"] == pytest.approx(10.0)
 
     def test_gpu_and_scheduler_summaries_passed_through(self):
         args = _make_args()
         gpu = {"avg_sm_util_pct": 75.0, "avg_mem_bw_util_pct": 40.0, "gpu_samples": 100}
-        sched = {"running_avg": 32.0, "running_max": 64, "kv_cache_util_pct_avg": 45.0,
-                 "scheduler_samples": 200}
+        sched = {"running_avg": 32.0, "running_max": 64, "kv_cache_util_pct_avg": 45.0, "scheduler_samples": 200}
         with patch.object(runner, "_get_price_per_hour", return_value=None):
             metrics = runner.build_metrics(
-                self._sample_results(), "", "", args,
-                time.time() - 100, "ts", 10.0, 50.0, gpu, sched,
+                self._sample_results(),
+                "",
+                "",
+                args,
+                time.time() - 100,
+                "ts",
+                10.0,
+                50.0,
+                gpu,
+                sched,
             )
         assert metrics["avg_sm_util_pct"] == 75.0
         assert metrics["running_avg"] == 32.0
@@ -292,6 +367,7 @@ class TestBuildMetrics:
 # ---------------------------------------------------------------------------
 # GPUMonitor
 # ---------------------------------------------------------------------------
+
 
 class TestGPUMonitor:
     def test_summary_empty_when_no_pynvml(self):
@@ -306,6 +382,7 @@ class TestGPUMonitor:
 # MetricsPoller
 # ---------------------------------------------------------------------------
 
+
 class TestMetricsPoller:
     def test_summary_empty_when_no_data(self):
         poller = runner.MetricsPoller()
@@ -315,6 +392,7 @@ class TestMetricsPoller:
 # ---------------------------------------------------------------------------
 # shutdown_server
 # ---------------------------------------------------------------------------
+
 
 class TestShutdownServer:
     def test_sigterm_and_wait(self):

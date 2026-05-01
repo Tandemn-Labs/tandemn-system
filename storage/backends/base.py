@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, AsyncIterator
+from collections.abc import AsyncIterator
 
 
 class StorageBackend(ABC):
@@ -51,7 +51,7 @@ class StorageBackend(ABC):
         pass
 
     @abstractmethod
-    async def list_files(self, prefix: str, user: str) -> List[str]:
+    async def list_files(self, prefix: str, user: str) -> list[str]:
         """
         List files in storage with given prefix.
         Returns: List of file paths/URIs
@@ -85,9 +85,7 @@ class StorageBackend(ABC):
     # The client will take care of the multipart lifecyle and we will just return the presigned URLs.
     # However such kind of mechanism is NOT NEEDED for downloads
     @abstractmethod
-    async def presigned_upload(
-        self, remote_path: str, user: str, expires_seconds: int = 600
-    ) -> dict:
+    async def presigned_upload(self, remote_path: str, user: str, expires_seconds: int = 600) -> dict:
         """
         Returns a presigned URL for a SINGLE CHUNK of the total payload.
         return {"type": "single", "url":".....", "method":"put", "headers":{"Content-Type":"application/octet-stream"}}
@@ -95,9 +93,7 @@ class StorageBackend(ABC):
         pass
 
     @abstractmethod
-    async def presigned_download(
-        self, remote_path: str, user: str, expires_seconds: int = 600
-    ) -> dict:
+    async def presigned_download(self, remote_path: str, user: str, expires_seconds: int = 600) -> dict:
         """
         Returns a presigned URL for downloading the total payload.
         return { "url":".....", "method":"get", "headers":{"Accept":"application/octet-stream"}}
@@ -132,9 +128,7 @@ class StorageBackend(ABC):
         pass
 
     @abstractmethod
-    async def multipart_complete(
-        self, remote_path: str, user: str, upload_id: str, part_ids: list[str]
-    ) -> dict:
+    async def multipart_complete(self, remote_path: str, user: str, upload_id: str, part_ids: list[str]) -> dict:
         """
         This is the final step in the multipart upload.
         This just returns the final URI of the uploaded file.

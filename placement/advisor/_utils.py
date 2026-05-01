@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from functools import lru_cache
 
 
@@ -54,9 +53,13 @@ def instance_price(instance_type: str) -> float:
     """On-demand hourly price via SkyPilot catalog. Cached across calls."""
     try:
         import sky.catalog as _sky_catalog
+
         cost = _sky_catalog.get_hourly_cost(
-            instance_type=instance_type, use_spot=False,
-            region="us-east-1", zone=None, clouds="aws",
+            instance_type=instance_type,
+            use_spot=False,
+            region="us-east-1",
+            zone=None,
+            clouds="aws",
         )
         return cost if cost else 0.0
     except Exception:
