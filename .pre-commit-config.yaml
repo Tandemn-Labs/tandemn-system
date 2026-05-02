@@ -7,9 +7,11 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: '\.csv$|\.md$'
+        # CSV/MD are data files; profiling/ is research code excluded
+        # from ruff and intentionally not normalized.
+        exclude: '\.csv$|\.md$|^profiling/'
       - id: end-of-file-fixer
-        exclude: '\.csv$'
+        exclude: '\.csv$|^profiling/'
       - id: check-yaml
         args: [--allow-multiple-documents]
       - id: check-merge-conflict

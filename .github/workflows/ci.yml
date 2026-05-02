@@ -35,10 +35,9 @@ jobs:
   typecheck:
     name: Type check (mypy, advisory)
     runs-on: ubuntu-latest
-    # Advisory only during gradual adoption: mypy reports errors but does not
-    # fail the build. Flip continue-on-error to false once the existing
-    # pre-tooling backlog is cleaned up.
-    continue-on-error: true
+    # Advisory only during gradual adoption: mypy reports errors to the
+    # job summary but never fails the build. Flip the `|| true` once the
+    # existing pre-tooling backlog is cleaned up.
     steps:
       - uses: actions/checkout@v4
 
@@ -49,10 +48,23 @@ jobs:
 
       - name: Install mypy + minimal deps
         run: |
-          pip install mypy==1.13.0 pydantic>=2.0 types-requests types-PyYAML
+          pip install 'mypy==1.13.0' 'pydantic>=2.0' types-requests types-PyYAML
 
-      - name: Run mypy
-        run: mypy
+      - name: Run mypy (advisory)
+        run: |
+          set +e
+          mypy 2>&1 | tee mypy-report.txt
+          status=${PIPESTATUS[0]}
+          {
+            echo "## mypy report (advisory)"
+            echo ""
+            echo "Exit status: \`$status\` (non-blocking during gradual adoption)"
+            echo ""
+            echo '```'
+            tail -200 mypy-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
   pre-commit:
     name: Pre-commit hooks
