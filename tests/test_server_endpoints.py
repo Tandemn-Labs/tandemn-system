@@ -3,6 +3,8 @@
 Uses httpx AsyncClient against the real app (no external services called).
 """
 
+from pathlib import Path
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -120,7 +122,20 @@ async def test_placement_user_specified(client):
 
 # ---- /test/placement (llm solver) ----
 
+_LLM_SOLVER_PERF_DB = (
+    Path(__file__).resolve().parent.parent
+    / "LLM_placement_solver"
+    / "llm_advisor"
+    / "data"
+    / "aiconfigurator"
+    / "data.csv"
+)
 
+
+@pytest.mark.skipif(
+    not _LLM_SOLVER_PERF_DB.exists(),
+    reason="LLM solver perf DB not available (submodule data file missing in CI)",
+)
 @pytest.mark.asyncio
 async def test_placement_llm_solver(client):
     payload = {

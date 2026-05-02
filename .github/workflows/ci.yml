@@ -24,7 +24,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install ruff
-        run: pip install ruff==0.7.4
+        run: pip install ruff==0.15.8
 
       - name: ruff check
         run: ruff check .
@@ -33,8 +33,12 @@ jobs:
         run: ruff format --check .
 
   typecheck:
-    name: Type check (mypy)
+    name: Type check (mypy, advisory)
     runs-on: ubuntu-latest
+    # Advisory only during gradual adoption: mypy reports errors but does not
+    # fail the build. Flip continue-on-error to false once the existing
+    # pre-tooling backlog is cleaned up.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
