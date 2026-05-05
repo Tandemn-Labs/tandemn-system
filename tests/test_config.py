@@ -1,6 +1,6 @@
 from orca_server.config import (
-    AWS_INSTANCES,
     AWS_INSTANCE_TO_GPU,
+    AWS_INSTANCES,
     INSTANCE_TO_GPU,
     INSTANCE_VCPUS,
     INSTANCE_VRAM,

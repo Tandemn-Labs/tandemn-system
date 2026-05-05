@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 from threading import Lock
+from types import SimpleNamespace
 
 import pytest
 

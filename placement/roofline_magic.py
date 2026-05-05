@@ -17,17 +17,15 @@ Usage:
     result = solver.decide(request)
 """
 
-import uuid
 import logging
-from typing import Dict, List, Optional, Union
 
 import pandas as pd
 
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
-from placement.magic import VPCMagic
 from orca_server.config import AWS_INSTANCE_TO_GPU
 from orca_server.utils import make_job_id as _make_job_id
+from placement.magic import VPCMagic
 from utils.utils import load_aws_quota_csv
 
 logger = logging.getLogger(__name__)
@@ -38,10 +36,10 @@ logger = logging.getLogger(__name__)
 # Built from AWS_INSTANCE_TO_GPU at module level, sorted by ascending gpu_count.
 # ---------------------------------------------------------------------------
 def _build_gpu_type_to_instances(
-    instance_map: Dict[str, tuple],
-) -> Dict[str, List[tuple]]:
+    instance_map: dict[str, tuple],
+) -> dict[str, list[tuple]]:
     """Build reverse map from GPU name to list of (instance_type, gpu_count)."""
-    rev: Dict[str, List[tuple]] = {}
+    rev: dict[str, list[tuple]] = {}
     for inst, (gpu_name, gpu_count) in instance_map.items():
         rev.setdefault(gpu_name, []).append((inst, gpu_count))
     for gpu_name in rev:
@@ -50,9 +48,7 @@ def _build_gpu_type_to_instances(
 
 
 # Reverse map built once at import time
-GPU_TYPE_TO_INSTANCES: Dict[str, List[tuple]] = _build_gpu_type_to_instances(
-    AWS_INSTANCE_TO_GPU
-)
+GPU_TYPE_TO_INSTANCES: dict[str, list[tuple]] = _build_gpu_type_to_instances(AWS_INSTANCE_TO_GPU)
 
 
 def resolve_gpu_type_to_instance(gpu_type: str, min_gpus: int) -> tuple:
@@ -86,8 +82,7 @@ def resolve_gpu_type_to_instance(gpu_type: str, min_gpus: int) -> tuple:
 
     max_count = instances[-1][1]
     raise ValueError(
-        f"No AWS instance with >= {min_gpus} {gpu_type} GPUs. "
-        f"Max available: {max_count} GPUs on {instances[-1][0]}"
+        f"No AWS instance with >= {min_gpus} {gpu_type} GPUs. Max available: {max_count} GPUs on {instances[-1][0]}"
     )
 
 
@@ -117,11 +112,11 @@ def check_user_specified_feasibility(
         dict with keys: feasible, reason, max_model_len, solution
         On success, solution contains the full evaluate_manual_placement() output.
     """
-    from placement.roofline.solver_adapter import PlacementSolverAdapter
     from placement.roofline.gpu_specs import (
-        calculate_max_supported_context,
         AWS_INSTANCE_GPU_MAP,
+        calculate_max_supported_context,
     )
+    from placement.roofline.solver_adapter import PlacementSolverAdapter
 
     adapter = PlacementSolverAdapter(
         gpu_pool={instance_type: pp},
@@ -236,7 +231,7 @@ def quota_to_gpu_pool(
     region: str = "us-east-1",
     market: str = "on_demand",
     max_instances_per_type: int = 4,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """
     Convert Orca quota DataFrame to solver gpu_pool format.
 
@@ -288,8 +283,7 @@ def quota_to_gpu_pool(
 
         # Filter to only allowed instance types
         is_allowed = any(
-            instance_type.startswith(prefix) or instance_type == prefix
-            for prefix in ALLOWED_INSTANCE_PREFIXES
+            instance_type.startswith(prefix) or instance_type == prefix for prefix in ALLOWED_INSTANCE_PREFIXES
         )
         if not is_allowed:
             continue
@@ -303,15 +297,11 @@ def quota_to_gpu_pool(
             continue
 
         # Calculate how many instances are allowed, capped to limit search space
-        instance_count = min(
-            int(vcpu_quota / vcpu_per_instance), max_instances_per_type
-        )
+        instance_count = min(int(vcpu_quota / vcpu_per_instance), max_instances_per_type)
         if instance_count > 0:
             gpu_pool[instance_type] = instance_count
 
-    logger.info(
-        f"[Roofline] Filtered quota pool to {len(gpu_pool)} capable instance types"
-    )
+    logger.info(f"[Roofline] Filtered quota pool to {len(gpu_pool)} capable instance types")
     return gpu_pool
 
 
@@ -361,7 +351,7 @@ class RooflineAWSAllocation(VPCMagic):
         # Last solver log (populated after each solve call, regardless of success/failure)
         self.last_solve_log = ""
 
-    def _get_solver_adapter(self, gpu_pool: Optional[Dict[str, int]] = None):
+    def _get_solver_adapter(self, gpu_pool: dict[str, int] | None = None):
         """Get or create solver adapter."""
         if self._solver_adapter is None:
             from placement.roofline.solver_adapter import PlacementSolverAdapter
@@ -375,9 +365,7 @@ class RooflineAWSAllocation(VPCMagic):
             self._solver_adapter.gpu_pool = gpu_pool
         return self._solver_adapter
 
-    def decide(
-        self, request: Union[BatchedRequest, OnlineServingRequest]
-    ) -> MagicOutput:
+    def decide(self, request: BatchedRequest | OnlineServingRequest) -> MagicOutput:
         """
         Make allocation decision based on request.
 
@@ -418,9 +406,7 @@ class RooflineAWSAllocation(VPCMagic):
         # Get GPU pool from quota (if enabled)
         if self.use_quota_pool and not self.quota_df.empty:
             gpu_pool = quota_to_gpu_pool(self.quota_df, region, market)
-            logger.info(
-                f"[Roofline] Available instances: {list(gpu_pool.keys())[:5]}..."
-            )
+            logger.info(f"[Roofline] Available instances: {list(gpu_pool.keys())[:5]}...")
         else:
             # Use a small, fast default GPU pool for testing
             # Only includes modern GPUs capable of running large LLMs
@@ -431,23 +417,20 @@ class RooflineAWSAllocation(VPCMagic):
                 "p4de.24xlarge": 1,  # 8x A100 (80GB)
                 "p5.48xlarge": 1,  # 8x H100
             }
-            logger.info(
-                f"[Roofline] Using fast default GPU pool: {list(gpu_pool.keys())}"
-            )
+            logger.info(f"[Roofline] Using fast default GPU pool: {list(gpu_pool.keys())}")
 
         # Create solver input
         from placement.roofline.solver_adapter import (
-            PlacementSolverAdapter,
             create_solver_input_from_request,
         )
 
         # Extract vLLM config params (defaults match vLLM defaults)
-        vllm_cfg = getattr(req, 'vllm_specific_config', None)
-        max_num_seqs = (vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256)
-        max_num_batched_tokens = (getattr(vllm_cfg, 'max_num_batched_tokens', None) or 16384) if vllm_cfg else 16384
-        gpu_memory_utilization = (getattr(vllm_cfg, 'gpu_memory_utilization', None) or 0.90) if vllm_cfg else 0.90
+        vllm_cfg = getattr(req, "vllm_specific_config", None)
+        max_num_seqs = vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256
+        max_num_batched_tokens = (getattr(vllm_cfg, "max_num_batched_tokens", None) or 16384) if vllm_cfg else 16384
+        gpu_memory_utilization = (getattr(vllm_cfg, "gpu_memory_utilization", None) or 0.90) if vllm_cfg else 0.90
 
-        log_level = getattr(req, 'log_level', None) or "info"
+        log_level = getattr(req, "log_level", None) or "info"
 
         solver_input = create_solver_input_from_request(
             model_name=req.model_name,
@@ -477,13 +460,9 @@ class RooflineAWSAllocation(VPCMagic):
         # Log result
         logger.info("[Roofline] Solution found:")
         logger.info(f"  Instance: {result.instance_family} x {result.num_instances}")
-        logger.info(
-            f"  GPU: {result.gpu_model}, TP={result.tp_degree}, PP={result.pp_stages}"
-        )
+        logger.info(f"  GPU: {result.gpu_model}, TP={result.tp_degree}, PP={result.pp_stages}")
         logger.info(f"  Throughput: {result.throughput_tokens_per_sec:.0f} tokens/sec")
-        logger.info(
-            f"  Cost: ${result.cost_per_hour:.2f}/hour, ${result.cost_per_million_tokens:.2f}/M tokens"
-        )
+        logger.info(f"  Cost: ${result.cost_per_hour:.2f}/hour, ${result.cost_per_million_tokens:.2f}/M tokens")
         logger.info(f"  Max context: {result.max_supported_context} tokens")
 
         # Convert to MagicOutput.
@@ -553,7 +532,7 @@ class RooflineAWSAllocation(VPCMagic):
         region: str = "us-east-1",
         market: str = "on_demand",
         top_k: int = 5,
-    ) -> List[MagicOutput]:
+    ) -> list[MagicOutput]:
         """
         Process batch request and return multiple fallback solutions.
 
@@ -569,9 +548,7 @@ class RooflineAWSAllocation(VPCMagic):
         Returns:
             List of MagicOutput solutions sorted by cost (best first)
         """
-        logger.info(
-            f"[Roofline] Processing batch request (multi) for model: {req.model_name}"
-        )
+        logger.info(f"[Roofline] Processing batch request (multi) for model: {req.model_name}")
 
         # Get GPU pool from quota (if enabled)
         if self.use_quota_pool and not self.quota_df.empty:
@@ -587,17 +564,16 @@ class RooflineAWSAllocation(VPCMagic):
 
         # Create solver input
         from placement.roofline.solver_adapter import (
-            PlacementSolverAdapter,
             create_solver_input_from_request,
         )
 
         # Extract vLLM config params (defaults match vLLM defaults)
-        vllm_cfg = getattr(req, 'vllm_specific_config', None)
-        max_num_seqs = (vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256)
-        max_num_batched_tokens = (getattr(vllm_cfg, 'max_num_batched_tokens', None) or 16384) if vllm_cfg else 16384
-        gpu_memory_utilization = (getattr(vllm_cfg, 'gpu_memory_utilization', None) or 0.90) if vllm_cfg else 0.90
+        vllm_cfg = getattr(req, "vllm_specific_config", None)
+        max_num_seqs = vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256
+        max_num_batched_tokens = (getattr(vllm_cfg, "max_num_batched_tokens", None) or 16384) if vllm_cfg else 16384
+        gpu_memory_utilization = (getattr(vllm_cfg, "gpu_memory_utilization", None) or 0.90) if vllm_cfg else 0.90
 
-        log_level = getattr(req, 'log_level', None) or "info"
+        log_level = getattr(req, "log_level", None) or "info"
 
         solver_input = create_solver_input_from_request(
             model_name=req.model_name,

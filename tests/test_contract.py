@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from orca_server.koi_contract import EventEnvelope, ReasonCode, TERMINAL_PHASES
+from orca_server.koi_contract import TERMINAL_PHASES, EventEnvelope, ReasonCode
 
 
 def test_envelope_all_fields_optional():

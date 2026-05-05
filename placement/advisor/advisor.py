@@ -14,21 +14,18 @@ Usage:
 
 from __future__ import annotations
 
-import math
 import os
-from typing import Dict, List, Optional
 
 from models.resources import MagicOutput
 from orca_server.utils import make_job_id
-
-from placement.advisor.model_arch_fetcher import fetch_arch_features
-from placement.advisor.oracle import get_candidates, OracleCandidate
 from placement.advisor import ensemble as _ensemble
+from placement.advisor.model_arch_fetcher import fetch_arch_features
+from placement.advisor.oracle import OracleCandidate, get_candidates
 
 
-def _max_model_len(arch_features, vram_per_gpu: float, tp: int, pp: int = 1) -> Optional[int]:
+def _max_model_len(arch_features, vram_per_gpu: float, tp: int, pp: int = 1) -> int | None:
     """Estimate a safe max_model_len for vLLM given VRAM after weights."""
-    from placement.advisor.oracle import _model_vram_gb, _kv_cache_gb_per_token
+    from placement.advisor.oracle import _kv_cache_gb_per_token, _model_vram_gb
 
     model_shard_gb = _model_vram_gb(arch_features) / (tp * pp)
     available_gb = vram_per_gpu * 0.90 - model_shard_gb - 2.0  # 2GB vLLM overhead
@@ -89,7 +86,7 @@ class PlacementAdvisor:
     reasoning call to recommend GPU configurations for batch inference jobs.
     """
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "claude-opus-4-6"):
+    def __init__(self, api_key: str | None = None, model: str = "claude-opus-4-6"):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         self.model = model
 
@@ -100,8 +97,8 @@ class PlacementAdvisor:
         avg_output_tokens: int,
         num_requests: int,
         slo_hours: float,
-        gpu_pool: Optional[Dict] = None,
-    ) -> List[MagicOutput]:
+        gpu_pool: dict | None = None,
+    ) -> list[MagicOutput]:
         """
         Return up to 5 ranked GPU configurations for the given job.
 
@@ -146,7 +143,8 @@ class PlacementAdvisor:
 
         # 4. Convert to MagicOutput
         from orca_server.config import AWS_INSTANCES
-        outputs: List[MagicOutput] = []
+
+        outputs: list[MagicOutput] = []
         seen: set[tuple] = set()
 
         for placement in result.placements:
@@ -157,14 +155,16 @@ class PlacementAdvisor:
             seen.add(key)
 
             vram_per_gpu = AWS_INSTANCES.get(c.instance_type, (None, None, None, 24))[3]
-            outputs.append(_candidate_to_magic_output(
-                candidate=c,
-                vram_per_gpu=vram_per_gpu,
-                arch_features=arch,
-                num_requests=num_requests,
-                avg_input=avg_input_tokens,
-                avg_output=avg_output_tokens,
-            ))
+            outputs.append(
+                _candidate_to_magic_output(
+                    candidate=c,
+                    vram_per_gpu=vram_per_gpu,
+                    arch_features=arch,
+                    num_requests=num_requests,
+                    avg_input=avg_input_tokens,
+                    avg_output=avg_output_tokens,
+                )
+            )
 
         # Pad with next-best candidates if fewer than 3 LLM picks
         if len(outputs) < 3:
@@ -176,13 +176,15 @@ class PlacementAdvisor:
                     continue
                 seen.add(key)
                 vram_per_gpu = AWS_INSTANCES.get(c.instance_type, (None, None, None, 24))[3]
-                outputs.append(_candidate_to_magic_output(
-                    candidate=c,
-                    vram_per_gpu=vram_per_gpu,
-                    arch_features=arch,
-                    num_requests=num_requests,
-                    avg_input=avg_input_tokens,
-                    avg_output=avg_output_tokens,
-                ))
+                outputs.append(
+                    _candidate_to_magic_output(
+                        candidate=c,
+                        vram_per_gpu=vram_per_gpu,
+                        arch_features=arch,
+                        num_requests=num_requests,
+                        avg_input=avg_input_tokens,
+                        avg_output=avg_output_tokens,
+                    )
+                )
 
         return outputs[:5]

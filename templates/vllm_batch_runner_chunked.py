@@ -35,7 +35,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any, Optional
 
 import aiohttp
 import requests
@@ -60,6 +60,7 @@ REPLICA_ID = os.getenv("REPLICA_ID", "")
 # Progress + phase reporting (same as single-cluster runner)
 # ---------------------------------------------------------------------------
 
+
 def write_progress(done: int, total: int, status: str = "running"):
     try:
         with open(PROGRESS_FILE, "w") as f:
@@ -68,7 +69,7 @@ def write_progress(done: int, total: int, status: str = "running"):
         pass
 
 
-def _report_phase(phase: str, reason: Optional[str] = None):
+def _report_phase(phase: str, reason: str | None = None):
     if not ORCA_URL or not JOB_ID:
         return
     try:
@@ -80,8 +81,7 @@ def _report_phase(phase: str, reason: Optional[str] = None):
             body["replica_id"] = REPLICA_ID
         if reason:
             body["reason"] = reason[:500]
-        requests.post(f"{ORCA_URL}/job/{JOB_ID}/phase",
-                      json=body, headers=headers, timeout=5)
+        requests.post(f"{ORCA_URL}/job/{JOB_ID}/phase", json=body, headers=headers, timeout=5)
     except Exception:
         pass
 
@@ -110,15 +110,16 @@ def sum_metric(text: str, metric_name: str) -> float:
 
 
 _METRIC_ALIASES = {
-    "vllm:num_gpu_blocks":  "vllm:num_gpu_blocks_total",
+    "vllm:num_gpu_blocks": "vllm:num_gpu_blocks_total",
     "vllm:generation_tokens_total": "vllm:generation_tokens",
-    "vllm:prompt_tokens_total":     "vllm:prompt_tokens",
-    "vllm:request_success_total":   "vllm:request_success",
-    "vllm:num_preemptions_total":   "vllm:num_preemptions",
-    "vllm:gpu_cache_usage_perc":    "vllm:kv_cache_usage_perc",
+    "vllm:prompt_tokens_total": "vllm:prompt_tokens",
+    "vllm:request_success_total": "vllm:request_success",
+    "vllm:num_preemptions_total": "vllm:num_preemptions",
+    "vllm:gpu_cache_usage_perc": "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries_total": "vllm:prefix_cache_queries",
-    "vllm:prefix_cache_hits_total":    "vllm:prefix_cache_hits",
+    "vllm:prefix_cache_hits_total": "vllm:prefix_cache_hits",
 }
+
 
 def sum_metric_compat(text: str, name: str) -> float:
     val = sum_metric(text, name)
@@ -130,6 +131,7 @@ def sum_metric_compat(text: str, name: str) -> float:
 class LiveTokenCounter:
     """Cumulative token counter — incremented per-SSE-token by async send_one(),
     read by sidecar thread. GIL-safe: single writer (event loop), single reader (sidecar)."""
+
     __slots__ = ("_gen", "_prompt")
 
     def __init__(self):
@@ -179,7 +181,7 @@ def _parse_histogram_buckets(text: str, metric_name: str) -> list:
     return sorted(buckets.items())
 
 
-def histogram_quantile_from_buckets(buckets: list, quantile: float) -> Optional[float]:
+def histogram_quantile_from_buckets(buckets: list, quantile: float) -> float | None:
     if not buckets or buckets[-1][1] == 0:
         return None
     total = buckets[-1][1]
@@ -199,13 +201,13 @@ def histogram_quantile_from_buckets(buckets: list, quantile: float) -> Optional[
     return prev_le
 
 
-def histogram_quantile(text: str, metric_name: str, quantile: float) -> Optional[float]:
+def histogram_quantile(text: str, metric_name: str, quantile: float) -> float | None:
     buckets = _parse_histogram_buckets(text, metric_name)
     val = histogram_quantile_from_buckets(buckets, quantile)
     return val * 1000.0 if val is not None else None
 
 
-def _percentile(lst: list, p: int) -> Optional[float]:
+def _percentile(lst: list, p: int) -> float | None:
     if not lst:
         return None
     sorted_lst = sorted(lst)
@@ -217,7 +219,7 @@ def _percentile(lst: list, p: int) -> Optional[float]:
     return sorted_lst[lower] * (1 - weight) + sorted_lst[upper] * weight
 
 
-def calculate_percentiles(values: List[int]) -> Dict[str, float]:
+def calculate_percentiles(values: list[int]) -> dict[str, float]:
     if not values:
         return {"p50": 0, "p90": 0, "p99": 0}
     sorted_vals = sorted(values)
@@ -236,6 +238,7 @@ def calculate_percentiles(values: List[int]) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 # Prometheus delta helpers — warmup subtraction
 # ---------------------------------------------------------------------------
+
 
 def _check_vllm_idle() -> bool:
     """Check if vLLM has zero requests running (truly idle)."""
@@ -257,7 +260,7 @@ def _scrape_prom() -> str:
         return ""
 
 
-def _parse_prom_counters(text: str) -> Dict[str, float]:
+def _parse_prom_counters(text: str) -> dict[str, float]:
     counters = {}
     for line in text.splitlines():
         if not line or line[0] == "#":
@@ -289,13 +292,14 @@ def _delta_counter(pre_text: str, post_text: str, metric_name: str) -> float:
 # GPU hardware monitor (pynvml)
 # ---------------------------------------------------------------------------
 
+
 class GPUMonitor:
     """Sample GPU SM%, memory bandwidth%, memory usage via pynvml every 0.5s."""
 
     def __init__(self, sample_interval: float = 0.5):
         self._interval = sample_interval
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._timeseries: list = []
         self._pynvml = None
         self._device_count = 0
@@ -305,6 +309,7 @@ class GPUMonitor:
 
         try:
             import pynvml
+
             pynvml.nvmlInit()
             self._pynvml = pynvml
             self._device_count = pynvml.nvmlDeviceGetCount()
@@ -337,7 +342,7 @@ class GPUMonitor:
                     util = pynvml.nvmlDeviceGetUtilizationRates(handle)
                     sample[f"gpu{i}_sm_pct"] = util.gpu
                     sample[f"gpu{i}_membw_pct"] = util.memory
-                    sample[f"gpu{i}_mem_gb"] = round(mem.used / (1024 ** 3), 2)
+                    sample[f"gpu{i}_mem_gb"] = round(mem.used / (1024**3), 2)
                     sample[f"gpu{i}_mem_pct"] = round((mem.used / mem.total) * 100, 1) if mem.total else 0
                 except Exception:
                     pass
@@ -384,13 +389,14 @@ class GPUMonitor:
 # Scheduler / Prometheus metrics poller
 # ---------------------------------------------------------------------------
 
+
 class MetricsPoller:
     """Poll /metrics every 0.5s for scheduler state + KV cache utilization."""
 
     def __init__(self, interval: float = 0.5):
         self._interval = interval
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._timeseries: list = []
         self._start_time = 0.0
 
@@ -446,13 +452,62 @@ class MetricsPoller:
 # ---------------------------------------------------------------------------
 
 GPU_SPECS = {
-    "L40S":     {"gpu_mem_gb": 48, "gpu_tflops_fp16": 362, "gpu_bandwidth_gbps": 864, "generation": "Ada Lovelace", "interconnect": "PCIe", "model": "NVIDIA L40S"},
-    "L4":       {"gpu_mem_gb": 24, "gpu_tflops_fp16": 121, "gpu_bandwidth_gbps": 300, "generation": "Ada Lovelace", "interconnect": "PCIe", "model": "NVIDIA L4"},
-    "A10G":     {"gpu_mem_gb": 24, "gpu_tflops_fp16": 125, "gpu_bandwidth_gbps": 600, "generation": "Ampere", "interconnect": "PCIe", "model": "NVIDIA A10G"},
-    "A100":     {"gpu_mem_gb": 80, "gpu_tflops_fp16": 312, "gpu_bandwidth_gbps": 2039, "generation": "Ampere", "interconnect": "NVLink", "model": "NVIDIA A100 80GB"},
-    "A100-40GB":{"gpu_mem_gb": 40, "gpu_tflops_fp16": 312, "gpu_bandwidth_gbps": 1555, "generation": "Ampere", "interconnect": "NVLink", "model": "NVIDIA A100 40GB"},
-    "H100":     {"gpu_mem_gb": 80, "gpu_tflops_fp16": 989, "gpu_bandwidth_gbps": 3350, "generation": "Hopper", "interconnect": "NVLink", "model": "NVIDIA H100 SXM"},
-    "V100":     {"gpu_mem_gb": 16, "gpu_tflops_fp16": 125, "gpu_bandwidth_gbps": 900, "generation": "Volta", "interconnect": "NVLink", "model": "NVIDIA V100"},
+    "L40S": {
+        "gpu_mem_gb": 48,
+        "gpu_tflops_fp16": 362,
+        "gpu_bandwidth_gbps": 864,
+        "generation": "Ada Lovelace",
+        "interconnect": "PCIe",
+        "model": "NVIDIA L40S",
+    },
+    "L4": {
+        "gpu_mem_gb": 24,
+        "gpu_tflops_fp16": 121,
+        "gpu_bandwidth_gbps": 300,
+        "generation": "Ada Lovelace",
+        "interconnect": "PCIe",
+        "model": "NVIDIA L4",
+    },
+    "A10G": {
+        "gpu_mem_gb": 24,
+        "gpu_tflops_fp16": 125,
+        "gpu_bandwidth_gbps": 600,
+        "generation": "Ampere",
+        "interconnect": "PCIe",
+        "model": "NVIDIA A10G",
+    },
+    "A100": {
+        "gpu_mem_gb": 80,
+        "gpu_tflops_fp16": 312,
+        "gpu_bandwidth_gbps": 2039,
+        "generation": "Ampere",
+        "interconnect": "NVLink",
+        "model": "NVIDIA A100 80GB",
+    },
+    "A100-40GB": {
+        "gpu_mem_gb": 40,
+        "gpu_tflops_fp16": 312,
+        "gpu_bandwidth_gbps": 1555,
+        "generation": "Ampere",
+        "interconnect": "NVLink",
+        "model": "NVIDIA A100 40GB",
+    },
+    "H100": {
+        "gpu_mem_gb": 80,
+        "gpu_tflops_fp16": 989,
+        "gpu_bandwidth_gbps": 3350,
+        "generation": "Hopper",
+        "interconnect": "NVLink",
+        "model": "NVIDIA H100 SXM",
+    },
+    "V100": {
+        "gpu_mem_gb": 16,
+        "gpu_tflops_fp16": 125,
+        "gpu_bandwidth_gbps": 900,
+        "generation": "Volta",
+        "interconnect": "NVLink",
+        "model": "NVIDIA V100",
+    },
 }
 
 
@@ -460,6 +515,7 @@ def _get_model_info(model_name: str) -> dict:
     info: dict = {}
     try:
         from transformers import AutoConfig
+
         cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
 
         archs = getattr(cfg, "architectures", None)
@@ -516,19 +572,29 @@ def _get_model_info(model_name: str) -> dict:
     return info
 
 
-def _get_price_per_hour(instance_type: str) -> Optional[float]:
+def _get_price_per_hour(instance_type: str) -> float | None:
     try:
         from sky import catalog
+
         return catalog.get_hourly_cost(
-            instance_type=instance_type, use_spot=True,
-            region=None, zone=None, clouds="aws",
+            instance_type=instance_type,
+            use_spot=True,
+            region=None,
+            zone=None,
+            clouds="aws",
         )
     except Exception:
         pass
     PRICES = {
-        "g6e.xlarge": 0.54, "g6e.2xlarge": 0.99, "g6e.12xlarge": 4.68,
-        "g6e.48xlarge": 13.35, "g5.xlarge": 0.50, "g5.2xlarge": 1.01,
-        "g5.12xlarge": 4.10, "g5.48xlarge": 16.38, "p4d.24xlarge": 32.77,
+        "g6e.xlarge": 0.54,
+        "g6e.2xlarge": 0.99,
+        "g6e.12xlarge": 4.68,
+        "g6e.48xlarge": 13.35,
+        "g5.xlarge": 0.50,
+        "g5.2xlarge": 1.01,
+        "g5.12xlarge": 4.10,
+        "g5.48xlarge": 16.38,
+        "p4d.24xlarge": 32.77,
         "p5.48xlarge": 98.32,
     }
     return PRICES.get(instance_type)
@@ -538,7 +604,8 @@ def _get_price_per_hour(instance_type: str) -> Optional[float]:
 # CSV + metrics builder
 # ---------------------------------------------------------------------------
 
-def write_metrics_csv(output_path: str, metrics: Dict[str, Any]):
+
+def write_metrics_csv(output_path: str, metrics: dict[str, Any]):
     try:
         output_dir = os.path.dirname(output_path)
         if output_dir:
@@ -556,7 +623,7 @@ def write_metrics_csv(output_path: str, metrics: Dict[str, Any]):
 
 
 def build_metrics(
-    results: List[Dict],
+    results: list[dict],
     pre_prom_text: str,
     post_prom_text: str,
     args,
@@ -567,7 +634,7 @@ def build_metrics(
     gpu_summary: dict,
     scheduler_summary: dict,
     model_info: dict | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     job_end_time = time.time()
     total_runtime = job_end_time - job_start_time
 
@@ -730,8 +797,7 @@ def build_metrics(
     }
 
     if model_info:
-        for k in ("model_architecture", "params_billion", "is_moe",
-                   "num_experts_active", "vocab_size"):
+        for k in ("model_architecture", "params_billion", "is_moe", "num_experts_active", "vocab_size"):
             if k in model_info:
                 metrics[k] = model_info[k]
 
@@ -791,6 +857,7 @@ def build_metrics(
 # Log collector — tee stdout/stderr into a buffer for forwarding
 # ---------------------------------------------------------------------------
 
+
 class LogCollector:
     """Tee stdout/stderr into a buffer for forwarding to control plane."""
 
@@ -822,10 +889,12 @@ class LogCollector:
                 with self._lock:
                     # Cap buffer at 5000 lines to prevent memory issues
                     if len(self._buffer) < 5000:
-                        self._buffer.append({
-                            "ts": time.time(),
-                            "msg": data.rstrip("\n"),
-                        })
+                        self._buffer.append(
+                            {
+                                "ts": time.time(),
+                                "msg": data.rstrip("\n"),
+                            }
+                        )
 
         def flush(self):
             self._original.flush()
@@ -845,7 +914,13 @@ class LogCollector:
 # Sidecar (same as single-cluster runner)
 # ---------------------------------------------------------------------------
 
-def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor"] = None, live_counter: Optional["LiveTokenCounter"] = None, log_collector: Optional[LogCollector] = None):
+
+def _sidecar_loop(
+    stop_event: threading.Event,
+    gpu_monitor: Optional["GPUMonitor"] = None,
+    live_counter: Optional["LiveTokenCounter"] = None,
+    log_collector: LogCollector | None = None,
+):
     if not ORCA_URL:
         return
 
@@ -919,18 +994,30 @@ def _sidecar_loop(stop_event: threading.Event, gpu_monitor: Optional["GPUMonitor
 # vLLM server lifecycle
 # ---------------------------------------------------------------------------
 
-def start_vllm_server(args, log_collector: Optional[LogCollector] = None) -> subprocess.Popen:
+
+def start_vllm_server(args, log_collector: LogCollector | None = None) -> subprocess.Popen:
     cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-        "--model", args.model,
-        "--host", "0.0.0.0",
-        "--port", str(SERVER_PORT),
-        "--tensor-parallel-size", str(args.tensor_parallel_size),
-        "--pipeline-parallel-size", str(args.pipeline_parallel_size),
-        "--gpu-memory-utilization", str(args.gpu_memory_utilization),
-        "--max-num-seqs", str(args.max_num_seqs),
-        "--dtype", args.dtype,
-        "--kv-cache-dtype", args.kv_cache_dtype,
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        args.model,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(SERVER_PORT),
+        "--tensor-parallel-size",
+        str(args.tensor_parallel_size),
+        "--pipeline-parallel-size",
+        str(args.pipeline_parallel_size),
+        "--gpu-memory-utilization",
+        str(args.gpu_memory_utilization),
+        "--max-num-seqs",
+        str(args.max_num_seqs),
+        "--dtype",
+        args.dtype,
+        "--kv-cache-dtype",
+        args.kv_cache_dtype,
         "--disable-log-requests",
         "--trust-remote-code",
     ]
@@ -941,8 +1028,12 @@ def start_vllm_server(args, log_collector: Optional[LogCollector] = None) -> sub
 
     if log_collector:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            env=env, bufsize=1, text=True,
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            bufsize=1,
+            text=True,
         )
 
         def _reader():
@@ -975,10 +1066,7 @@ def _classify_startup_exit(rc: int, log_collector: Optional["LogCollector"]) -> 
     regex will tag as "oom" when applicable.
     """
     tail = log_collector.drain(max_lines=200) if log_collector else []
-    is_oom = any(
-        any(marker in line.get("msg", "").lower() for marker in _OOM_MARKERS)
-        for line in tail
-    )
+    is_oom = any(any(marker in line.get("msg", "").lower() for marker in _OOM_MARKERS) for line in tail)
     if is_oom:
         return f"vLLM exited with code {rc} during startup — CUDA out of memory"
     return f"vLLM exited with code {rc} during startup"
@@ -1019,6 +1107,7 @@ def shutdown_server(proc: subprocess.Popen, timeout: int = 60):
 # max_concurrency from KV cache
 # ---------------------------------------------------------------------------
 
+
 def determine_max_concurrency() -> int:
     """Get max_concurrency from Prometheus num_gpu_blocks, with env var fallback."""
     prom_value = _estimate_max_concurrency_from_metrics()
@@ -1029,7 +1118,7 @@ def determine_max_concurrency() -> int:
     return min(result, 512)
 
 
-def _get_info_label(text: str, metric_name: str, label_key: str) -> Optional[str]:
+def _get_info_label(text: str, metric_name: str, label_key: str) -> str | None:
     """Extract a label value from a Prometheus info/gauge metric."""
     for line in text.splitlines():
         if not line or line[0] == "#":
@@ -1046,7 +1135,7 @@ def _get_info_label(text: str, metric_name: str, label_key: str) -> Optional[str
     return None
 
 
-def _estimate_max_concurrency_from_metrics() -> Optional[int]:
+def _estimate_max_concurrency_from_metrics() -> int | None:
     """Estimate from Prometheus num_gpu_blocks metric.
 
     vLLM V1 moved num_gpu_blocks from a gauge to a label on cache_config_info.
@@ -1068,14 +1157,13 @@ def _estimate_max_concurrency_from_metrics() -> Optional[int]:
 
         if num_gpu_blocks == 0:
             return None
-        avg_seq_len = (
-            int(os.getenv("AVG_INPUT_TOKENS", "2000"))
-            + int(os.getenv("AVG_OUTPUT_TOKENS", "500"))
-        )
+        avg_seq_len = int(os.getenv("AVG_INPUT_TOKENS", "2000")) + int(os.getenv("AVG_OUTPUT_TOKENS", "500"))
         blocks_per_request = max(1, avg_seq_len // block_size)
         result = max(1, int(num_gpu_blocks // blocks_per_request))
-        print(f"[Runner] KV cache: {num_gpu_blocks} blocks × {block_size} tokens, "
-              f"avg_seq={avg_seq_len} → {blocks_per_request} blocks/req → max_concurrency={result}")
+        print(
+            f"[Runner] KV cache: {num_gpu_blocks} blocks × {block_size} tokens, "
+            f"avg_seq={avg_seq_len} → {blocks_per_request} blocks/req → max_concurrency={result}"
+        )
         return result
     except Exception:
         return None
@@ -1112,6 +1200,7 @@ def _retry(fn, description: str, max_attempts: int = 5, base_delay: float = 2.0)
 
 def pull_chunk_from_server():
     """Pull next chunk. Returns chunk dict, _SENTINEL_QUEUE_EMPTY, or _SENTINEL_TRANSIENT_ERROR."""
+
     def _pull():
         resp = requests.post(
             f"{ORCA_URL}/job/{JOB_ID}/chunks/pull",
@@ -1135,7 +1224,8 @@ def check_chunk_progress() -> dict:
     try:
         resp = requests.get(
             f"{ORCA_URL}/job/{JOB_ID}/chunks/progress",
-            headers=_auth_headers(), timeout=10,
+            headers=_auth_headers(),
+            timeout=10,
         )
         if resp.ok:
             return resp.json()
@@ -1146,6 +1236,7 @@ def check_chunk_progress() -> dict:
 
 def report_chunk_complete(chunk_id: str) -> dict:
     """Report chunk completion to control plane (with retries)."""
+
     def _complete():
         resp = requests.post(
             f"{ORCA_URL}/job/{JOB_ID}/chunks/complete",
@@ -1164,6 +1255,7 @@ def report_chunk_complete(chunk_id: str) -> dict:
 
 def download_chunk(s3_input_path: str, local_path: str) -> bool:
     """Download a chunk via the control plane's S3 download endpoint (with retries)."""
+
     def _download():
         resp = requests.get(
             f"{ORCA_URL}/storage/download_s3",
@@ -1185,6 +1277,7 @@ def download_chunk(s3_input_path: str, local_path: str) -> bool:
 
 def upload_chunk_output(local_path: str, s3_output_path: str) -> bool:
     """Upload chunk output via the control plane's storage endpoint (with retries)."""
+
     def _upload():
         with open(local_path, "rb") as f:
             resp = requests.post(
@@ -1202,9 +1295,9 @@ def upload_chunk_output(local_path: str, s3_output_path: str) -> bool:
         return False
 
 
-def load_requests(input_file: str) -> List[Dict[str, Any]]:
+def load_requests(input_file: str) -> list[dict[str, Any]]:
     reqs = []
-    with open(input_file, "r") as f:
+    with open(input_file) as f:
         for line_num, line in enumerate(f, 1):
             if line.strip():
                 try:
@@ -1297,12 +1390,13 @@ def pull_and_download_chunk() -> tuple:
 # SSE streaming client (same as single-cluster runner)
 # ---------------------------------------------------------------------------
 
+
 async def send_one(
     session: aiohttp.ClientSession,
     semaphore: asyncio.Semaphore,
     req_dict: dict,
     model_name: str,
-    live_counter: Optional[LiveTokenCounter] = None,
+    live_counter: LiveTokenCounter | None = None,
 ) -> dict:
     body = req_dict.get("body", {})
     payload = {
@@ -1403,9 +1497,11 @@ async def send_one(
 
 
 async def run_chunk(
-    requests_list: List[Dict], model_name: str, max_concurrency: int,
-    live_counter: Optional[LiveTokenCounter] = None,
-) -> List[Dict]:
+    requests_list: list[dict],
+    model_name: str,
+    max_concurrency: int,
+    live_counter: LiveTokenCounter | None = None,
+) -> list[dict]:
     """Process a single chunk of requests."""
     semaphore = asyncio.Semaphore(max_concurrency)
     connector = aiohttp.TCPConnector(limit=max_concurrency)
@@ -1423,7 +1519,7 @@ async def run_chunk(
     return results
 
 
-def write_output_jsonl(results: List[Dict], output_path: str, model_name: str):
+def write_output_jsonl(results: list[dict], output_path: str, model_name: str):
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -1436,10 +1532,12 @@ def write_output_jsonl(results: List[Dict], output_path: str, model_name: str):
                     "status_code": 200 if result and result.get("status") == "success" else 400,
                     "body": {
                         "model": model_name,
-                        "choices": [{
-                            "message": {"role": "assistant", "content": result.get("text", "") if result else ""},
-                            "finish_reason": result.get("finish_reason", "stop") if result else "error",
-                        }],
+                        "choices": [
+                            {
+                                "message": {"role": "assistant", "content": result.get("text", "") if result else ""},
+                                "finish_reason": result.get("finish_reason", "stop") if result else "error",
+                            }
+                        ],
                         "usage": {
                             "prompt_tokens": result.get("input_tokens", 0) if result else 0,
                             "completion_tokens": result.get("output_tokens", 0) if result else 0,
@@ -1453,6 +1551,7 @@ def write_output_jsonl(results: List[Dict], output_path: str, model_name: str):
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run vLLM chunked batch inference")
@@ -1477,6 +1576,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main — chunked loop with prefetch
 # ---------------------------------------------------------------------------
+
 
 def _post_summary(metrics_dict: dict):
     """POST per-replica metrics summary to the control plane."""
@@ -1538,8 +1638,9 @@ def main():
         print("[Runner] Introspecting model metadata...")
         model_info = _get_model_info(args.model)
         if model_info.get("params_billion"):
-            print(f"[Runner] Model: {model_info.get('model_architecture', '?')} "
-                  f"({model_info['params_billion']}B params)")
+            print(
+                f"[Runner] Model: {model_info.get('model_architecture', '?')} ({model_info['params_billion']}B params)"
+            )
 
         # 4. Start GPU monitor + metrics poller
         gpu_monitor = GPUMonitor()
@@ -1549,8 +1650,10 @@ def main():
         # 5. Start sidecar (with GPU monitor + live token counter + log collector)
         stop_sidecar = threading.Event()
         sidecar_thread = threading.Thread(
-            target=_sidecar_loop, args=(stop_sidecar, gpu_monitor, live_counter, log_collector),
-            daemon=True, name="orca-sidecar",
+            target=_sidecar_loop,
+            args=(stop_sidecar, gpu_monitor, live_counter, log_collector),
+            daemon=True,
+            name="orca-sidecar",
         )
         sidecar_thread.start()
 
@@ -1568,7 +1671,7 @@ def main():
         total_requests = 0
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 10
-        all_results: List[Dict] = []
+        all_results: list[dict] = []
         s3_output_base = ""
 
         # Prefetch first chunk (renewal starts immediately inside)
@@ -1598,7 +1701,7 @@ def main():
                                 break
                     if vllm_idle and not _signaled_idle:
                         print(f"[Runner] Queue empty, vLLM idle, {inflight} chunk(s) on other replicas")
-                        print(f"[Runner] Signaling replica_complete (metrics cleanup)")
+                        print("[Runner] Signaling replica_complete (metrics cleanup)")
                         _report_phase("replica_complete")
                         _signaled_idle = True
                         _idle_since = time.time()
@@ -1618,8 +1721,10 @@ def main():
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                     print(f"[Runner] {MAX_CONSECUTIVE_ERRORS} consecutive errors — giving up")
                     break
-                delay = min(30, 2 ** consecutive_errors)
-                print(f"[Runner] Server unreachable ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}), retrying in {delay}s...")
+                delay = min(30, 2**consecutive_errors)
+                print(
+                    f"[Runner] Server unreachable ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}), retrying in {delay}s..."
+                )
                 time.sleep(delay)
                 prefetch_future = executor.submit(pull_and_download_chunk)
                 continue
@@ -1708,7 +1813,7 @@ def main():
         generation_time = time.time() - generation_start
 
         # 7b. Signal replica completion IMMEDIATELY (before slow metrics/upload)
-        print(f"[Runner] Signaling replica_complete to control plane")
+        print("[Runner] Signaling replica_complete to control plane")
         _report_phase("replica_complete")
 
         # 8. Post-scrape Prometheus + stop monitors
@@ -1758,7 +1863,7 @@ def main():
         sidecar_thread.join(timeout=10)
 
         # 13. Enhanced summary
-        print(f"\n[Runner] === Chunked Run Summary ===")
+        print("\n[Runner] === Chunked Run Summary ===")
         print(f"  Replica: {REPLICA_ID}")
         print(f"  Chunks processed: {chunks_processed}")
         print(f"  Total requests: {total_requests}")

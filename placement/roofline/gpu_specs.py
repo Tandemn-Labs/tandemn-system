@@ -7,70 +7,68 @@ used to determine compute-bound vs memory-bound regimes and calculate throughput
 Ported from: ../LLM_placement_solver/solver.py
 """
 
-from typing import Dict, Any
+from typing import Any
 
 # GPU hardware specifications
 # - tflops: Peak FP16/BF16 TFLOPS with tensor cores
 # - mem_bw: Peak memory bandwidth in GB/s
 # - efficiency: Realistic efficiency factor (0-1) accounting for real-world overhead
-GPU_SPECS: Dict[str, Dict[str, float]] = {
+GPU_SPECS: dict[str, dict[str, float]] = {
     # Modern GPUs optimized for LLM inference (FP16/BF16 with modern tensor cores)
-    'H100': {'tflops': 989, 'mem_bw': 3350, 'efficiency': 0.70},  # Best for LLMs
-    'H200': {'tflops': 989, 'mem_bw': 4800, 'efficiency': 0.70},  # Higher bandwidth H100
-    'A100': {'tflops': 312, 'mem_bw': 2039, 'efficiency': 0.65},  # Excellent for LLMs
-    'L40S': {'tflops': 362, 'mem_bw': 864, 'efficiency': 0.58},   # Good Ada Lovelace
-    'A40': {'tflops': 150, 'mem_bw': 696, 'efficiency': 0.52},    # Ampere workstation
-    'L40': {'tflops': 181, 'mem_bw': 864, 'efficiency': 0.55},    # Ada Lovelace
-    'L4': {'tflops': 121, 'mem_bw': 300, 'efficiency': 0.50},     # Entry Ada Lovelace
-
+    "H100": {"tflops": 989, "mem_bw": 3350, "efficiency": 0.70},  # Best for LLMs
+    "H200": {"tflops": 989, "mem_bw": 4800, "efficiency": 0.70},  # Higher bandwidth H100
+    "A100": {"tflops": 312, "mem_bw": 2039, "efficiency": 0.65},  # Excellent for LLMs
+    "L40S": {"tflops": 362, "mem_bw": 864, "efficiency": 0.58},  # Good Ada Lovelace
+    "A40": {"tflops": 150, "mem_bw": 696, "efficiency": 0.52},  # Ampere workstation
+    "L40": {"tflops": 181, "mem_bw": 864, "efficiency": 0.55},  # Ada Lovelace
+    "L4": {"tflops": 121, "mem_bw": 300, "efficiency": 0.50},  # Entry Ada Lovelace
     # Older GPUs - lower efficiency for modern LLM workloads
-    'V100': {'tflops': 125, 'mem_bw': 900, 'efficiency': 0.42},   # Volta - old tensor cores
-    'RTX4090': {'tflops': 165, 'mem_bw': 1008, 'efficiency': 0.50},
-
+    "V100": {"tflops": 125, "mem_bw": 900, "efficiency": 0.42},  # Volta - old tensor cores
+    "RTX4090": {"tflops": 165, "mem_bw": 1008, "efficiency": 0.50},
     # Budget GPUs
-    'L20': {'tflops': 119, 'mem_bw': 480, 'efficiency': 0.48},    # Budget Ada
-    'A10': {'tflops': 125, 'mem_bw': 600, 'efficiency': 0.45},    # Budget Ampere
-    'A10G': {'tflops': 125, 'mem_bw': 600, 'efficiency': 0.45},   # AWS A10G (same as A10)
-    'T4': {'tflops': 65, 'mem_bw': 320, 'efficiency': 0.38},      # Old Turing
+    "L20": {"tflops": 119, "mem_bw": 480, "efficiency": 0.48},  # Budget Ada
+    "A10": {"tflops": 125, "mem_bw": 600, "efficiency": 0.45},  # Budget Ampere
+    "A10G": {"tflops": 125, "mem_bw": 600, "efficiency": 0.45},  # AWS A10G (same as A10)
+    "T4": {"tflops": 65, "mem_bw": 320, "efficiency": 0.38},  # Old Turing
 }
 
 # GPU performance tiers for hierarchy constraints
 # Higher tier = more powerful GPU, may warrant higher TP degree
-GPU_PERFORMANCE_TIERS: Dict[str, int] = {
-    'H200': 6,
-    'H100': 5,
-    'A100': 4,
-    'L40S': 3,
-    'A40': 3,
-    'L40': 2,
-    'L4': 2,
-    'V100': 2,
-    'A10': 1,
-    'A10G': 1,
-    'T4': 1,
-    'RTX4090': 2,
-    'L20': 2,
+GPU_PERFORMANCE_TIERS: dict[str, int] = {
+    "H200": 6,
+    "H100": 5,
+    "A100": 4,
+    "L40S": 3,
+    "A40": 3,
+    "L40": 2,
+    "L4": 2,
+    "V100": 2,
+    "A10": 1,
+    "A10G": 1,
+    "T4": 1,
+    "RTX4090": 2,
+    "L20": 2,
 }
 
 # GPU memory sizes (GB) - used for memory feasibility checks
-GPU_MEMORY_GB: Dict[str, float] = {
-    'H200': 141,
-    'H100': 80,
-    'A100': 80,  # 80GB variant (also 40GB exists)
-    'L40S': 48,
-    'A40': 48,
-    'L40': 48,
-    'L4': 24,
-    'V100': 32,  # 32GB variant (also 16GB exists)
-    'A10': 24,
-    'A10G': 24,
-    'T4': 16,
-    'RTX4090': 24,
-    'L20': 48,
+GPU_MEMORY_GB: dict[str, float] = {
+    "H200": 141,
+    "H100": 80,
+    "A100": 80,  # 80GB variant (also 40GB exists)
+    "L40S": 48,
+    "A40": 48,
+    "L40": 48,
+    "L4": 24,
+    "V100": 32,  # 32GB variant (also 16GB exists)
+    "A10": 24,
+    "A10G": 24,
+    "T4": 16,
+    "RTX4090": 24,
+    "L20": 48,
 }
 
 
-def get_gpu_specs(gpu_type: str) -> Dict[str, float]:
+def get_gpu_specs(gpu_type: str) -> dict[str, float]:
     """
     Get GPU specifications for a given GPU type.
 
@@ -81,7 +79,7 @@ def get_gpu_specs(gpu_type: str) -> Dict[str, float]:
         Dictionary with 'tflops', 'mem_bw', 'efficiency' keys.
         Falls back to A100 specs if GPU type is unknown.
     """
-    return GPU_SPECS.get(gpu_type, GPU_SPECS['A100'])
+    return GPU_SPECS.get(gpu_type, GPU_SPECS["A100"])
 
 
 def get_ridge_point(gpu_type: str) -> float:
@@ -102,8 +100,8 @@ def get_ridge_point(gpu_type: str) -> float:
     specs = get_gpu_specs(gpu_type)
 
     # Convert to consistent units
-    peak_flops = specs['tflops'] * 1e12  # TFLOPS → FLOPS
-    peak_bandwidth = specs['mem_bw'] * 1e9  # GB/s → bytes/s
+    peak_flops = specs["tflops"] * 1e12  # TFLOPS → FLOPS
+    peak_bandwidth = specs["mem_bw"] * 1e9  # GB/s → bytes/s
 
     return peak_flops / peak_bandwidth
 
@@ -136,37 +134,37 @@ def normalize_gpu_type(gpu_name: str) -> str:
     name = gpu_name.upper().strip()
 
     # Remove common prefixes
-    for prefix in ['NVIDIA ', 'NVIDIA-']:
+    for prefix in ["NVIDIA ", "NVIDIA-"]:
         if name.startswith(prefix):
-            name = name[len(prefix):]
+            name = name[len(prefix) :]
 
     # Handle specific patterns
-    if 'A100' in name:
-        return 'A100'
-    if 'H100' in name:
-        return 'H100'
-    if 'H200' in name:
-        return 'H200'
-    if 'L40S' in name:
-        return 'L40S'
-    if 'L40' in name and 'S' not in name:
-        return 'L40'
-    if 'L4' in name and '0' not in name:
-        return 'L4'
-    if 'A40' in name:
-        return 'A40'
-    if 'A10G' in name:
-        return 'A10G'
-    if 'A10' in name:
-        return 'A10'
-    if 'V100' in name:
-        return 'V100'
-    if 'T4' in name:
-        return 'T4'
-    if 'L20' in name:
-        return 'L20'
-    if 'RTX4090' in name or '4090' in name:
-        return 'RTX4090'
+    if "A100" in name:
+        return "A100"
+    if "H100" in name:
+        return "H100"
+    if "H200" in name:
+        return "H200"
+    if "L40S" in name:
+        return "L40S"
+    if "L40" in name and "S" not in name:
+        return "L40"
+    if "L4" in name and "0" not in name:
+        return "L4"
+    if "A40" in name:
+        return "A40"
+    if "A10G" in name:
+        return "A10G"
+    if "A10" in name:
+        return "A10"
+    if "V100" in name:
+        return "V100"
+    if "T4" in name:
+        return "T4"
+    if "L20" in name:
+        return "L20"
+    if "RTX4090" in name or "4090" in name:
+        return "RTX4090"
 
     # Return as-is if no match
     return name
@@ -174,21 +172,18 @@ def normalize_gpu_type(gpu_name: str) -> str:
 
 # AWS instance type to GPU mapping
 # Maps instance type to GPU model and count
-AWS_INSTANCE_GPU_MAP: Dict[str, Dict[str, Any]] = {
+AWS_INSTANCE_GPU_MAP: dict[str, dict[str, Any]] = {
     # P5 instances (H100)
     "p5.48xlarge": {"gpu_model": "H100", "num_gpus": 8},
     "p5en.48xlarge": {"gpu_model": "H200", "num_gpus": 8},
-
     # P4 instances (A100)
     "p4d.24xlarge": {"gpu_model": "A100", "num_gpus": 8},
     "p4de.24xlarge": {"gpu_model": "A100", "num_gpus": 8},
-
     # P3 instances (V100)
     "p3.2xlarge": {"gpu_model": "V100", "num_gpus": 1},
     "p3.8xlarge": {"gpu_model": "V100", "num_gpus": 4},
     "p3.16xlarge": {"gpu_model": "V100", "num_gpus": 8},
     "p3dn.24xlarge": {"gpu_model": "V100", "num_gpus": 8},
-
     # G6e instances (L40S)
     "g6e.xlarge": {"gpu_model": "L40S", "num_gpus": 1},
     "g6e.2xlarge": {"gpu_model": "L40S", "num_gpus": 1},
@@ -197,7 +192,6 @@ AWS_INSTANCE_GPU_MAP: Dict[str, Dict[str, Any]] = {
     "g6e.12xlarge": {"gpu_model": "L40S", "num_gpus": 4},
     "g6e.24xlarge": {"gpu_model": "L40S", "num_gpus": 4},
     "g6e.48xlarge": {"gpu_model": "L40S", "num_gpus": 8},
-
     # G6 instances (L4)
     "g6.xlarge": {"gpu_model": "L4", "num_gpus": 1},
     "g6.2xlarge": {"gpu_model": "L4", "num_gpus": 1},
@@ -206,7 +200,6 @@ AWS_INSTANCE_GPU_MAP: Dict[str, Dict[str, Any]] = {
     "g6.12xlarge": {"gpu_model": "L4", "num_gpus": 2},
     "g6.24xlarge": {"gpu_model": "L4", "num_gpus": 4},
     "g6.48xlarge": {"gpu_model": "L4", "num_gpus": 8},
-
     # G5 instances (A10G)
     "g5.xlarge": {"gpu_model": "A10G", "num_gpus": 1},
     "g5.2xlarge": {"gpu_model": "A10G", "num_gpus": 1},
@@ -291,7 +284,7 @@ def calculate_max_supported_context(
     kv_bytes_per_token = kv_bytes_per_token_per_layer * layers_per_gpu
 
     # Convert available GB to bytes
-    kv_available_bytes = kv_available_gb * (1024 ** 3)
+    kv_available_bytes = kv_available_gb * (1024**3)
 
     # Max context length
     max_context = int(kv_available_bytes / kv_bytes_per_token)

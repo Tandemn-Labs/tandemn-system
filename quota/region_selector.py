@@ -11,11 +11,10 @@ Algorithm:
 4. Sort by: quota amount (desc), then spot before on-demand (cost savings)
 """
 
-import subprocess
 import json
 import logging
+import subprocess
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 from orca_server.config import INSTANCE_VCPUS, VLLM_PORT
 
@@ -103,7 +102,7 @@ def query_quota(region: str, quota_code: str) -> int:
     return 0
 
 
-def get_all_quotas(instance_family: str = "g") -> Dict[str, RegionQuota]:
+def get_all_quotas(instance_family: str = "g") -> dict[str, RegionQuota]:
     """
     Query quotas for all regions for a given instance family.
 
@@ -116,9 +115,7 @@ def get_all_quotas(instance_family: str = "g") -> Dict[str, RegionQuota]:
     for region in AWS_REGIONS:
         on_demand = query_quota(region, on_demand_code)
         spot = query_quota(region, spot_code)
-        quotas[region] = RegionQuota(
-            region=region, on_demand_vcpus=on_demand, spot_vcpus=spot
-        )
+        quotas[region] = RegionQuota(region=region, on_demand_vcpus=on_demand, spot_vcpus=spot)
         logger.info(f"[Quota] {region}: on-demand={on_demand}, spot={spot}")
 
     return quotas
@@ -132,9 +129,7 @@ class RegionCandidate:
     use_spot: bool
     available_quota: int
 
-    def to_skypilot_resources(
-        self, instance_type: str, disk_size: str = "300GB", ports: int = VLLM_PORT
-    ) -> dict:
+    def to_skypilot_resources(self, instance_type: str, disk_size: str = "300GB", ports: int = VLLM_PORT) -> dict:
         """Convert to SkyPilot resources dict for any_of.
 
         Note: Don't specify 'infra' when using 'region' - region implies cloud.
@@ -151,10 +146,10 @@ class RegionCandidate:
 def get_ordered_regions(
     instance_type: str,
     num_nodes: int = 1,
-    quotas: Optional[Dict[str, RegionQuota]] = None,
+    quotas: dict[str, RegionQuota] | None = None,
     prefer_spot: bool = True,
-    target_market: Optional[str] = None,
-) -> List[RegionCandidate]:
+    target_market: str | None = None,
+) -> list[RegionCandidate]:
     """
     Get ordered list of regions to try for cluster creation.
 
@@ -188,7 +183,7 @@ def get_ordered_regions(
         quotas = get_all_quotas(family)
 
     # Build candidate list
-    candidates: List[RegionCandidate] = []
+    candidates: list[RegionCandidate] = []
 
     for region, quota in quotas.items():
         # Check spot quota
@@ -197,27 +192,14 @@ def get_ordered_regions(
             and (target_market == "spot" or prefer_spot)
             and quota.spot_vcpus >= required_vcpus
         ):
-            candidates.append(
-                RegionCandidate(
-                    region=region, use_spot=True, available_quota=quota.spot_vcpus
-                )
-            )
+            candidates.append(RegionCandidate(region=region, use_spot=True, available_quota=quota.spot_vcpus))
 
         # Check on-demand quota
-        if (
-            target_market in (None, "on_demand")
-            and quota.on_demand_vcpus >= required_vcpus
-        ):
-            candidates.append(
-                RegionCandidate(
-                    region=region, use_spot=False, available_quota=quota.on_demand_vcpus
-                )
-            )
+        if target_market in (None, "on_demand") and quota.on_demand_vcpus >= required_vcpus:
+            candidates.append(RegionCandidate(region=region, use_spot=False, available_quota=quota.on_demand_vcpus))
 
     if not candidates:
-        logger.warning(
-            f"[RegionSelector] No regions have sufficient quota for {required_vcpus} vCPUs!"
-        )
+        logger.warning(f"[RegionSelector] No regions have sufficient quota for {required_vcpus} vCPUs!")
         logger.warning("[RegionSelector] Consider requesting quota increases.")
         return []
 
@@ -230,9 +212,7 @@ def get_ordered_regions(
 
     candidates.sort(key=sort_key)
 
-    logger.info(
-        f"[RegionSelector] Found {len(candidates)} viable region/market combinations:"
-    )
+    logger.info(f"[RegionSelector] Found {len(candidates)} viable region/market combinations:")
     for i, c in enumerate(candidates[:5]):  # Show top 5
         market = "spot" if c.use_spot else "on-demand"
         logger.info(f"  {i + 1}. {c.region} ({market}) - {c.available_quota} vCPUs")
@@ -245,10 +225,10 @@ def build_skypilot_any_of(
     num_nodes: int = 1,
     max_candidates: int = 5,
     prefer_spot: bool = True,
-    target_market: Optional[str] = None,
+    target_market: str | None = None,
     disk_size: str = "300GB",
     ports: int = VLLM_PORT,
-) -> List[dict]:
+) -> list[dict]:
     """
     Build SkyPilot any_of resources list for fallback region selection.
 
@@ -283,11 +263,11 @@ def build_skypilot_any_of(
 
 
 # Cache for quota queries (refresh every 5 minutes)
-_quota_cache: Dict[str, Tuple[float, Dict[str, RegionQuota]]] = {}
+_quota_cache: dict[str, tuple[float, dict[str, RegionQuota]]] = {}
 _CACHE_TTL = 300  # 5 minutes
 
 
-def get_cached_quotas(instance_family: str = "g") -> Dict[str, RegionQuota]:
+def get_cached_quotas(instance_family: str = "g") -> dict[str, RegionQuota]:
     """Get quotas with caching to avoid repeated AWS API calls."""
     import time
 
@@ -314,17 +294,13 @@ def print_quota_summary():
     g_quotas = get_all_quotas("g")
     p_quotas = get_all_quotas("p")
 
-    print(
-        f"{'Region':<15} {'G/VT On-Demand':>15} {'G/VT Spot':>12} {'P On-Demand':>12} {'P Spot':>10}"
-    )
+    print(f"{'Region':<15} {'G/VT On-Demand':>15} {'G/VT Spot':>12} {'P On-Demand':>12} {'P Spot':>10}")
     print("-" * 70)
 
     for region in AWS_REGIONS:
         g = g_quotas.get(region, RegionQuota(region, 0, 0))
         p = p_quotas.get(region, RegionQuota(region, 0, 0))
-        print(
-            f"{region:<15} {g.on_demand_vcpus:>15} {g.spot_vcpus:>12} {p.on_demand_vcpus:>12} {p.spot_vcpus:>10}"
-        )
+        print(f"{region:<15} {g.on_demand_vcpus:>15} {g.spot_vcpus:>12} {p.on_demand_vcpus:>12} {p.spot_vcpus:>10}")
 
     print()
 
@@ -407,6 +383,7 @@ def refresh_quotas_from_aws(
     import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
+
     import pandas as pd
 
     logger.info("[QuotaRefresh] Starting AWS quota discovery...")
@@ -427,9 +404,7 @@ def refresh_quotas_from_aws(
                 family_type = "P5"
             else:
                 family_type = "P4_P3_P2"
-            gpu_type_str = (
-                f"{gpu_count}x {gpu_name}" if gpu_count > 1 else f"1x {gpu_name}"
-            )
+            gpu_type_str = f"{gpu_count}x {gpu_name}" if gpu_count > 1 else f"1x {gpu_name}"
             rows.append(
                 {
                     "Family": family_display,
@@ -442,9 +417,7 @@ def refresh_quotas_from_aws(
                 }
             )
         df = pd.DataFrame(rows)
-        logger.info(
-            "[QuotaRefresh] Fresh CSV from %d instances in AWS_INSTANCES", len(df)
-        )
+        logger.info("[QuotaRefresh] Fresh CSV from %d instances in AWS_INSTANCES", len(df))
 
     # Parallel fetch across all (family_type, region) combos
     family_types = sorted(df["Family_Type"].unique())
@@ -452,9 +425,7 @@ def refresh_quotas_from_aws(
     quotas = {}
 
     with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {
-            executor.submit(_fetch_family_region, ft, r): (ft, r) for ft, r in tasks
-        }
+        futures = {executor.submit(_fetch_family_region, ft, r): (ft, r) for ft, r in tasks}
         for future in as_completed(futures):
             try:
                 ft, region, on_demand, spot = future.result()
@@ -464,17 +435,13 @@ def refresh_quotas_from_aws(
                 logger.warning("[QuotaRefresh] Failed %s/%s: %s", ft, r, e)
                 quotas[(ft, r)] = {"on_demand": 0, "spot": 0}
 
-    logger.info(
-        "[QuotaRefresh] Fetched quotas for %d (family, region) pairs", len(quotas)
-    )
+    logger.info("[QuotaRefresh] Fetched quotas for %d (family, region) pairs", len(quotas))
 
     # Build quota columns
     for region in ALL_AWS_REGIONS:
         for market in ("on_demand", "spot"):
             col = f"{region}_{market}"
-            df[col] = df["Family_Type"].map(
-                lambda ft, r=region, m=market: quotas.get((ft, r), {}).get(m, 0)
-            )
+            df[col] = df["Family_Type"].map(lambda ft, r=region, m=market: quotas.get((ft, r), {}).get(m, 0))
 
     # Ensure column order: spec cols first, then quota cols sorted
     spec_cols = [

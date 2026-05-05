@@ -1,4 +1,5 @@
 """Live vLLM metrics collection: per-job daemon threads, ring buffer, SSE, Prometheus."""
+
 from __future__ import annotations
 
 import json
@@ -7,8 +8,8 @@ import os
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Generator
+from collections.abc import Generator
+from dataclasses import dataclass
 
 import requests as _requests
 
@@ -72,7 +73,7 @@ class MetricsSnapshot:
     # vLLM gauges
     avg_generation_throughput_toks_per_s: float = 0.0
     avg_prompt_throughput_toks_per_s: float = 0.0
-    gpu_cache_usage_perc: float = 0.0       # 0.0–1.0
+    gpu_cache_usage_perc: float = 0.0  # 0.0–1.0
     num_requests_running: int = 0
     num_requests_waiting: int = 0
     num_requests_swapped: int = 0
@@ -117,15 +118,11 @@ class MetricsSnapshot:
     live_prompt_tokens_total: float = 0.0
 
     @classmethod
-    def from_prometheus_text(cls, job_id: str, text: str, timestamp: float) -> "MetricsSnapshot":
+    def from_prometheus_text(cls, job_id: str, text: str, timestamp: float) -> MetricsSnapshot:
         snap = cls(job_id=job_id, timestamp=timestamp)
         # Throughput gauges (vLLM <0.10 — removed in 0.10.0, will be 0)
-        snap.avg_generation_throughput_toks_per_s = sum_metric(
-            text, "vllm:avg_generation_throughput_toks_per_s"
-        )
-        snap.avg_prompt_throughput_toks_per_s = sum_metric(
-            text, "vllm:avg_prompt_throughput_toks_per_s"
-        )
+        snap.avg_generation_throughput_toks_per_s = sum_metric(text, "vllm:avg_generation_throughput_toks_per_s")
+        snap.avg_prompt_throughput_toks_per_s = sum_metric(text, "vllm:avg_prompt_throughput_toks_per_s")
         # Token counters (vLLM >=0.10 — used to compute throughput via deltas)
         snap.generation_tokens_total = sum_metric_compat(text, "vllm:generation_tokens_total")
         snap.prompt_tokens_total = sum_metric_compat(text, "vllm:prompt_tokens_total")
@@ -232,13 +229,27 @@ _AVG_FIELDS = {
     "prefix_cache_hit_rate",
     "gpu_sm_util_pct",
     "gpu_mem_bw_util_pct",
-    "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
-    "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
-    "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
-    "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
-    "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
-    "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
-    "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+    "ttft_ms_p50",
+    "ttft_ms_p95",
+    "ttft_ms_p99",
+    "tpot_ms_p50",
+    "tpot_ms_p95",
+    "tpot_ms_p99",
+    "e2e_ms_p50",
+    "e2e_ms_p95",
+    "e2e_ms_p99",
+    "queue_time_ms_p50",
+    "queue_time_ms_p95",
+    "queue_time_ms_p99",
+    "prefill_time_ms_p50",
+    "prefill_time_ms_p95",
+    "prefill_time_ms_p99",
+    "decode_time_ms_p50",
+    "decode_time_ms_p95",
+    "decode_time_ms_p99",
+    "inference_time_ms_p50",
+    "inference_time_ms_p95",
+    "inference_time_ms_p99",
 }
 
 
@@ -364,9 +375,13 @@ class _JobCollector:
             if epoch_dt > 1.0:
                 if current.live_gen_tokens_total > 0:
                     epoch_gen = (current.live_gen_tokens_total - self._baseline_snap.live_gen_tokens_total) / epoch_dt
-                    epoch_prompt = (current.live_prompt_tokens_total - self._baseline_snap.live_prompt_tokens_total) / epoch_dt
+                    epoch_prompt = (
+                        current.live_prompt_tokens_total - self._baseline_snap.live_prompt_tokens_total
+                    ) / epoch_dt
                 else:
-                    epoch_gen = (current.generation_tokens_total - self._baseline_snap.generation_tokens_total) / epoch_dt
+                    epoch_gen = (
+                        current.generation_tokens_total - self._baseline_snap.generation_tokens_total
+                    ) / epoch_dt
                     epoch_prompt = (current.prompt_tokens_total - self._baseline_snap.prompt_tokens_total) / epoch_dt
                 result["epoch_generation_toks_per_s"] = round(epoch_gen, 2)
                 result["epoch_prompt_toks_per_s"] = round(epoch_prompt, 2)
@@ -377,7 +392,7 @@ class _JobCollector:
     def _poll_loop(self) -> None:
         last_flush = time.time()
         _prev_snap: MetricsSnapshot | None = None
-        _generating = False       # requests are in-flight
+        _generating = False  # requests are in-flight
         while not self._stop_event.is_set():
             try:
                 r = _requests.get(self.endpoint_url + "/metrics", timeout=4)
@@ -404,6 +419,7 @@ class _JobCollector:
                 # Update job status + progress based on what we observe
                 try:
                     from orca_server.job_manager import get_job_tracker
+
                     jt = get_job_tracker()
                     rec = jt.get(self.job_id)
                     if rec:
@@ -437,11 +453,13 @@ class _JobCollector:
             return
         try:
             from orca_server.metrics_db import get_metrics_db
+
             get_metrics_db().append_timeseries(self.job_id, batch)
         except Exception as e:
             logger.warning(
                 "[MetricsCollector] timeseries flush failed for %s: %s — data retained",
-                self.job_id, e,
+                self.job_id,
+                e,
             )
             with self.lock:
                 self._unflushed = batch + self._unflushed
@@ -502,9 +520,7 @@ class MetricsCollector:
         # Snapshot cumulative counters before excluding
         snap = self.get_replica_latest(job_id, replica_id)
         if snap:
-            self._excluded_cumulative[key] = {
-                f: getattr(snap, f, 0) or 0 for f in _SUM_FIELDS
-            }
+            self._excluded_cumulative[key] = {f: getattr(snap, f, 0) or 0 for f in _SUM_FIELDS}
         self._excluded_replicas.add(key)
         logger.info("[MetricsCollector] Excluded replica %s from aggregation (saved cumulative counters)", key)
 
@@ -522,16 +538,16 @@ class MetricsCollector:
     def list_replica_ids(self, job_id: str) -> list[str]:
         prefix = f"{job_id}:"
         with self._lock:
-            return [k[len(prefix):] for k in self._replicas
-                    if k.startswith(prefix) and k not in self._excluded_replicas]
+            return [
+                k[len(prefix) :] for k in self._replicas if k.startswith(prefix) and k not in self._excluded_replicas
+            ]
 
     def get_aggregated(self, job_id: str) -> MetricsSnapshot | None:
         """Return a merged view across all replicas, or fall back to get_latest."""
         replica_ids = self.list_replica_ids(job_id)
         if not replica_ids:
             return self.get_latest(job_id)
-        snaps = [s for rid in replica_ids
-                 if (s := self.get_replica_latest(job_id, rid)) is not None]
+        snaps = [s for rid in replica_ids if (s := self.get_replica_latest(job_id, rid)) is not None]
         if not snaps:
             return self.get_latest(job_id)
         merged = _merge_snapshots(job_id, snaps)
@@ -582,8 +598,7 @@ class MetricsCollector:
             if snap is None:
                 continue
             lines.append(
-                f'orca_job_throughput_toks_per_s{{job_id="{job_id}"}} '
-                f"{snap.avg_generation_throughput_toks_per_s}"
+                f'orca_job_throughput_toks_per_s{{job_id="{job_id}"}} {snap.avg_generation_throughput_toks_per_s}'
             )
         lines += [
             "# HELP orca_job_kv_cache_util KV cache utilization (0-1)",

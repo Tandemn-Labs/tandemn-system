@@ -10,13 +10,12 @@ Each chunked job has:
   - An ordered list for output assembly
 """
 
-import time
 import logging
-from typing import Optional
+import time
 
 import redis
 
-from orca_server.config import REDIS_URL, CHUNK_LEASE_TTL_SEC, CHUNK_MAX_RETRIES
+from orca_server.config import CHUNK_LEASE_TTL_SEC, CHUNK_MAX_RETRIES, REDIS_URL
 
 logger = logging.getLogger(__name__)
 
@@ -27,20 +26,26 @@ _PREFIX = "chunk:job"
 def _meta_key(job_id: str) -> str:
     return f"{_PREFIX}:{job_id}:meta"
 
+
 def _pending_key(job_id: str) -> str:
     return f"{_PREFIX}:{job_id}:pending"
+
 
 def _inflight_key(job_id: str) -> str:
     return f"{_PREFIX}:{job_id}:inflight"
 
+
 def _completed_key(job_id: str) -> str:
     return f"{_PREFIX}:{job_id}:completed"
+
 
 def _failed_key(job_id: str) -> str:
     return f"{_PREFIX}:{job_id}:failed"
 
+
 def _chunk_key(job_id: str, chunk_id: str) -> str:
     return f"{_PREFIX}:{job_id}:chunk:{chunk_id}"
+
 
 def _output_order_key(job_id: str) -> str:
     return f"{_PREFIX}:{job_id}:output_order"
@@ -206,29 +211,35 @@ class ChunkManager:
         pipe = self._r.pipeline()
 
         # Job metadata
-        pipe.hset(_meta_key(job_id), mapping={
-            "total_chunks": len(chunks),
-            "model_name": model_name,
-            "s3_output_base": s3_output_base,
-            "created_at": time.time(),
-        })
+        pipe.hset(
+            _meta_key(job_id),
+            mapping={
+                "total_chunks": len(chunks),
+                "model_name": model_name,
+                "s3_output_base": s3_output_base,
+                "created_at": time.time(),
+            },
+        )
 
         for chunk in chunks:
             cid = chunk["chunk_id"]
 
             # Per-chunk hash
             s3_output_path = f"{s3_output_base}/chunks/{cid}.jsonl"
-            pipe.hset(_chunk_key(job_id, cid), mapping={
-                "s3_input_path": chunk["s3_input_path"],
-                "s3_output_path": s3_output_path,
-                "num_lines": chunk.get("num_lines", 0),
-                "status": "pending",
-                "replica_id": "",
-                "started_at": 0,
-                "completed_at": 0,
-                "lease_until": 0,
-                "retry_count": 0,
-            })
+            pipe.hset(
+                _chunk_key(job_id, cid),
+                mapping={
+                    "s3_input_path": chunk["s3_input_path"],
+                    "s3_output_path": s3_output_path,
+                    "num_lines": chunk.get("num_lines", 0),
+                    "status": "pending",
+                    "replica_id": "",
+                    "started_at": 0,
+                    "completed_at": 0,
+                    "lease_until": 0,
+                    "retry_count": 0,
+                },
+            )
 
             # FIFO queue
             pipe.rpush(_pending_key(job_id), cid)
@@ -239,7 +250,7 @@ class ChunkManager:
         pipe.execute()
         logger.info(f"[ChunkManager] Created queue for job {job_id}: {len(chunks)} chunks")
 
-    def pull_chunk(self, job_id: str, replica_id: str) -> Optional[dict]:
+    def pull_chunk(self, job_id: str, replica_id: str) -> dict | None:
         """Pull next chunk from the pending queue.
 
         If the queue is empty but inflight chunks exist, attempts passive reclaim
@@ -264,12 +275,15 @@ class ChunkManager:
 
         # Update chunk metadata (preserve retry_count — it accumulates across attempts)
         now = time.time()
-        self._r.hset(_chunk_key(job_id, cid), mapping={
-            "status": "inflight",
-            "replica_id": replica_id,
-            "started_at": now,
-            "lease_until": now + CHUNK_LEASE_TTL_SEC,
-        })
+        self._r.hset(
+            _chunk_key(job_id, cid),
+            mapping={
+                "status": "inflight",
+                "replica_id": replica_id,
+                "started_at": now,
+                "lease_until": now + CHUNK_LEASE_TTL_SEC,
+            },
+        )
 
         # Read full chunk info
         info = self._r.hgetall(_chunk_key(job_id, cid))
@@ -343,17 +357,20 @@ class ChunkManager:
         now = time.time()
         pipe = self._r.pipeline()
         pipe.srem(_inflight_key(job_id), chunk_id)
-        pipe.srem(_failed_key(job_id), chunk_id)   # promote from failed if reclaim raced us
+        pipe.srem(_failed_key(job_id), chunk_id)  # promote from failed if reclaim raced us
         pipe.sadd(_completed_key(job_id), chunk_id)
-        pipe.hset(_chunk_key(job_id, chunk_id), mapping={
-            "status": "completed",
-            "completed_at": now,
-        })
+        pipe.hset(
+            _chunk_key(job_id, chunk_id),
+            mapping={
+                "status": "completed",
+                "completed_at": now,
+            },
+        )
         pipe.execute()
 
         return self.get_progress(job_id)
 
-    def get_progress(self, job_id: str) -> Optional[dict]:
+    def get_progress(self, job_id: str) -> dict | None:
         """Get progress counts for a job."""
         meta = self._r.hgetall(_meta_key(job_id))
         if not meta:
@@ -409,7 +426,7 @@ class ChunkManager:
 
 
 # Singleton
-_chunk_manager: Optional[ChunkManager] = None
+_chunk_manager: ChunkManager | None = None
 
 
 def get_chunk_manager() -> ChunkManager:

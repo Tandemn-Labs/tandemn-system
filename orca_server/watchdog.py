@@ -13,7 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from orca_server.config import (
     REPLICA_DEAD_THRESHOLD_SEC,
@@ -67,7 +68,6 @@ class ReplicaWatchdog:
 
     def _check_all_jobs(self) -> None:
         """Scan all active chunked jobs for dead replicas."""
-        from orca_server.job_manager import get_job_tracker
 
         jt = self._jt
         now = time.time()
@@ -140,9 +140,7 @@ class ReplicaWatchdog:
         except Exception:
             return False
 
-    def _handle_dead_replica(
-        self, job_id: str, replica_id: str, last_hb: float | None
-    ) -> None:
+    def _handle_dead_replica(self, job_id: str, replica_id: str, last_hb: float | None) -> None:
         """Force-reclaim chunks and notify Koi. Recovery is Koi's responsibility."""
         if replica_id in self._dead_replicas:
             return  # already processed

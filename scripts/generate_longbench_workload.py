@@ -14,9 +14,9 @@ Usage:
 import argparse
 import json
 import random
-from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 # LongBench task categories and datasets
 LONGBENCH_TASKS = {
@@ -25,30 +25,25 @@ LONGBENCH_TASKS = {
     "qasper": "Single-Doc QA - Papers",
     "multifieldqa_en": "Single-Doc QA - Multi-field (EN)",
     "multifieldqa_zh": "Single-Doc QA - Multi-field (ZH)",
-
     # Multi-Document QA
     "hotpotqa": "Multi-Doc QA - Wikipedia",
     "2wikimqa": "Multi-Doc QA - 2Wiki",
     "musique": "Multi-Doc QA - MuSiQue",
     "dureader": "Multi-Doc QA - DuReader (ZH)",
-
     # Summarization
     "gov_report": "Summarization - Government Reports",
     "qmsum": "Summarization - Meeting Transcripts",
     "multi_news": "Summarization - News Articles",
     "vcsum": "Summarization - VCSUM (ZH)",
-
     # Few-shot Learning
     "trec": "Few-shot - Question Classification",
     "triviaqa": "Few-shot - Trivia QA",
     "samsum": "Few-shot - Dialogue Summarization",
     "lsht": "Few-shot - LSHT (ZH)",
-
     # Synthetic Tasks
     "passage_count": "Synthetic - Passage Counting",
     "passage_retrieval_en": "Synthetic - Passage Retrieval (EN)",
     "passage_retrieval_zh": "Synthetic - Passage Retrieval (ZH)",
-
     # Code
     "lcc": "Code - Line Completion",
     "repobench-p": "Code - Repo-level Completion",
@@ -56,12 +51,22 @@ LONGBENCH_TASKS = {
 
 # English-only tasks (for default)
 ENGLISH_TASKS = [
-    "narrativeqa", "qasper", "multifieldqa_en",
-    "hotpotqa", "2wikimqa", "musique",
-    "gov_report", "qmsum", "multi_news",
-    "trec", "triviaqa", "samsum",
-    "passage_count", "passage_retrieval_en",
-    "lcc", "repobench-p"
+    "narrativeqa",
+    "qasper",
+    "multifieldqa_en",
+    "hotpotqa",
+    "2wikimqa",
+    "musique",
+    "gov_report",
+    "qmsum",
+    "multi_news",
+    "trec",
+    "triviaqa",
+    "samsum",
+    "passage_count",
+    "passage_retrieval_en",
+    "lcc",
+    "repobench-p",
 ]
 
 
@@ -71,7 +76,7 @@ class WorkloadConfig:
     avg_input_tokens: int
     avg_output_tokens: int
     tolerance: float
-    tasks: List[str]
+    tasks: list[str]
     seed: int
 
 
@@ -80,11 +85,11 @@ def count_tokens_approx(text: str) -> int:
     return len(text) // 4 + 1
 
 
-def download_longbench(tasks: List[str], cache_dir: Optional[str] = None) -> Dict[str, Any]:
+def download_longbench(tasks: list[str], cache_dir: str | None = None) -> dict[str, Any]:
     """Download LongBench datasets from HuggingFace."""
+    import os
     import urllib.request
     import zipfile
-    import os
 
     cache_dir = cache_dir or ".longbench_cache"
     os.makedirs(cache_dir, exist_ok=True)
@@ -95,13 +100,13 @@ def download_longbench(tasks: List[str], cache_dir: Optional[str] = None) -> Dic
     # Download and extract zip if not already done
     if not os.path.exists(data_dir):
         url = "https://huggingface.co/datasets/THUDM/LongBench/resolve/main/data.zip"
-        print(f"  Downloading LongBench data.zip (~114MB)...")
+        print("  Downloading LongBench data.zip (~114MB)...")
         try:
             urllib.request.urlretrieve(url, zip_path)
-            print(f"  Extracting...")
-            with zipfile.ZipFile(zip_path, 'r') as zf:
+            print("  Extracting...")
+            with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(cache_dir)
-            print(f"  Done!")
+            print("  Done!")
         except Exception as e:
             print(f"  Failed to download: {e}")
             raise SystemExit(1)
@@ -119,7 +124,7 @@ def download_longbench(tasks: List[str], cache_dir: Optional[str] = None) -> Dic
 
         try:
             items = []
-            with open(jsonl_file, 'r', encoding='utf-8') as f:
+            with open(jsonl_file, encoding="utf-8") as f:
                 for line in f:
                     if line.strip():
                         items.append(json.loads(line))
@@ -131,7 +136,7 @@ def download_longbench(tasks: List[str], cache_dir: Optional[str] = None) -> Dic
     return all_data
 
 
-def build_prompt_for_task(item: Dict[str, Any], task: str) -> str:
+def build_prompt_for_task(item: dict[str, Any], task: str) -> str:
     """Build a prompt from LongBench item based on task type."""
     context = item.get("context", "")
     input_text = item.get("input", "")
@@ -168,10 +173,7 @@ def build_prompt_for_task(item: Dict[str, Any], task: str) -> str:
     return prompt
 
 
-def extract_samples(
-    data: Dict[str, List[Dict]],
-    config: WorkloadConfig
-) -> List[Tuple[str, str, int]]:
+def extract_samples(data: dict[str, list[dict]], config: WorkloadConfig) -> list[tuple[str, str, int]]:
     """
     Extract samples matching target token length.
     Returns list of (prompt, task_name, token_count) tuples.
@@ -198,9 +200,9 @@ def extract_samples(
 
 
 def generate_workload(
-    data: Dict[str, List[Dict]],
+    data: dict[str, list[dict]],
     config: WorkloadConfig,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Generate workload in OpenAI batch API format."""
     random.seed(config.seed)
 
@@ -229,14 +231,10 @@ def generate_workload(
 
     for i, (prompt, task, token_count) in enumerate(selected):
         request = {
-            "custom_id": f"longbench-{task}-{i+1}",
+            "custom_id": f"longbench-{task}-{i + 1}",
             "method": "POST",
             "url": "/v1/chat/completions",
-            "body": {
-                "messages": [
-                    {"role": "user", "content": prompt}
-                ]
-            }
+            "body": {"messages": [{"role": "user", "content": prompt}]},
         }
         requests.append(request)
         token_counts.append(token_count)
@@ -256,61 +254,22 @@ def generate_workload(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate batch inference workload from LongBench dataset"
+    parser = argparse.ArgumentParser(description="Generate batch inference workload from LongBench dataset")
+    parser.add_argument("--num-requests", "-n", type=int, default=1000, help="Number of requests to generate")
+    parser.add_argument("--avg-input-tokens", type=int, default=8000, help="Target average input tokens per request")
+    parser.add_argument(
+        "--avg-output-tokens", type=int, default=256, help="Target average output tokens (for reference)"
     )
     parser.add_argument(
-        "--num-requests", "-n",
-        type=int,
-        default=1000,
-        help="Number of requests to generate"
+        "--tolerance", type=float, default=0.5, help="Tolerance for token variance (0.0-1.0, default 0.5 = +/-50%%)"
     )
     parser.add_argument(
-        "--avg-input-tokens",
-        type=int,
-        default=8000,
-        help="Target average input tokens per request"
+        "--tasks", type=str, default=None, help="Comma-separated list of tasks (default: all English tasks)"
     )
-    parser.add_argument(
-        "--avg-output-tokens",
-        type=int,
-        default=256,
-        help="Target average output tokens (for reference)"
-    )
-    parser.add_argument(
-        "--tolerance",
-        type=float,
-        default=0.5,
-        help="Tolerance for token variance (0.0-1.0, default 0.5 = +/-50%%)"
-    )
-    parser.add_argument(
-        "--tasks",
-        type=str,
-        default=None,
-        help="Comma-separated list of tasks (default: all English tasks)"
-    )
-    parser.add_argument(
-        "--list-tasks",
-        action="store_true",
-        help="List available tasks and exit"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed"
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default=None,
-        help="Cache directory for downloaded datasets"
-    )
-    parser.add_argument(
-        "--upload-s3",
-        action="store_true",
-        help="Upload to S3 after generation"
-    )
+    parser.add_argument("--list-tasks", action="store_true", help="List available tasks and exit")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--cache-dir", type=str, default=None, help="Cache directory for downloaded datasets")
+    parser.add_argument("--upload-s3", action="store_true", help="Upload to S3 after generation")
 
     args = parser.parse_args()
 
@@ -353,7 +312,7 @@ def main():
     print(f"Downloaded {total_examples} total examples")
 
     # Generate workload
-    print(f"\nGenerating workload...")
+    print("\nGenerating workload...")
     print(f"  Requests: {config.num_requests}")
     print(f"  Target avg input tokens: {config.avg_input_tokens}")
 
@@ -367,9 +326,9 @@ def main():
 
     # Write output
     print(f"\nWriting {len(requests)} requests to {output_path}...")
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         for req in requests:
-            f.write(json.dumps(req, ensure_ascii=False) + '\n')
+            f.write(json.dumps(req, ensure_ascii=False) + "\n")
 
     # Print stats
     print("\n" + "=" * 60)
@@ -382,7 +341,7 @@ def main():
     print(f"  Total input tokens:    {stats['total_input_tokens']:,}")
     print(f"  Target avg output:     {stats['target_avg_output_tokens']}")
     print("\n  Task distribution:")
-    for task, count in sorted(stats['task_distribution'].items(), key=lambda x: -x[1]):
+    for task, count in sorted(stats["task_distribution"].items(), key=lambda x: -x[1]):
         print(f"    {task}: {count}")
     print("=" * 60)
 
@@ -391,18 +350,16 @@ def main():
 
     if args.upload_s3:
         import subprocess
+
         print(f"\nUploading to {s3_path}...")
-        result = subprocess.run(
-            ["aws", "s3", "cp", str(output_path), s3_path],
-            capture_output=True, text=True
-        )
+        result = subprocess.run(["aws", "s3", "cp", str(output_path), s3_path], capture_output=True, text=True)
         if result.returncode == 0:
             print("Uploaded successfully!")
         else:
             print(f"Upload failed: {result.stderr}")
 
     # Print curl example
-    print(f"\nExample curl.sh config:")
+    print("\nExample curl.sh config:")
     print(f'  "input_file": "{s3_path}",')
     print(f'  "num_lines": {stats["num_requests"]},')
     print(f'  "avg_input_tokens": {int(stats["avg_input_tokens"])},')

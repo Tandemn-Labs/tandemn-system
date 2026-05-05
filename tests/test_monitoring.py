@@ -1,5 +1,5 @@
 """Unit tests for orca_server.monitoring."""
-import threading
+
 import time
 from collections import deque
 from unittest.mock import MagicMock, patch
@@ -7,15 +7,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from orca_server.monitoring import (
+    RING_BUFFER_SIZE,
     MetricsCollector,
     MetricsSnapshot,
     _JobCollector,
     _merge_snapshots,
-    _SUM_FIELDS,
-    _AVG_FIELDS,
     histogram_quantile,
-    POLL_INTERVAL_SEC,
-    RING_BUFFER_SIZE,
 )
 
 # ---------------------------------------------------------------------------
@@ -66,6 +63,7 @@ vllm:time_to_first_token_seconds_sum{model_name="m"} 4.2
 # TestMetricsSnapshot
 # ---------------------------------------------------------------------------
 
+
 class TestMetricsSnapshot:
     def test_parse_all_gauges(self):
         snap = MetricsSnapshot.from_prometheus_text("job1", SAMPLE_PROM_TEXT, 0.0)
@@ -88,21 +86,45 @@ class TestMetricsSnapshot:
         snap = MetricsSnapshot.from_prometheus_text("job1", SAMPLE_PROM_TEXT, 1234567.0)
         d = snap.to_dict()
         expected_keys = {
-            "job_id", "timestamp", "replica_id",
-            "avg_generation_throughput_toks_per_s", "avg_prompt_throughput_toks_per_s",
-            "gpu_cache_usage_perc", "num_requests_running", "num_requests_waiting",
-            "num_requests_swapped", "request_success_total", "num_preemptions_total",
-            "generation_tokens_total", "prompt_tokens_total",
-            "ttft_ms_p50", "ttft_ms_p95", "ttft_ms_p99",
-            "tpot_ms_p50", "tpot_ms_p95", "tpot_ms_p99",
-            "e2e_ms_p50", "e2e_ms_p95", "e2e_ms_p99",
-            "queue_time_ms_p50", "queue_time_ms_p95", "queue_time_ms_p99",
-            "prefill_time_ms_p50", "prefill_time_ms_p95", "prefill_time_ms_p99",
-            "decode_time_ms_p50", "decode_time_ms_p95", "decode_time_ms_p99",
-            "inference_time_ms_p50", "inference_time_ms_p95", "inference_time_ms_p99",
+            "job_id",
+            "timestamp",
+            "replica_id",
+            "avg_generation_throughput_toks_per_s",
+            "avg_prompt_throughput_toks_per_s",
+            "gpu_cache_usage_perc",
+            "num_requests_running",
+            "num_requests_waiting",
+            "num_requests_swapped",
+            "request_success_total",
+            "num_preemptions_total",
+            "generation_tokens_total",
+            "prompt_tokens_total",
+            "ttft_ms_p50",
+            "ttft_ms_p95",
+            "ttft_ms_p99",
+            "tpot_ms_p50",
+            "tpot_ms_p95",
+            "tpot_ms_p99",
+            "e2e_ms_p50",
+            "e2e_ms_p95",
+            "e2e_ms_p99",
+            "queue_time_ms_p50",
+            "queue_time_ms_p95",
+            "queue_time_ms_p99",
+            "prefill_time_ms_p50",
+            "prefill_time_ms_p95",
+            "prefill_time_ms_p99",
+            "decode_time_ms_p50",
+            "decode_time_ms_p95",
+            "decode_time_ms_p99",
+            "inference_time_ms_p50",
+            "inference_time_ms_p95",
+            "inference_time_ms_p99",
             "prefix_cache_hit_rate",
-            "gpu_sm_util_pct", "gpu_mem_bw_util_pct",
-            "live_gen_tokens_total", "live_prompt_tokens_total",
+            "gpu_sm_util_pct",
+            "gpu_mem_bw_util_pct",
+            "live_gen_tokens_total",
+            "live_prompt_tokens_total",
         }
         assert set(d.keys()) == expected_keys
         assert d["job_id"] == "job1"
@@ -133,6 +155,7 @@ class TestMetricsSnapshot:
 # ---------------------------------------------------------------------------
 # TestJobCollector
 # ---------------------------------------------------------------------------
+
 
 class TestJobCollector:
     def test_poll_loop_appends_snapshot(self):
@@ -189,6 +212,7 @@ class TestJobCollector:
 # ---------------------------------------------------------------------------
 # TestMetricsCollector
 # ---------------------------------------------------------------------------
+
 
 class TestMetricsCollector:
     def setup_method(self):
@@ -247,6 +271,7 @@ class TestMetricsCollector:
 # ---------------------------------------------------------------------------
 # TestSustainedThroughput
 # ---------------------------------------------------------------------------
+
 
 def _make_snap(job_id: str, ts: float, gen_total: float, prompt_total: float) -> MetricsSnapshot:
     snap = MetricsSnapshot(job_id=job_id, timestamp=ts)
@@ -523,6 +548,7 @@ class TestV1Engine:
 # TestAggregatedMetrics — multi-replica merge logic
 # ---------------------------------------------------------------------------
 
+
 def _replica_snap(job_id: str, replica_id: str, ts: float, **kwargs) -> MetricsSnapshot:
     snap = MetricsSnapshot(job_id=job_id, timestamp=ts, replica_id=replica_id)
     for k, v in kwargs.items():
@@ -543,26 +569,34 @@ class TestAggregatedMetrics:
             jc.buffer.append(snap)
 
     def test_sum_fields_are_summed(self):
-        s1 = _replica_snap("j", "r1", 10.0,
-                           avg_generation_throughput_toks_per_s=1200.0,
-                           avg_prompt_throughput_toks_per_s=300.0,
-                           generation_tokens_total=50000.0,
-                           prompt_tokens_total=10000.0,
-                           request_success_total=400.0,
-                           num_preemptions_total=1.0,
-                           num_requests_running=80,
-                           num_requests_waiting=5,
-                           num_requests_swapped=0)
-        s2 = _replica_snap("j", "r2", 12.0,
-                           avg_generation_throughput_toks_per_s=1100.0,
-                           avg_prompt_throughput_toks_per_s=280.0,
-                           generation_tokens_total=48000.0,
-                           prompt_tokens_total=9500.0,
-                           request_success_total=380.0,
-                           num_preemptions_total=2.0,
-                           num_requests_running=75,
-                           num_requests_waiting=3,
-                           num_requests_swapped=1)
+        s1 = _replica_snap(
+            "j",
+            "r1",
+            10.0,
+            avg_generation_throughput_toks_per_s=1200.0,
+            avg_prompt_throughput_toks_per_s=300.0,
+            generation_tokens_total=50000.0,
+            prompt_tokens_total=10000.0,
+            request_success_total=400.0,
+            num_preemptions_total=1.0,
+            num_requests_running=80,
+            num_requests_waiting=5,
+            num_requests_swapped=0,
+        )
+        s2 = _replica_snap(
+            "j",
+            "r2",
+            12.0,
+            avg_generation_throughput_toks_per_s=1100.0,
+            avg_prompt_throughput_toks_per_s=280.0,
+            generation_tokens_total=48000.0,
+            prompt_tokens_total=9500.0,
+            request_success_total=380.0,
+            num_preemptions_total=2.0,
+            num_requests_running=75,
+            num_requests_waiting=3,
+            num_requests_swapped=1,
+        )
         self._inject_replica("j", "r1", s1)
         self._inject_replica("j", "r2", s2)
 
@@ -579,16 +613,28 @@ class TestAggregatedMetrics:
         assert agg.num_requests_swapped == 1
 
     def test_avg_fields_are_averaged(self):
-        s1 = _replica_snap("j", "r1", 10.0,
-                           gpu_cache_usage_perc=0.60,
-                           prefix_cache_hit_rate=0.80,
-                           ttft_ms_p50=25.0, ttft_ms_p95=50.0, ttft_ms_p99=80.0,
-                           e2e_ms_p50=100.0)
-        s2 = _replica_snap("j", "r2", 12.0,
-                           gpu_cache_usage_perc=0.40,
-                           prefix_cache_hit_rate=0.60,
-                           ttft_ms_p50=35.0, ttft_ms_p95=70.0, ttft_ms_p99=120.0,
-                           e2e_ms_p50=200.0)
+        s1 = _replica_snap(
+            "j",
+            "r1",
+            10.0,
+            gpu_cache_usage_perc=0.60,
+            prefix_cache_hit_rate=0.80,
+            ttft_ms_p50=25.0,
+            ttft_ms_p95=50.0,
+            ttft_ms_p99=80.0,
+            e2e_ms_p50=100.0,
+        )
+        s2 = _replica_snap(
+            "j",
+            "r2",
+            12.0,
+            gpu_cache_usage_perc=0.40,
+            prefix_cache_hit_rate=0.60,
+            ttft_ms_p50=35.0,
+            ttft_ms_p95=70.0,
+            ttft_ms_p99=120.0,
+            e2e_ms_p50=200.0,
+        )
         self._inject_replica("j", "r1", s1)
         self._inject_replica("j", "r2", s2)
 
@@ -669,12 +715,8 @@ class TestAggregatedMetrics:
     def test_merge_snapshots_direct(self):
         """Test the _merge_snapshots helper directly."""
         snaps = [
-            _replica_snap("j", "r1", 10.0,
-                          avg_generation_throughput_toks_per_s=500.0,
-                          gpu_cache_usage_perc=0.3),
-            _replica_snap("j", "r2", 20.0,
-                          avg_generation_throughput_toks_per_s=700.0,
-                          gpu_cache_usage_perc=0.5),
+            _replica_snap("j", "r1", 10.0, avg_generation_throughput_toks_per_s=500.0, gpu_cache_usage_perc=0.3),
+            _replica_snap("j", "r2", 20.0, avg_generation_throughput_toks_per_s=700.0, gpu_cache_usage_perc=0.5),
         ]
         merged = _merge_snapshots("j", snaps)
         assert merged.job_id == "j"

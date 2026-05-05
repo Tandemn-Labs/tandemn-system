@@ -1,15 +1,14 @@
-import os
 import asyncio
 import logging
-from typing import AsyncIterator, List
+import os
+from collections.abc import AsyncIterator
 
 import boto3
 from boto3.s3.transfer import TransferConfig
-from botocore.exceptions import ClientError
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from utils.utils import split_uri
-
 
 from .base import StorageBackend
 
@@ -33,20 +32,10 @@ class S3BigStorageBackend(StorageBackend):
         self.aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-2")
         boto_config = Config(signature_version="s3v4")
         # print("running in region: ", self.aws_region)
-        self.s3_client = boto3.client(
-            "s3", region_name=self.aws_region, config=boto_config
-        )
+        self.s3_client = boto3.client("s3", region_name=self.aws_region, config=boto_config)
 
-        multipart_threshold = (
-            int(os.getenv("S3_MULTIPART_THRESHOLD_MB", DEFAULT_MULTIPART_THRESHOLD_MB))
-            * 1024
-            * 1024
-        )
-        multipart_chunksize = (
-            int(os.getenv("S3_MULTIPART_CHUNK_MB", DEFAULT_MULTIPART_CHUNK_MB))
-            * 1024
-            * 1024
-        )
+        multipart_threshold = int(os.getenv("S3_MULTIPART_THRESHOLD_MB", DEFAULT_MULTIPART_THRESHOLD_MB)) * 1024 * 1024
+        multipart_chunksize = int(os.getenv("S3_MULTIPART_CHUNK_MB", DEFAULT_MULTIPART_CHUNK_MB)) * 1024 * 1024
         max_concurrency = int(os.getenv("S3_MAX_CONCURRENCY", DEFAULT_MAX_CONCURRENCY))
 
         self.transfer_config = TransferConfig(
@@ -56,9 +45,7 @@ class S3BigStorageBackend(StorageBackend):
             use_threads=True,
         )
 
-        self.stream_chunk_size = (
-            int(os.getenv("S3_STREAM_CHUNK_MB", DEFAULT_STREAM_CHUNK_MB)) * 1024 * 1024
-        )
+        self.stream_chunk_size = int(os.getenv("S3_STREAM_CHUNK_MB", DEFAULT_STREAM_CHUNK_MB)) * 1024 * 1024
 
     def _get_bucket_and_key(self, remote_path: str) -> tuple[str, str]:
         """
@@ -138,9 +125,7 @@ class S3BigStorageBackend(StorageBackend):
     async def download_data(self, remote_path: str, user: str) -> bytes:
         bucket_name, key = self._get_bucket_and_key(remote_path)
         try:
-            response = await asyncio.to_thread(
-                self.s3_client.get_object, Bucket=bucket_name, Key=key
-            )
+            response = await asyncio.to_thread(self.s3_client.get_object, Bucket=bucket_name, Key=key)
             return response["Body"].read()
         except ClientError as e:
             logger.error(f"Error downloading data from S3: {e}")
@@ -155,9 +140,7 @@ class S3BigStorageBackend(StorageBackend):
         bucket_name, key = self._get_bucket_and_key(remote_path)
         chunk_size = chunk_size or self.stream_chunk_size
         try:
-            response = await asyncio.to_thread(
-                self.s3_client.get_object, Bucket=bucket_name, Key=key
-            )
+            response = await asyncio.to_thread(self.s3_client.get_object, Bucket=bucket_name, Key=key)
             body = response["Body"]
             while True:
                 chunk = await asyncio.to_thread(body.read, chunk_size)
@@ -168,7 +151,7 @@ class S3BigStorageBackend(StorageBackend):
             logger.error(f"Error streaming data from S3: {e}")
             raise
 
-    async def list_files(self, prefix: str, user: str) -> List[str]:
+    async def list_files(self, prefix: str, user: str) -> list[str]:
         return ""
 
     # async def list_files(self, prefix: str, user: str) -> List[str]:
@@ -227,9 +210,7 @@ class S3BigStorageBackend(StorageBackend):
 
     # ============================== PreSigned Upload and Download Features ==============================
     # the first two are for the small and simple payloads when the files are in Kilobytes or Megabytes.
-    async def presigned_upload(
-        self, remote_path: str, user: str, expires_seconds: int = 600
-    ) -> dict:
+    async def presigned_upload(self, remote_path: str, user: str, expires_seconds: int = 600) -> dict:
         bucket_name, key = self._get_bucket_and_key(remote_path)
         params = {"Bucket": bucket_name, "Key": key}
         try:
@@ -250,9 +231,7 @@ class S3BigStorageBackend(StorageBackend):
             logger.error(f"Error generating presigned upload URL: {e}")
             raise
 
-    async def presigned_download(
-        self, remote_path: str, user: str, expires_seconds: int = 600
-    ) -> dict:
+    async def presigned_download(self, remote_path: str, user: str, expires_seconds: int = 600) -> dict:
         """
         This coroutine should spawn a new thread, that runs in the
         thread pool background executor and just returns the URL when
@@ -281,9 +260,7 @@ class S3BigStorageBackend(StorageBackend):
     # ===================== Multipart Upload and Download Features =====================
     async def multipart_upload_start(self, remote_path: str, user: str) -> dict:
         bucket_name, key = self._get_bucket_and_key(remote_path)
-        response = await asyncio.to_thread(
-            self.s3_client.create_multipart_upload, Bucket=bucket_name, Key=key
-        )
+        response = await asyncio.to_thread(self.s3_client.create_multipart_upload, Bucket=bucket_name, Key=key)
         return {
             "upload_id": response["UploadId"],
             "key": key,
@@ -321,9 +298,7 @@ class S3BigStorageBackend(StorageBackend):
             "part_number": part_number,
         }
 
-    async def multipart_complete(
-        self, remote_path: str, user: str, upload_id: str, parts: list[dict]
-    ) -> dict:
+    async def multipart_complete(self, remote_path: str, user: str, upload_id: str, parts: list[dict]) -> dict:
         bucket_name, key = self._get_bucket_and_key(remote_path)
         await asyncio.to_thread(
             self.s3_client.complete_multipart_upload,
@@ -339,9 +314,7 @@ class S3BigStorageBackend(StorageBackend):
         }
 
     # TODO(Hetarth): have to test it if it still works or not
-    async def multipart_abort(
-        self, remote_path: str, user: str, upload_id: str
-    ) -> bool:
+    async def multipart_abort(self, remote_path: str, user: str, upload_id: str) -> bool:
         bucket_name, key = self._get_bucket_and_key(remote_path)
         await asyncio.to_thread(
             self.s3_client.abort_multipart_upload,

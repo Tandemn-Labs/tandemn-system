@@ -5,8 +5,9 @@ This module MUST be imported before any other project module that reads
 env vars, because it calls ``load_dotenv()`` at import time.
 """
 
-from dotenv import load_dotenv
 import os
+
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -38,7 +39,7 @@ CHUNK_SIZE_BYTES = int(os.getenv("CHUNK_SIZE_MB", 8)) * 1024 * 1024
 
 # Control plane URL reachable from EC2 clusters (empty = local dev, sidecar disabled)
 TD_SERVER_URL = os.getenv("TD_SERVER_URL", "")
-ORCA_API_KEY    = os.getenv("ORCA_API_KEY", "")
+ORCA_API_KEY = os.getenv("ORCA_API_KEY", "")
 
 # Koi placement service URL (if set, Orca POSTs job completion events to Koi)
 KOI_SERVICE_URL = os.getenv("KOI_SERVICE_URL", "")
@@ -46,15 +47,15 @@ KOI_SERVICE_URL = os.getenv("KOI_SERVICE_URL", "")
 # Redis (for chunked distributed batch)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DEFAULT_CHUNK_SIZE_LINES = int(os.getenv("CHUNK_SIZE_LINES", "1000"))
-CHUNK_LEASE_TTL_SEC    = int(os.getenv("CHUNK_LEASE_TTL_SEC", "600"))
-CHUNK_MAX_RETRIES      = int(os.getenv("CHUNK_MAX_RETRIES", "3"))
+CHUNK_LEASE_TTL_SEC = int(os.getenv("CHUNK_LEASE_TTL_SEC", "600"))
+CHUNK_MAX_RETRIES = int(os.getenv("CHUNK_MAX_RETRIES", "3"))
 CHUNK_RECLAIM_INTERVAL = int(os.getenv("CHUNK_RECLAIM_INTERVAL_SEC", "60"))
-CHUNK_RENEW_INTERVAL   = int(os.getenv("CHUNK_RENEW_INTERVAL_SEC", "30"))
+CHUNK_RENEW_INTERVAL = int(os.getenv("CHUNK_RENEW_INTERVAL_SEC", "30"))
 
 # Replica watchdog — heartbeat-based dead replica detection
 REPLICA_DEAD_THRESHOLD_SEC = int(os.getenv("REPLICA_DEAD_THRESHOLD_SEC", "45"))
 WATCHDOG_POLL_INTERVAL_SEC = int(os.getenv("WATCHDOG_POLL_INTERVAL_SEC", "10"))
-RECOVERY_COOLDOWN_SEC      = int(os.getenv("RECOVERY_COOLDOWN_SEC", "300"))
+RECOVERY_COOLDOWN_SEC = int(os.getenv("RECOVERY_COOLDOWN_SEC", "300"))
 
 # --------------------------------------------------------------------------- #
 # Canonical AWS instance table
@@ -68,12 +69,12 @@ AWS_INSTANCES = {
     # P5 instances (H100 80GB)
     "p5.48xlarge": ("H100", 8, 192, 80),
     # P4 instances (A100)
-    "p4d.24xlarge": ("A100", 8, 96, 40),     # A100 40GB HBM2e
-    "p4de.24xlarge": ("A100", 8, 96, 80),    # A100 80GB HBM2e
+    "p4d.24xlarge": ("A100", 8, 96, 40),  # A100 40GB HBM2e
+    "p4de.24xlarge": ("A100", 8, 96, 80),  # A100 80GB HBM2e
     # P3 instances (V100)
-    "p3.2xlarge": ("V100", 1, 8, 16),        # V100 16GB
+    "p3.2xlarge": ("V100", 1, 8, 16),  # V100 16GB
     "p3.8xlarge": ("V100", 4, 32, 16),
-    "p3.16xlarge": ("V100", 8, 64, 32),      # V100 32GB
+    "p3.16xlarge": ("V100", 8, 64, 32),  # V100 32GB
     "p3dn.24xlarge": ("V100", 8, 96, 32),
     # G6e instances (L40S 48GB)
     "g6e.xlarge": ("L40S", 1, 4, 48),
@@ -118,12 +119,11 @@ INSTANCE_VCPUS = {inst: vals[2] for inst, vals in AWS_INSTANCES.items()}
 INSTANCE_VRAM = {inst: vals[3] for inst, vals in AWS_INSTANCES.items()}
 
 # instance_type -> (gpu_name, gpu_count)  [used by roofline solver]
-AWS_INSTANCE_TO_GPU = {
-    inst: (gpu, count) for inst, (gpu, count, *_) in AWS_INSTANCES.items()
-}
+AWS_INSTANCE_TO_GPU = {inst: (gpu, count) for inst, (gpu, count, *_) in AWS_INSTANCES.items()}
 
 # GPUs with compute capability < 8.0 — vLLM V1 engine is not supported
 _V1_UNSUPPORTED_GPUS = {"V100", "T4"}
+
 
 def supports_vllm_v1(instance_type: str) -> bool:
     """Check if an instance type's GPU supports vLLM V1 engine (CC >= 8.0)."""

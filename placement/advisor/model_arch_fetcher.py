@@ -12,52 +12,51 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+
+from placement.advisor._utils import active_params_from_config
 
 # Reuse existing registry
 from placement.roofline.model_arch import (
+    estimate_model_size_from_name,
     get_model_architecture,
     normalize_model_name,
-    estimate_model_size_from_name,
 )
-from placement.advisor._utils import active_params_from_config
 
 
 @dataclass
 class ModelArchFeatures:
-    architecture_class: str        # HF class name e.g. "LlamaForCausalLM"
+    architecture_class: str  # HF class name e.g. "LlamaForCausalLM"
     num_layers: int
     hidden_size: int
     num_attention_heads: int
     num_kv_heads: int
-    gqa_ratio: float               # num_attention_heads / num_kv_heads
+    gqa_ratio: float  # num_attention_heads / num_kv_heads
     intermediate_size: int
     is_moe: bool
-    num_experts: int               # 0 for dense
-    num_experts_active: int        # 0 for dense
-    params_billion: float          # total params (ALL experts) — used for VRAM
-    active_params_billion: float   # active params per token — used for throughput scaling
+    num_experts: int  # 0 for dense
+    num_experts_active: int  # 0 for dense
+    params_billion: float  # total params (ALL experts) — used for VRAM
+    active_params_billion: float  # active params per token — used for throughput scaling
     vocab_size: int
     max_position_embeddings: int
-    source: str                    # "registry" | "perfdb" | "hf_hub" | "estimate"
+    source: str  # "registry" | "perfdb" | "hf_hub" | "estimate"
 
 
 # Map HF architecture class → canonical arch name used in data.csv
 _ARCH_CLASS_MAP = {
-    "LlamaForCausalLM":      "LlamaForCausalLM",
-    "MistralForCausalLM":    "LlamaForCausalLM",   # same structure
-    "Qwen3ForCausalLM":      "Qwen3ForCausalLM",
-    "Qwen3MoeForCausalLM":   "Qwen3MoeForCausalLM",
-    "NemotronHForCausalLM":  "NemotronHForCausalLM",
-    "DeciLMForCausalLM":     "DeciLMForCausalLM",
-    "MixtralForCausalLM":    "Qwen3MoeForCausalLM",  # MoE, similar structure
+    "LlamaForCausalLM": "LlamaForCausalLM",
+    "MistralForCausalLM": "LlamaForCausalLM",  # same structure
+    "Qwen3ForCausalLM": "Qwen3ForCausalLM",
+    "Qwen3MoeForCausalLM": "Qwen3MoeForCausalLM",
+    "NemotronHForCausalLM": "NemotronHForCausalLM",
+    "DeciLMForCausalLM": "DeciLMForCausalLM",
+    "MixtralForCausalLM": "Qwen3MoeForCausalLM",  # MoE, similar structure
 }
 
 
-def _from_registry(model_name: str) -> Optional[ModelArchFeatures]:
+def _from_registry(model_name: str) -> ModelArchFeatures | None:
     arch = get_model_architecture(model_name)
     if arch is None:
         return None
@@ -115,6 +114,7 @@ def _load_perfdb_configs() -> dict[str, dict]:
     configs: dict[str, dict] = {}
     try:
         import csv
+
         with open(data_csv, newline="") as f:
             reader = csv.reader(f)
             header = next(reader)
@@ -138,7 +138,7 @@ def _load_perfdb_configs() -> dict[str, dict]:
     return configs
 
 
-def _from_perfdb(model_name: str) -> Optional[ModelArchFeatures]:
+def _from_perfdb(model_name: str) -> ModelArchFeatures | None:
     configs = _load_perfdb_configs()
     # Try exact match first, then normalised
     cfg = configs.get(model_name) or configs.get(normalize_model_name(model_name))
@@ -154,11 +154,12 @@ def _from_perfdb(model_name: str) -> Optional[ModelArchFeatures]:
     return _features_from_hf_config(cfg, source="perfdb")
 
 
-def _from_hf_hub(model_name: str) -> Optional[ModelArchFeatures]:
+def _from_hf_hub(model_name: str) -> ModelArchFeatures | None:
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
     try:
         import urllib.request
+
         url = f"https://huggingface.co/{model_name}/resolve/main/config.json"
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -235,6 +236,7 @@ def _features_from_hf_config(cfg: dict, source: str) -> ModelArchFeatures:
 def _llama_template(params_b: float = 7.0) -> ModelArchFeatures:
     """Build a dense Llama-class fallback from the registry, scaled by param count."""
     from placement.roofline.model_arch import KNOWN_ARCHITECTURES
+
     if params_b >= 65:
         tmpl = KNOWN_ARCHITECTURES["llama-3-70b"]
     elif params_b >= 12:
@@ -260,7 +262,7 @@ def _llama_template(params_b: float = 7.0) -> ModelArchFeatures:
     )
 
 
-def _from_estimate(model_name: str) -> Optional[ModelArchFeatures]:
+def _from_estimate(model_name: str) -> ModelArchFeatures | None:
     size_b = estimate_model_size_from_name(model_name)
     if size_b is None:
         return None

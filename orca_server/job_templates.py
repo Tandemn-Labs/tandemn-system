@@ -4,17 +4,14 @@ Template generation for vLLM SkyPilot YAML configs.
 
 import os
 import uuid
-from typing import Union
 
-from orca_server.config import INSTANCE_TO_GPU, VLLM_PORT
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
+from orca_server.config import INSTANCE_TO_GPU, VLLM_PORT
 from utils.utils import split_uri
 
 
-def get_vllm_config_template(
-    model_name: str, instance_type: str, tp: int, pp: int, logger=None
-) -> str:
+def get_vllm_config_template(model_name: str, instance_type: str, tp: int, pp: int, logger=None) -> str:
     """
     Get the per-config vLLM template path if it exists.
 
@@ -82,9 +79,7 @@ def replace_run_vllm(
         replace["max_model_len"] = config.max_model_len
     elif request.max_input_tokens and request.max_output_tokens:
         # Use actual max lengths from request + 10% safety margin
-        calculated_len = int(
-            (request.max_input_tokens + request.max_output_tokens) * 1.1
-        )
+        calculated_len = int((request.max_input_tokens + request.max_output_tokens) * 1.1)
         # Round up to nearest power of 2 for efficiency, clamp to reasonable range
         calculated_len = max(1024, min(calculated_len, 131072))
         replace["max_model_len"] = calculated_len
@@ -110,22 +105,13 @@ def replace_run_vllm(
 
     # Get vLLM-specific configs
     vllm_cfg = request.vllm_specific_config
-    replace["max_num_seqs"] = (
-        vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256
-    )
+    replace["max_num_seqs"] = vllm_cfg.max_num_seqs if vllm_cfg and vllm_cfg.max_num_seqs else 256
     replace["dtype"] = "auto"  # vLLM auto-detects based on model
-    replace["kv_cache_dtype"] = (
-        vllm_cfg.kv_cache_dtype if vllm_cfg and vllm_cfg.kv_cache_dtype else "auto"
-    )
+    replace["kv_cache_dtype"] = vllm_cfg.kv_cache_dtype if vllm_cfg and vllm_cfg.kv_cache_dtype else "auto"
 
-    if (
-        request.vllm_specific_config is not None
-        and request.vllm_specific_config.speculative_config is not None
-    ):
+    if request.vllm_specific_config is not None and request.vllm_specific_config.speculative_config is not None:
         prefix = "--speculative-config."
-        spec_config = request.vllm_specific_config.speculative_config.model_dump(
-            exclude_none=True
-        )
+        spec_config = request.vllm_specific_config.speculative_config.model_dump(exclude_none=True)
 
         spec_string = ""
         for key, value in spec_config.items():
@@ -149,14 +135,9 @@ def replace_run_vllm_online(request: OnlineServingRequest, config: MagicOutput):
     replace["host"] = "0.0.0.0"  # Bind to all interfaces (allows external access)
     replace["port"] = str(VLLM_PORT)
 
-    if (
-        request.vllm_specific_config is not None
-        and request.vllm_specific_config.speculative_config is not None
-    ):
+    if request.vllm_specific_config is not None and request.vllm_specific_config.speculative_config is not None:
         prefix = "--speculative-config."
-        spec_config = request.vllm_specific_config.speculative_config.model_dump(
-            exclude_none=True
-        )
+        spec_config = request.vllm_specific_config.speculative_config.model_dump(exclude_none=True)
 
         spec_string = ""
         for key, value in spec_config.items():
@@ -173,7 +154,7 @@ def replace_run_vllm_online(request: OnlineServingRequest, config: MagicOutput):
 
 
 ### magic.py placeholder
-def real_magic(request: Union[BatchedRequest, OnlineServingRequest]) -> MagicOutput:
+def real_magic(request: BatchedRequest | OnlineServingRequest) -> MagicOutput:
     return MagicOutput(
         decision_id="mo-" + str(uuid.uuid4()),
         engine="vllm",

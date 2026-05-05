@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, profiling-vllm]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install ruff==0.15.8
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+  typecheck:
+    name: Type check (mypy, advisory)
+    runs-on: ubuntu-latest
+    # Advisory only during gradual adoption: mypy reports errors to the
+    # job summary but never fails the build. Flip the `|| true` once the
+    # existing pre-tooling backlog is cleaned up.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install mypy + minimal deps
+        run: |
+          pip install 'mypy==1.13.0' 'pydantic>=2.0' types-requests types-PyYAML
+
+      - name: Run mypy (advisory)
+        run: |
+          set +e
+          mypy 2>&1 | tee mypy-report.txt
+          status=${PIPESTATUS[0]}
+          {
+            echo "## mypy report (advisory)"
+            echo ""
+            echo "Exit status: \`$status\` (non-blocking during gradual adoption)"
+            echo ""
+            echo '```'
+            tail -200 mypy-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+  pre-commit:
+    name: Pre-commit hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - uses: pre-commit/action@v3.0.1
+
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install CPU torch (mirrors Dockerfile)
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Install runtime + dev dependencies
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        run: |
+          pytest --junitxml=pytest-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: pytest-results.xml
+
+  profiling-parser-test:
+    name: Profiling parser unit test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run prometheus_parser tests
+        working-directory: profiling/roofline/vllm
+        run: pytest test_prometheus_parser.py
+
+  docker-build:
+    name: Docker build (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: false
+          tags: orca:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,12 +1,11 @@
 import pytest
+
 from placement.roofline_magic import (
-    resolve_gpu_type_to_instance,
-    quota_to_gpu_pool,
     AWS_INSTANCE_TO_GPU,
     GPU_TYPE_TO_INSTANCES,
-    _build_gpu_type_to_instances,
+    quota_to_gpu_pool,
+    resolve_gpu_type_to_instance,
 )
-
 
 # --- resolve_gpu_type_to_instance ---
 
@@ -77,9 +76,7 @@ def test_quota_to_gpu_pool_filters_old_gpus(sample_quota_df):
 
 
 def test_quota_to_gpu_pool_missing_column(sample_quota_df):
-    pool = quota_to_gpu_pool(
-        sample_quota_df, region="ap-south-1", market="on_demand"
-    )
+    pool = quota_to_gpu_pool(sample_quota_df, region="ap-south-1", market="on_demand")
     assert pool == {}
 
 

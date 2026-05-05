@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
+
 from models.requests import BatchedRequest, OnlineServingRequest, vLLMSpecificConfig
 from models.resources import MagicOutput
-
 
 BATCH_DEFAULTS = dict(
     user_id="test",

@@ -1,0 +1,45 @@
+# See https://pre-commit.com for usage.
+# Install: `pip install pre-commit && pre-commit install`
+# Run on all files: `pre-commit run --all-files`
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # CSV/MD are data files; profiling/ is research code excluded
+        # from ruff and intentionally not normalized.
+        exclude: '\.csv$|\.md$|^profiling/'
+      - id: end-of-file-fixer
+        exclude: '\.csv$|^profiling/'
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.8
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # NOTE: mypy is not yet wired into pre-commit because the pre-tooling
+  # backlog (~109 type errors) would block every commit. CI runs mypy in
+  # advisory mode (continue-on-error: true) so contributors see new
+  # regressions in the PR view without being blocked. Once the backlog is
+  # addressed, uncomment the mypy hook below and flip the CI job to
+  # blocking.
+  #
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.13.0
+  #   hooks:
+  #     - id: mypy
+  #       additional_dependencies:
+  #         - pydantic>=2.0
+  #         - types-requests
+  #         - types-PyYAML
+  #       pass_filenames: false
+  #       args: []

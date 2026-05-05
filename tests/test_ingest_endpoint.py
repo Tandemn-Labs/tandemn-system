@@ -1,14 +1,13 @@
 """Unit tests for POST /job/{job_id}/metrics/ingest"""
+
 import time
-from typing import Optional
 
 import pytest
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from orca_server.metrics_db import MetricsDB
-from orca_server.monitoring import MetricsCollector, MetricsSnapshot, _JobCollector
-
+from orca_server.monitoring import MetricsCollector, MetricsSnapshot
 
 # ---------------------------------------------------------------------------
 # Minimal Prometheus text for ingest tests
@@ -30,6 +29,7 @@ vllm:avg_prompt_throughput_toks_per_s{model_name="m"} 100.0
 # Fixture — minimal FastAPI app that hosts just the ingest endpoint logic
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def ingest_app(tmp_path):
     """
@@ -49,7 +49,7 @@ def ingest_app(tmp_path):
     async def ingest(
         job_id: str,
         request: Request,
-        authorization: Optional[str] = Header(None),
+        authorization: str | None = Header(None),
     ):
         if api_key and authorization != f"Bearer {api_key}":
             raise HTTPException(status_code=401, detail="Unauthorized")
@@ -63,7 +63,7 @@ def ingest_app(tmp_path):
         batch_for_db = []
 
         for item in snapshots_raw:
-            ts   = item.get("timestamp", time.time())
+            ts = item.get("timestamp", time.time())
             text = item.get("prometheus_text", "")
             if not text.strip():
                 continue
@@ -102,7 +102,7 @@ def no_auth_app(tmp_path):
     async def ingest(
         job_id: str,
         request: Request,
-        authorization: Optional[str] = Header(None),
+        authorization: str | None = Header(None),
     ):
         if api_key and authorization != f"Bearer {api_key}":
             raise HTTPException(status_code=401, detail="Unauthorized")
@@ -133,6 +133,7 @@ def no_auth_app(tmp_path):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestIngestAuth:
     def test_auth_rejected_with_wrong_bearer(self, ingest_app):
@@ -180,10 +181,7 @@ class TestIngestRingBuffer:
         # Register the job so ingest can find the _JobCollector
         mc.start_collecting(job_id)  # ingest-only mode
         ts_base = time.time()
-        snapshots = [
-            {"timestamp": ts_base + i, "prometheus_text": SAMPLE_PROM}
-            for i in range(3)
-        ]
+        snapshots = [{"timestamp": ts_base + i, "prometheus_text": SAMPLE_PROM} for i in range(3)]
         resp = client.post(
             f"/job/{job_id}/metrics/ingest",
             json={"snapshots": snapshots},
@@ -218,10 +216,7 @@ class TestIngestTimeseries:
         client, mc, db, api_key = ingest_app
         job_id = "job-ts-1"
         ts_base = time.time()
-        snapshots = [
-            {"timestamp": ts_base + i, "prometheus_text": SAMPLE_PROM}
-            for i in range(3)
-        ]
+        snapshots = [{"timestamp": ts_base + i, "prometheus_text": SAMPLE_PROM} for i in range(3)]
         resp = client.post(
             f"/job/{job_id}/metrics/ingest",
             json={"snapshots": snapshots},
@@ -234,10 +229,7 @@ class TestIngestTimeseries:
 
     def test_ingested_count_returned(self, ingest_app):
         client, mc, db, api_key = ingest_app
-        snapshots = [
-            {"timestamp": float(i), "prometheus_text": SAMPLE_PROM}
-            for i in range(5)
-        ]
+        snapshots = [{"timestamp": float(i), "prometheus_text": SAMPLE_PROM} for i in range(5)]
         resp = client.post(
             "/job/job-count/metrics/ingest",
             json={"snapshots": snapshots},

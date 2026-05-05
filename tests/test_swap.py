@@ -2,23 +2,22 @@
 
 Tests the swap endpoint, swap monitor, and integration with real Redis chunks.
 """
-import asyncio
+
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
 from threading import Lock
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import redis as _redis
 
 from orca_server.chunk_manager import ChunkManager
 
-
 # ---------------------------------------------------------------------------
 # Minimal stubs (same pattern as test_watchdog.py)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class FakeSnap:
@@ -63,6 +62,7 @@ SAMPLE_CHUNKS = [
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def real_cm():
     """Real ChunkManager on Redis DB 1."""
@@ -82,6 +82,7 @@ def real_cm():
 # ---------------------------------------------------------------------------
 # Unit tests — swap logic
 # ---------------------------------------------------------------------------
+
 
 class TestSwapValidation:
     def test_force_reclaim_old_replicas_on_swap(self, real_cm):
@@ -170,6 +171,7 @@ class TestSwapVersioning:
     def test_version_counter_increments(self):
         """ClusterManager.next_swap_version increments per job."""
         from orca_server.job_manager import ClusterManager
+
         cm = ClusterManager()
 
         v1 = cm.next_swap_version("job-1")
@@ -185,6 +187,7 @@ class TestSwapVersioning:
     def test_swap_in_progress_flag(self):
         """_swap_in_progress prevents double swap."""
         from orca_server.job_manager import ClusterManager
+
         cm = ClusterManager()
 
         assert not cm._swap_in_progress.get("job-1")
@@ -196,6 +199,7 @@ class TestSwapVersioning:
 # Integration test — full swap flow with real Redis
 # ---------------------------------------------------------------------------
 
+
 class TestSwapIntegration:
     def test_full_swap_flow(self, real_cm):
         """End-to-end: old replicas pull → swap (force-reclaim) → new replicas complete all chunks."""
@@ -203,16 +207,16 @@ class TestSwapIntegration:
         real_cm.create_job_queue(job_id, SAMPLE_CHUNKS, "model", "s3://out")
 
         # Phase 1: old replicas processing
-        real_cm.pull_chunk(job_id, "old-r0")   # c0000
-        real_cm.pull_chunk(job_id, "old-r1")   # c0001
+        real_cm.pull_chunk(job_id, "old-r0")  # c0000
+        real_cm.pull_chunk(job_id, "old-r1")  # c0001
 
         # old-r0 completes c0000 before swap
         real_cm.complete_chunk(job_id, "c0000", "old-r0")
 
         progress = real_cm.get_progress(job_id)
         assert progress["completed"] == 1
-        assert progress["inflight"] == 1   # c0001 still with old-r1
-        assert progress["pending"] == 2    # c0002, c0003
+        assert progress["inflight"] == 1  # c0001 still with old-r1
+        assert progress["pending"] == 2  # c0002, c0003
 
         # Phase 2: swap — force-reclaim old replicas
         result = real_cm.force_reclaim(job_id, ["old-r0", "old-r1"])

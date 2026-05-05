@@ -5,6 +5,7 @@ Currently focused on the cold-start failure classification path —
 drains the LogCollector buffer to decide whether the vLLM subprocess
 crashed with a CUDA OOM signature or some other startup error.
 """
+
 import importlib.util
 import os
 import time
@@ -12,12 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-_runner_path = os.path.join(
-    os.path.dirname(__file__), "..", "templates", "vllm_batch_runner_chunked.py"
-)
-_spec = importlib.util.spec_from_file_location(
-    "vllm_batch_runner_chunked", _runner_path
-)
+_runner_path = os.path.join(os.path.dirname(__file__), "..", "templates", "vllm_batch_runner_chunked.py")
+_spec = importlib.util.spec_from_file_location("vllm_batch_runner_chunked", _runner_path)
 runner = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(runner)
 
@@ -74,8 +71,10 @@ class TestWaitForServerChunked:
         return p
 
     def test_health_ok_returns_elapsed(self):
-        with patch.object(runner.requests, "get", return_value=MagicMock(status_code=200)), \
-             patch.object(runner.time, "sleep"):
+        with (
+            patch.object(runner.requests, "get", return_value=MagicMock(status_code=200)),
+            patch.object(runner.time, "sleep"),
+        ):
             elapsed = runner.wait_for_server(self._live_proc(), timeout_sec=60)
         assert isinstance(elapsed, float)
 
@@ -86,11 +85,11 @@ class TestWaitForServerChunked:
         dead_proc = MagicMock()
         dead_proc.poll.return_value = 1
         col = MagicMock()
-        col.drain.return_value = [
-            {"ts": time.time(), "msg": "torch.cuda.OutOfMemoryError: CUDA out of memory"}
-        ]
-        with patch.object(runner.requests, "get", side_effect=ConnectionRefusedError), \
-             patch.object(runner.time, "sleep"):
+        col.drain.return_value = [{"ts": time.time(), "msg": "torch.cuda.OutOfMemoryError: CUDA out of memory"}]
+        with (
+            patch.object(runner.requests, "get", side_effect=ConnectionRefusedError),
+            patch.object(runner.time, "sleep"),
+        ):
             with pytest.raises(RuntimeError, match="CUDA out of memory"):
                 runner.wait_for_server(dead_proc, timeout_sec=1200, log_collector=col)
 
@@ -98,11 +97,11 @@ class TestWaitForServerChunked:
         dead_proc = MagicMock()
         dead_proc.poll.return_value = 1
         col = MagicMock()
-        col.drain.return_value = [
-            {"ts": time.time(), "msg": "ValueError: unsupported architecture qwen3_5"}
-        ]
-        with patch.object(runner.requests, "get", side_effect=ConnectionRefusedError), \
-             patch.object(runner.time, "sleep"):
+        col.drain.return_value = [{"ts": time.time(), "msg": "ValueError: unsupported architecture qwen3_5"}]
+        with (
+            patch.object(runner.requests, "get", side_effect=ConnectionRefusedError),
+            patch.object(runner.time, "sleep"),
+        ):
             with pytest.raises(RuntimeError) as excinfo:
                 runner.wait_for_server(dead_proc, timeout_sec=1200, log_collector=col)
         assert "during startup" in str(excinfo.value)
@@ -113,14 +112,18 @@ class TestWaitForServerChunked:
         still get a sensible RuntimeError, just without OOM classification."""
         dead_proc = MagicMock()
         dead_proc.poll.return_value = 137
-        with patch.object(runner.requests, "get", side_effect=ConnectionRefusedError), \
-             patch.object(runner.time, "sleep"):
+        with (
+            patch.object(runner.requests, "get", side_effect=ConnectionRefusedError),
+            patch.object(runner.time, "sleep"),
+        ):
             with pytest.raises(RuntimeError, match="exited with code 137"):
                 runner.wait_for_server(dead_proc, timeout_sec=1200)
 
     def test_timeout_when_proc_alive_but_health_never_ready(self):
-        with patch.object(runner.requests, "get", return_value=MagicMock(status_code=503)), \
-             patch.object(runner.time, "sleep"), \
-             patch.object(runner.time, "time", side_effect=[0.0, 61.0]):
+        with (
+            patch.object(runner.requests, "get", return_value=MagicMock(status_code=503)),
+            patch.object(runner.time, "sleep"),
+            patch.object(runner.time, "time", side_effect=[0.0, 61.0]),
+        ):
             with pytest.raises(TimeoutError):
                 runner.wait_for_server(self._live_proc(), timeout_sec=60)

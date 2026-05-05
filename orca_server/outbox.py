@@ -31,8 +31,9 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +91,11 @@ class OutboxDB:
         self,
         path: str,
         event_type: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         *,
         job_id: str,
-        dedup_key: Optional[str] = None,
-        correlation_id: Optional[str] = None,
+        dedup_key: str | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         """Append an event to the outbox, returning its event_id.
 
@@ -134,7 +135,7 @@ class OutboxDB:
     # Publisher surface (drain path)
     # ------------------------------------------------------------------
 
-    def claim_batch(self, limit: int = 50, now: Optional[float] = None) -> List[Dict[str, Any]]:
+    def claim_batch(self, limit: int = 50, now: float | None = None) -> list[dict[str, Any]]:
         """Return up to `limit` undelivered rows whose next_attempt_at is due.
 
         Rows returned are copies (dicts), safe to use outside the lock.
@@ -156,8 +157,7 @@ class OutboxDB:
     def mark_delivered(self, event_id: str) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE outbox SET delivered_at = ?, last_error = NULL, last_status_code = NULL "
-                "WHERE event_id = ?",
+                "UPDATE outbox SET delivered_at = ?, last_error = NULL, last_status_code = NULL WHERE event_id = ?",
                 (time.time(), event_id),
             )
             self._conn.commit()
@@ -166,7 +166,7 @@ class OutboxDB:
         self,
         event_id: str,
         error: str,
-        status_code: Optional[int] = None,
+        status_code: int | None = None,
     ) -> None:
         """Bump attempts and reschedule with bounded backoff: 1→2→4→8→16→30s.
 
@@ -175,9 +175,7 @@ class OutboxDB:
         on a dead target.
         """
         with self._lock:
-            row = self._conn.execute(
-                "SELECT attempts FROM outbox WHERE event_id = ?", (event_id,)
-            ).fetchone()
+            row = self._conn.execute("SELECT attempts FROM outbox WHERE event_id = ?", (event_id,)).fetchone()
             attempts = (row["attempts"] if row else 0) + 1
             backoff = min(2 ** (attempts - 1), MAX_BACKOFF_SECS)
             self._conn.execute(
@@ -197,16 +195,12 @@ class OutboxDB:
 
     def pending_count(self) -> int:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM outbox WHERE delivered_at IS NULL"
-            ).fetchone()
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM outbox WHERE delivered_at IS NULL").fetchone()
         return int(row["n"])
 
     def oldest_undelivered_age_secs(self) -> float:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT MIN(created_at) AS m FROM outbox WHERE delivered_at IS NULL"
-            ).fetchone()
+            row = self._conn.execute("SELECT MIN(created_at) AS m FROM outbox WHERE delivered_at IS NULL").fetchone()
         if row is None or row["m"] is None:
             return 0.0
         return max(0.0, time.time() - float(row["m"]))
@@ -247,7 +241,7 @@ class OutboxPublisher:
         outbox: OutboxDB,
         koi_base_url: str,
         *,
-        post_fn: Optional[Callable[[str, Dict[str, Any], float], Any]] = None,
+        post_fn: Callable[[str, dict[str, Any], float], Any] | None = None,
         poll_interval: float = 1.0,
         prune_interval: float = 3600.0,
         prune_keep_secs: float = 86400.0,
@@ -263,11 +257,11 @@ class OutboxPublisher:
         self._batch_size = batch_size
         self._request_timeout = request_timeout
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._last_prune = time.time()
 
     @staticmethod
-    def _default_post(url: str, json_payload: Dict[str, Any], timeout: float) -> Any:
+    def _default_post(url: str, json_payload: dict[str, Any], timeout: float) -> Any:
         import requests
 
         return requests.post(url, json=json_payload, timeout=timeout)
@@ -347,11 +341,11 @@ class OutboxPublisher:
 # Module-level singleton + lifecycle hooks
 # ----------------------------------------------------------------------
 
-_OUTBOX: Optional[OutboxDB] = None
-_PUBLISHER: Optional[OutboxPublisher] = None
+_OUTBOX: OutboxDB | None = None
+_PUBLISHER: OutboxPublisher | None = None
 
 
-def get_outbox() -> Optional[OutboxDB]:
+def get_outbox() -> OutboxDB | None:
     """Return the process-wide OutboxDB, or None if outbox is disabled.
 
     Disabled (None) means either the server hasn't initialized it yet, or
@@ -361,16 +355,16 @@ def get_outbox() -> Optional[OutboxDB]:
     return _OUTBOX
 
 
-def get_publisher() -> Optional[OutboxPublisher]:
+def get_publisher() -> OutboxPublisher | None:
     return _PUBLISHER
 
 
 def init_outbox(
-    db_path: Optional[str] = None,
-    koi_base_url: Optional[str] = None,
+    db_path: str | None = None,
+    koi_base_url: str | None = None,
     *,
     start_publisher: bool = True,
-) -> Optional[OutboxDB]:
+) -> OutboxDB | None:
     """Initialize the process-wide outbox + optionally start the publisher.
 
     An empty-string ORCA_OUTBOX_DB_PATH disables the outbox (rollback hatch).
@@ -378,10 +372,7 @@ def init_outbox(
     still land in the DB but are never sent (useful for dev without Koi).
     """
     global _OUTBOX, _PUBLISHER
-    resolved = (
-        db_path if db_path is not None
-        else os.environ.get("ORCA_OUTBOX_DB_PATH", DEFAULT_DB_PATH)
-    )
+    resolved = db_path if db_path is not None else os.environ.get("ORCA_OUTBOX_DB_PATH", DEFAULT_DB_PATH)
     if not resolved:
         logger.warning("[Outbox] Disabled (ORCA_OUTBOX_DB_PATH is empty)")
         _OUTBOX = None

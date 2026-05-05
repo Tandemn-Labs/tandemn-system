@@ -8,21 +8,14 @@ Covers:
   - Task 5: --skip-dangerously flag
 """
 
-import importlib
-import importlib.machinery
-import importlib.util
-import json
 import logging
 import os
-import subprocess
-import sys
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
-
+from httpx import ASGITransport, AsyncClient
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Task 1: KOI_SERVICE_URL in config
@@ -41,6 +34,7 @@ class TestKoiConfig:
             os.environ.pop("KOI_SERVICE_URL", None)
             # Re-import to get fresh value
             import importlib
+
             import orca_server.config as cfg
 
             importlib.reload(cfg)
@@ -50,6 +44,7 @@ class TestKoiConfig:
         """Reads from KOI_SERVICE_URL env var."""
         with patch.dict(os.environ, {"KOI_SERVICE_URL": "http://koi:8090"}):
             import importlib
+
             import orca_server.config as cfg
 
             importlib.reload(cfg)
@@ -158,10 +153,12 @@ async def test_resources_quota_families_match_instances(client):
 # Task 3 & 4: CLI Koi helpers (unit tests, no server needed)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 class TestKoiWebhookNotifications:
     def test_submit_batch_chunked_passes_koi_alternatives_to_launcher(self):
         """Chunked submit should preserve Koi alternatives as ordered fallbacks."""
         import asyncio
+
         import server
         from models.requests import BatchedRequest
 
@@ -169,9 +166,7 @@ class TestKoiWebhookNotifications:
         chunk_manager = MagicMock()
         job_tracker = MagicMock()
 
-        async def fake_launch_chunked_replicas(
-            request, configs, num_replicas, **kwargs
-        ):
+        async def fake_launch_chunked_replicas(request, configs, num_replicas, **kwargs):
             captured["request"] = request
             captured["configs"] = configs
             captured["num_replicas"] = num_replicas
@@ -237,17 +232,13 @@ class TestKoiWebhookNotifications:
                     "resolve_gpu_type_to_instance",
                     side_effect=fake_resolve_gpu_type_to_instance,
                 ),
-                patch.object(
-                    server, "check_user_specified_feasibility", return_value=feasibility
-                ),
+                patch.object(server, "check_user_specified_feasibility", return_value=feasibility),
                 patch.object(server, "get_cached_quotas", return_value=[]),
                 patch.object(server, "get_ordered_regions", return_value=[object()]),
                 patch.object(server, "get_chunk_manager", return_value=chunk_manager),
                 patch.object(server, "get_job_tracker", return_value=job_tracker),
                 patch.object(server, "get_quota_tracker", return_value=MagicMock()),
-                patch.object(
-                    server, "launch_chunked_replicas", new=fake_launch_chunked_replicas
-                ),
+                patch.object(server, "launch_chunked_replicas", new=fake_launch_chunked_replicas),
             ):
                 data = asyncio.run(server.submit_batch(request))
         finally:
@@ -268,8 +259,8 @@ class TestKoiWebhookNotifications:
 
     def test_notify_koi_replica_ready_sends_actual_fallback_payload(self):
         """model_ready webhook should report actual launched config to Koi."""
-        import server
         import orca_server.config as cfg
+        import server
 
         mock_cm = MagicMock()
         mock_cm.get_replica_states.return_value = {
@@ -296,12 +287,8 @@ class TestKoiWebhookNotifications:
         try:
             with (
                 patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
-                patch(
-                    "orca_server.launcher._stop_koi_launch_heartbeat"
-                ) as stop_heartbeat,
-                patch.dict(
-                    cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False
-                ),
+                patch("orca_server.launcher._stop_koi_launch_heartbeat") as stop_heartbeat,
+                patch.dict(cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False),
                 patch("time.time", return_value=7200.0),
                 patch("requests.post") as post,
             ):
@@ -333,9 +320,10 @@ class TestKoiWebhookNotifications:
         """If the primary config fails, the started webhook should reflect the fallback config."""
         import asyncio
         import threading as real_threading
-        import server
+
         import orca_server.config as cfg
         import orca_server.launcher as launcher
+        import server
         from models.requests import BatchedRequest
         from models.resources import MagicOutput
         from orca_server.job_manager import ClusterManager
@@ -343,9 +331,7 @@ class TestKoiWebhookNotifications:
         RealThread = real_threading.Thread
 
         class InlineThread:
-            def __init__(
-                self, target=None, args=(), kwargs=None, daemon=None, name=None
-            ):
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
                 self._thread = RealThread(
                     target=target,
                     args=args,
@@ -470,18 +456,14 @@ class TestKoiWebhookNotifications:
                     "orca_server.launcher.generate_job_dirname",
                     return_value="test-jobdir",
                 ),
-                patch(
-                    "orca_server.launcher.setup_job_logger", return_value=MagicMock()
-                ),
+                patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()),
                 patch("orca_server.launcher.get_job_tracker", return_value=jt),
                 patch("orca_server.launcher.get_cluster_manager", return_value=cm),
                 patch(
                     "orca_server.launcher._launch_chunked_replica",
                     new=fake_launch_replica,
                 ),
-                patch(
-                    "orca_server.launcher._notify_koi_config_attempted"
-                ) as notify_attempted,
+                patch("orca_server.launcher._notify_koi_config_attempted") as notify_attempted,
                 patch("orca_server.launcher.sky_down_with_retry"),
                 patch("orca_server.launcher.threading.Thread", InlineThread),
             ):
@@ -500,14 +482,10 @@ class TestKoiWebhookNotifications:
             assert notify_attempted.call_args_list[1].kwargs["launched"] is True
             assert notify_attempted.call_args_list[1].args[2] == "p4de.24xlarge"
 
-            deploy_ts = cm.get_replica_states("parent-job")["parent-job-r0"][
-                "koi_webhook_info"
-            ]["deploy_timestamp"]
+            deploy_ts = cm.get_replica_states("parent-job")["parent-job-r0"]["koi_webhook_info"]["deploy_timestamp"]
             with (
                 patch.object(cfg, "KOI_SERVICE_URL", "http://koi:8090"),
-                patch.dict(
-                    cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False
-                ),
+                patch.dict(cfg.INSTANCE_TO_GPU, {"p4de.24xlarge": "A100-80GB"}, clear=False),
                 patch("time.time", return_value=deploy_ts + 1800),
                 patch("requests.post") as post,
             ):
@@ -685,9 +663,7 @@ class TestKoiWebhookNotifications:
         assert "searching_capacity" in phases
         assert "provisioning" in phases
         assert any(
-            payload["phase"] == "provisioning"
-            and payload["region"] == "us-east-1"
-            and payload["market"] == "on_demand"
+            payload["phase"] == "provisioning" and payload["region"] == "us-east-1" and payload["market"] == "on_demand"
             for _, payload, _ in events
         )
 
@@ -695,6 +671,7 @@ class TestKoiWebhookNotifications:
         """All failed chunked launch attempts should emit one /job/launch-failed webhook."""
         import asyncio
         import threading as real_threading
+
         import orca_server.config as cfg
         import orca_server.launcher as launcher
         from models.requests import BatchedRequest
@@ -703,9 +680,7 @@ class TestKoiWebhookNotifications:
         RealThread = real_threading.Thread
 
         class InlineThread:
-            def __init__(
-                self, target=None, args=(), kwargs=None, daemon=None, name=None
-            ):
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
                 self._thread = RealThread(
                     target=target,
                     args=args,
@@ -784,9 +759,7 @@ class TestKoiWebhookNotifications:
                 },
                 clear=False,
             ),
-            patch(
-                "orca_server.launcher.generate_job_dirname", return_value="test-jobdir"
-            ),
+            patch("orca_server.launcher.generate_job_dirname", return_value="test-jobdir"),
             patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()),
             patch("orca_server.launcher.get_job_tracker", return_value=jt),
             patch("orca_server.launcher.get_cluster_manager", return_value=cm),
@@ -825,12 +798,11 @@ class TestKoiWebhookNotifications:
         ]
         assert payload["total_time_seconds"] >= 0
 
-    def test_launch_chunked_replicas_logs_warning_when_launch_failed_webhook_errors(
-        self, caplog
-    ):
+    def test_launch_chunked_replicas_logs_warning_when_launch_failed_webhook_errors(self, caplog):
         """All-failed launch webhook errors should log a warning instead of disappearing silently."""
         import asyncio
         import threading as real_threading
+
         import orca_server.config as cfg
         import orca_server.launcher as launcher
         from models.requests import BatchedRequest
@@ -839,9 +811,7 @@ class TestKoiWebhookNotifications:
         RealThread = real_threading.Thread
 
         class InlineThread:
-            def __init__(
-                self, target=None, args=(), kwargs=None, daemon=None, name=None
-            ):
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
                 self._thread = RealThread(
                     target=target,
                     args=args,
@@ -916,9 +886,7 @@ class TestKoiWebhookNotifications:
                 },
                 clear=False,
             ),
-            patch(
-                "orca_server.launcher.generate_job_dirname", return_value="test-jobdir"
-            ),
+            patch("orca_server.launcher.generate_job_dirname", return_value="test-jobdir"),
             patch("orca_server.launcher.setup_job_logger", return_value=MagicMock()),
             patch("orca_server.launcher.get_job_tracker", return_value=jt),
             patch("orca_server.launcher.get_cluster_manager", return_value=cm),
@@ -944,7 +912,6 @@ class TestKoiWebhookNotifications:
 # ──────────────────────────────────────────────────────────────────────────────
 # Task 5: --skip-dangerously flag
 # ──────────────────────────────────────────────────────────────────────────────
-
 
 
 class TestResourceFiltering:

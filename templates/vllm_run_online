@@ -31,7 +31,7 @@ if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
     -pp {pp} \
     --hf-token "$HF_TOKEN" \
     {additional_params} > vllm.log 2>&1 &
-    
+
     VLLM_PID=$!
     disown $VLLM_PID
 
@@ -45,7 +45,7 @@ if [ "$SKYPILOT_NODE_RANK" == "0" ]; then
     echo "LOADING MODEL... (This may take a few minutes)"
     echo "Streaming vLLM logs:"
     echo "---"
-    
+
     for ((i=1; i<=$MAX_TRIES; i++)); do
         if curl -sf "$URL" > /dev/null 2>&1; then
             echo "---"

@@ -40,9 +40,9 @@ BASE_URL = os.getenv("ORCA_SERVER", "http://localhost:26336")
 WORKLOAD = "examples/workloads/stress_5000.jsonl"
 
 # Timeouts
-LAUNCH_TIMEOUT_MIN = 20     # max wait for replicas to be processing
-RECLAIM_TIMEOUT_SEC = 180   # max wait for reclaim after kill (TTL + reclaim interval + buffer)
-JOB_TIMEOUT_MIN = 60        # max total wait for job completion
+LAUNCH_TIMEOUT_MIN = 20  # max wait for replicas to be processing
+RECLAIM_TIMEOUT_SEC = 180  # max wait for reclaim after kill (TTL + reclaim interval + buffer)
+JOB_TIMEOUT_MIN = 60  # max total wait for job completion
 POLL_SEC = 5
 
 # ANSI
@@ -56,8 +56,10 @@ RST = "\033[0m"
 
 ORCA_API_KEY = os.getenv("ORCA_API_KEY", "test123")
 
+
 def api(method, path, **kwargs):
     import requests
+
     url = f"{BASE_URL}{path}"
     headers = kwargs.pop("headers", {})
     if ORCA_API_KEY:
@@ -111,20 +113,30 @@ def submit_job(model, gpu):
         assert r.status_code == 200
     except Exception as e:
         print(f"\n  {R}Server not reachable at {BASE_URL}: {e}{RST}")
-        print(f"  Start it with:")
-        print(f"    CHUNK_LEASE_TTL_SEC=60 CHUNK_RECLAIM_INTERVAL_SEC=15 \\")
-        print(f"    CHUNK_RENEW_INTERVAL_SEC=10 ORCA_API_KEY=test123 python server.py")
+        print("  Start it with:")
+        print("    CHUNK_LEASE_TTL_SEC=60 CHUNK_RECLAIM_INTERVAL_SEC=15 \\")
+        print("    CHUNK_RENEW_INTERVAL_SEC=10 ORCA_API_KEY=test123 python server.py")
         sys.exit(1)
 
     print(f"  Server OK at {BASE_URL}")
     print(f"  Model:    {model}")
     print(f"  GPU:      {gpu}")
     print(f"  Workload: {WORKLOAD}")
-    print(f"  Replicas: 2")
+    print("  Replicas: 2")
 
     cmd = [
-        sys.executable, "orca", "deploy", model, WORKLOAD,
-        "--gpu", gpu, "--tp", "1", "--replicas", "2", "--force",
+        sys.executable,
+        "orca",
+        "deploy",
+        model,
+        WORKLOAD,
+        "--gpu",
+        gpu,
+        "--tp",
+        "1",
+        "--replicas",
+        "2",
+        "--force",
     ]
     env = {**os.environ, "ORCA_SERVER": BASE_URL, "PYTHONUNBUFFERED": "1"}
 
@@ -219,7 +231,9 @@ def kill_replica(job_id):
     try:
         result = subprocess.run(
             ["sky", "down", target, "--yes"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         elapsed = time.time() - t0
         if result.returncode == 0:
@@ -243,7 +257,7 @@ def kill_replica(job_id):
 def monitor_reclaim(job_id, inflight_before_kill):
     step("PHASE 4: Monitor chunk reclaim")
 
-    print(f"  Waiting for server to detect lease expiry and reclaim orphaned chunk(s)...")
+    print("  Waiting for server to detect lease expiry and reclaim orphaned chunk(s)...")
     print(f"  (Lease TTL + reclaim interval — should happen within ~{RECLAIM_TIMEOUT_SEC}s)\n")
 
     deadline = time.time() + RECLAIM_TIMEOUT_SEC
@@ -341,18 +355,22 @@ def verify(job_id, reclaim_seen, final_status):
     results = []
 
     # 1. Job succeeded
-    results.append(check(
-        "Job completed successfully",
-        final_status == "succeeded",
-        f"status={final_status}",
-    ))
+    results.append(
+        check(
+            "Job completed successfully",
+            final_status == "succeeded",
+            f"status={final_status}",
+        )
+    )
 
     # 2. Reclaim was observed
-    results.append(check(
-        "Chunk reclaim detected after replica kill",
-        reclaim_seen,
-        "inflight dropped or pending increased after sky down",
-    ))
+    results.append(
+        check(
+            "Chunk reclaim detected after replica kill",
+            reclaim_seen,
+            "inflight dropped or pending increased after sky down",
+        )
+    )
 
     # 3. Chunk accounting is consistent
     progress = get_chunk_progress(job_id)
@@ -360,30 +378,37 @@ def verify(job_id, reclaim_seen, final_status):
         total = progress["total"]
         completed = progress["completed"]
         failed = progress.get("failed", 0)
-        results.append(check(
-            "Chunk accounting: completed + failed >= total",
-            (completed + failed) >= total and total > 0,
-            f"completed={completed} failed={failed} total={total}",
-        ))
-        results.append(check(
-            "No permanently failed chunks (all recovered)",
-            failed == 0,
-            f"failed={failed}" + (" (poison chunks?)" if failed > 0 else ""),
-        ))
+        results.append(
+            check(
+                "Chunk accounting: completed + failed >= total",
+                (completed + failed) >= total and total > 0,
+                f"completed={completed} failed={failed} total={total}",
+            )
+        )
+        results.append(
+            check(
+                "No permanently failed chunks (all recovered)",
+                failed == 0,
+                f"failed={failed}" + (" (poison chunks?)" if failed > 0 else ""),
+            )
+        )
     else:
         # Progress might be gone if cleanup_job already ran
-        results.append(check(
-            "Chunk progress (cleaned up after success)",
-            final_status == "succeeded",
-            "Redis keys cleaned up — implies assembly completed",
-        ))
+        results.append(
+            check(
+                "Chunk progress (cleaned up after success)",
+                final_status == "succeeded",
+                "Redis keys cleaned up — implies assembly completed",
+            )
+        )
 
     # 4. Wait for S3 download, then check output file
     if final_status == "succeeded":
-        print(f"\n  Waiting 20s for S3 download + assembly...")
+        print("\n  Waiting 20s for S3 download + assembly...")
         time.sleep(20)
 
         import glob
+
         # Search for output.jsonl in any outputs/ subdir matching success-* or partial-*
         job_dir = None
         for pattern in ["outputs/**/success-*", "outputs/**/partial-*"]:
@@ -396,11 +421,13 @@ def verify(job_id, reclaim_seen, final_status):
 
         if job_dir:
             output_path = os.path.join(job_dir, "output.jsonl")
-            results.append(check(
-                "output.jsonl exists",
-                True,
-                job_dir,
-            ))
+            results.append(
+                check(
+                    "output.jsonl exists",
+                    True,
+                    job_dir,
+                )
+            )
 
             with open(output_path) as f:
                 lines = f.readlines()
@@ -411,17 +438,21 @@ def verify(job_id, reclaim_seen, final_status):
                 expected = int(5000 * completed_chunks / total_chunks)
             else:
                 expected = 5000  # assume all if progress unavailable
-            results.append(check(
-                f"Output has {len(lines)} lines (expected ~{expected})",
-                len(lines) >= expected * 0.9,
-                f"{len(lines)}/{expected} ({completed_chunks}/{total_chunks} chunks completed)",
-            ))
+            results.append(
+                check(
+                    f"Output has {len(lines)} lines (expected ~{expected})",
+                    len(lines) >= expected * 0.9,
+                    f"{len(lines)}/{expected} ({completed_chunks}/{total_chunks} chunks completed)",
+                )
+            )
         else:
-            results.append(check(
-                "Output directory found",
-                False,
-                "no success-*/partial-* dir with output.jsonl",
-            ))
+            results.append(
+                check(
+                    "Output directory found",
+                    False,
+                    "no success-*/partial-* dir with output.jsonl",
+                )
+            )
 
     return results
 

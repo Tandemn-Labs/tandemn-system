@@ -6,9 +6,9 @@ calculations used by the PlacementSolverAdapter to interface with
 LLM_placement_solver.
 """
 
-from .gpu_specs import GPU_SPECS, GPU_PERFORMANCE_TIERS
+from .gpu_specs import GPU_PERFORMANCE_TIERS, GPU_SPECS
+from .model_arch import KNOWN_ARCHITECTURES, ModelArchitecture, get_model_architecture
 from .throughput import ThroughputCalculator
-from .model_arch import ModelArchitecture, get_model_architecture, KNOWN_ARCHITECTURES
 
 __all__ = [
     "GPU_SPECS",

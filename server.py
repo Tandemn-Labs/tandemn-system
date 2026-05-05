@@ -1,23 +1,27 @@
-from contextlib import asynccontextmanager
 import asyncio
+import json
 import logging
 import math
-import uuid
-import time
 import os
 import tempfile
-import json
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import sky
-from fastapi import FastAPI, Form, Header, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 logger = logging.getLogger(__name__)
 
+import threading
+
+from models.requests import BatchedRequest, OnlineServingRequest
+from models.resources import MagicOutput
+from orca_server.chunk_manager import get_chunk_manager
 from orca_server.config import (
     AWS_INSTANCES,
     CHUNK_RECLAIM_INTERVAL,
@@ -29,41 +33,33 @@ from orca_server.config import (
     S3_UPLOAD_BUCKET,
     S3_UPLOAD_PREFIX,
 )
-from orca_server.monitoring import MetricsSnapshot
 from orca_server.input_parser import parse_input_file_stats
 from orca_server.job_manager import (
     get_cluster_manager,
     get_job_tracker,
-    jobtracker_snapshot,
+    sky_down_with_retry,
 )
+from orca_server.job_templates import real_magic
 from orca_server.launcher import (
+    _launch_chunked_replica,
+    launch_chunked_replicas,
     sp_launch_vllm_batch_with_fallback,
     sp_launch_vllm_online,
-    launch_chunked_replicas,
-    _launch_chunked_replica,
 )
-from orca_server.job_manager import sky_down_with_retry
-import threading
-from orca_server.chunk_manager import get_chunk_manager
-from models.requests import BatchedRequest, OnlineServingRequest
-from models.resources import MagicOutput
+from orca_server.monitoring import MetricsSnapshot
+from orca_server.utils import make_job_id as _make_job_id
 from placement.roofline_magic import (
     RooflineAWSAllocation,
-    resolve_gpu_type_to_instance,
     check_user_specified_feasibility,
+    resolve_gpu_type_to_instance,
 )
 from quota.region_selector import (
-    get_ordered_regions,
-    get_instance_family,
     get_cached_quotas,
+    get_instance_family,
+    get_ordered_regions,
 )
-from storage.storage_factory import get_storage_backend
-from orca_server.job_templates import real_magic
 from quota.tracker import VPCQuotaTracker
-
-
-from orca_server.utils import make_job_id as _make_job_id
-
+from storage.storage_factory import get_storage_backend
 
 # ---------------------------------------------------------------------------
 # Replica log forwarding
@@ -95,18 +91,13 @@ def _write_replica_logs(job_id: str, replica_id: str, log_lines: list):
             _replica_log_locks[replica_id] = threading.Lock()
         lock = _replica_log_locks[replica_id]
 
-    with lock:
-        with open(log_path, "a") as f:
-            for entry in log_lines:
-                ts = entry.get("ts", 0)
-                msg = entry.get("msg", "")
-                if msg:
-                    timestr = (
-                        datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-                        if ts
-                        else ""
-                    )
-                    f.write(f"{timestr}  {msg}\n")
+    with lock, open(log_path, "a") as f:
+        for entry in log_lines:
+            ts = entry.get("ts", 0)
+            msg = entry.get("msg", "")
+            if msg:
+                timestr = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+                f.write(f"{timestr}  {msg}\n")
 
 
 async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:
@@ -126,7 +117,7 @@ async def _resolve_input_file(input_file: str) -> tuple[str, str | None]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Validate critical env vars ──
-    from orca_server.config import TD_SERVER_URL, HF_TOKEN
+    from orca_server.config import HF_TOKEN, TD_SERVER_URL
 
     if not TD_SERVER_URL or TD_SERVER_URL == "placeholder":
         logger.error(
@@ -150,6 +141,7 @@ async def lifespan(app: FastAPI):
 
     # Refresh AWS quotas in background (non-blocking)
     import threading
+
     from quota.region_selector import refresh_quotas_from_aws
 
     threading.Thread(
@@ -158,8 +150,8 @@ async def lifespan(app: FastAPI):
         daemon=True,
     ).start()
 
-    from orca_server.monitoring import get_metrics_collector
     from orca_server.metrics_db import get_metrics_db
+    from orca_server.monitoring import get_metrics_collector
 
     app.state.metrics_collector = get_metrics_collector()
     app.state.metrics_db = get_metrics_db()
@@ -175,6 +167,7 @@ async def lifespan(app: FastAPI):
     # Redis health check — required for chunked multi-replica jobs
     try:
         import redis as _redis
+
         from orca_server.config import REDIS_URL
 
         _r = _redis.from_url(REDIS_URL, socket_connect_timeout=3, socket_timeout=3)
@@ -215,10 +208,7 @@ async def lifespan(app: FastAPI):
                     job_id = key[len(prefix) : -len(suffix)]
                     result = cm.reclaim_expired_chunks(job_id)
                     if result["reclaimed"] or result["failed"]:
-                        logger.info(
-                            f"[Reclaim] {job_id}: reclaimed={result['reclaimed']} "
-                            f"failed={result['failed']}"
-                        )
+                        logger.info(f"[Reclaim] {job_id}: reclaimed={result['reclaimed']} failed={result['failed']}")
                     # If reclaim pushed a job to all_done, trigger assembly
                     if result["failed"]:
                         progress = cm.get_progress(job_id)
@@ -271,16 +261,12 @@ async def lifespan(app: FastAPI):
     threads = cm.get_active_threads()
     stale_clusters = []
     if threads:
-        logger.info(
-            f"[Shutdown] Waiting for {len(threads)} monitor thread(s) to finish teardown..."
-        )
+        logger.info(f"[Shutdown] Waiting for {len(threads)} monitor thread(s) to finish teardown...")
         for name, t in threads.items():
             logger.info(f"[Shutdown] Joining thread for cluster {name}...")
             t.join(timeout=120)
             if t.is_alive():
-                logger.warning(
-                    f"[Shutdown] Thread for {name} did not finish within 120s"
-                )
+                logger.warning(f"[Shutdown] Thread for {name} did not finish within 120s")
                 stale_clusters.append(name)
         logger.info("[Shutdown] All monitor threads joined.")
 
@@ -379,9 +365,7 @@ def _get_instance_price(instance_type: str, region: str) -> float:
         _pricing_cache[key] = cost
         return cost
     except Exception as e:
-        logger.warning(
-            f"[Resources] Price lookup failed for {instance_type} in {region}: {e}"
-        )
+        logger.warning(f"[Resources] Price lookup failed for {instance_type} in {region}: {e}")
         return None
 
 
@@ -476,9 +460,7 @@ async def resources():
                 n = info.get("num_instances", 0)
                 if inst in AWS_INSTANCES:
                     gpu_name, gpu_count, _, _ = AWS_INSTANCES[inst]
-                    allocated_gpus[gpu_name] = (
-                        allocated_gpus.get(gpu_name, 0) + gpu_count * n
-                    )
+                    allocated_gpus[gpu_name] = allocated_gpus.get(gpu_name, 0) + gpu_count * n
 
         return instances, quotas, allocated_gpus
 
@@ -664,7 +646,7 @@ async def debug_inject_replica(request: Request):
 async def ingest_job_metrics(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Called by in-cluster sidecar every 5s with an accumulated batch of Prometheus snapshots."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -700,9 +682,7 @@ async def ingest_job_metrics(
             "provisioned",
             "dead",
         ):
-            cm.set_replica_state(
-                job_id, replica_id, phase="running", running_since=time.time()
-            )
+            cm.set_replica_state(job_id, replica_id, phase="running", running_since=time.time())
         # Clear watchdog dead tracking if this replica recovered
         wd = getattr(app.state, "watchdog", None)
         if wd:
@@ -750,14 +730,12 @@ async def ingest_job_metrics(
                     )
                     snap.avg_prompt_throughput_toks_per_s = max(
                         0,
-                        (snap.live_prompt_tokens_total - prev.live_prompt_tokens_total)
-                        / dt,
+                        (snap.live_prompt_tokens_total - prev.live_prompt_tokens_total) / dt,
                     )
                 else:
                     snap.avg_generation_throughput_toks_per_s = max(
                         0,
-                        (snap.generation_tokens_total - prev.generation_tokens_total)
-                        / dt,
+                        (snap.generation_tokens_total - prev.generation_tokens_total) / dt,
                     )
                     snap.avg_prompt_throughput_toks_per_s = max(
                         0, (snap.prompt_tokens_total - prev.prompt_tokens_total) / dt
@@ -815,7 +793,7 @@ async def ingest_job_metrics(
 async def ingest_replica_summary(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Called by each replica after all chunks are done with its build_metrics dict."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -836,7 +814,7 @@ async def ingest_replica_summary(
 async def update_job_phase(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Called by in-cluster runner to report lifecycle phases (loading_model, model_ready, generating)."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -856,9 +834,7 @@ async def update_job_phase(
             pass
         import threading
 
-        threading.Thread(
-            target=sky_down_with_retry, args=(replica_id,), daemon=True
-        ).start()
+        threading.Thread(target=sky_down_with_retry, args=(replica_id,), daemon=True).start()
         logger.info(
             "[Phase] Replica %s completed, metrics stopped, teardown scheduled",
             replica_id,
@@ -893,7 +869,7 @@ async def update_job_phase(
 
 def _notify_koi_replica_ready(job_id: str, replica_id: str):
     """Fire /job/started webhook to Koi when vLLM is ready to serve."""
-    from orca_server.config import KOI_SERVICE_URL, INSTANCE_TO_GPU
+    from orca_server.config import INSTANCE_TO_GPU, KOI_SERVICE_URL
     from orca_server.launcher import _stop_koi_launch_heartbeat
 
     if not KOI_SERVICE_URL:
@@ -924,9 +900,7 @@ def _notify_koi_replica_ready(job_id: str, replica_id: str):
             "replica_id": replica_id,
             "group_id": koi_info.get("group_id"),
             "decision_id": koi_info.get("decision_id"),
-            "gpu_type": INSTANCE_TO_GPU.get(
-                state.get("instance_type", ""), "unknown"
-            ),
+            "gpu_type": INSTANCE_TO_GPU.get(state.get("instance_type", ""), "unknown"),
             "instance_type": state.get("instance_type", "unknown"),
             "region": state.get("region", "unknown"),
             "market": state.get("market", "unknown"),
@@ -955,7 +929,7 @@ def _notify_koi_replica_ready(job_id: str, replica_id: str):
 async def pull_chunk(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Replica calls to get next chunk. Returns 204 when queue is empty."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -974,7 +948,7 @@ async def pull_chunk(
 async def complete_chunk(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Replica reports chunk done. Triggers assembly when all chunks are complete."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -1001,7 +975,7 @@ async def complete_chunk(
 async def renew_chunk_lease(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Replica calls every CHUNK_RENEW_INTERVAL to extend its lease on an inflight chunk."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -1018,7 +992,7 @@ async def renew_chunk_lease(
 @app.get("/job/{job_id}/chunks/progress")
 async def chunk_progress(
     job_id: str,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Chunk-level progress for CLI."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -1041,16 +1015,12 @@ async def _assemble_output(job_id: str):
     # from both running assembly. SETNX returns True only for the winner; 5-min TTL as safety net.
     lock_key = f"chunk:job:{job_id}:assembling"
     if not cm._r.set(lock_key, "1", nx=True, ex=300):
-        job_logger.info(
-            f"[Assembly] Job {job_id} assembly already in progress, skipping"
-        )
+        job_logger.info(f"[Assembly] Job {job_id} assembly already in progress, skipping")
         return
 
     meta = cm._r.hgetall(f"chunk:job:{job_id}:meta")
     if not meta:
-        job_logger.info(
-            f"[Assembly] Job {job_id} metadata gone (already assembled?), skipping"
-        )
+        job_logger.info(f"[Assembly] Job {job_id} metadata gone (already assembled?), skipping")
         return
     s3_output_base = meta.get("s3_output_base", "")
     ordered_ids = cm.get_output_order(job_id)
@@ -1058,8 +1028,7 @@ async def _assemble_output(job_id: str):
     failed_ids = cm.get_failed_chunk_ids(job_id)
     if failed_ids:
         job_logger.warning(
-            f"[Assembly] {len(failed_ids)} chunk(s) permanently failed and will be skipped: "
-            f"{sorted(failed_ids)}"
+            f"[Assembly] {len(failed_ids)} chunk(s) permanently failed and will be skipped: {sorted(failed_ids)}"
         )
 
     combined_path = f"/tmp/assembly_{job_id}.jsonl"
@@ -1074,13 +1043,9 @@ async def _assemble_output(job_id: str):
                 s3_out = chunk_info.get("s3_output_path", "")
                 local_tmp = f"/tmp/assemble_{job_id}_{cid}.jsonl"
                 try:
-                    await storage_backend.download_file(
-                        s3_out, local_tmp, user="system"
-                    )
+                    await storage_backend.download_file(s3_out, local_tmp, user="system")
                 except Exception as dl_err:
-                    job_logger.error(
-                        f"[Assembly] Failed to download {s3_out}: {dl_err}"
-                    )
+                    job_logger.error(f"[Assembly] Failed to download {s3_out}: {dl_err}")
                     assembly_failures.append(cid)
                     continue
                 with open(local_tmp) as cf:
@@ -1097,9 +1062,9 @@ async def _assemble_output(job_id: str):
         # Write all outputs into the original job directory (where job.log lives),
         # then rename with success-/partial- prefix — matching single-cluster behavior.
         from orca_server.job_manager import (
+            close_job_logger,
             download_output_from_s3,
             prefix_job_dirname,
-            close_job_logger,
         )
 
         tracker = get_job_tracker()
@@ -1136,9 +1101,7 @@ async def _assemble_output(job_id: str):
                 solver = "chunked"
                 if rec:
                     actual_region = getattr(rec.state, "actual_region", "") or ""
-                    actual_market = (
-                        getattr(rec.state, "actual_market", "spot") or "spot"
-                    )
+                    actual_market = getattr(rec.state, "actual_market", "spot") or "spot"
                 db.push_run(
                     job_id,
                     metrics_csv_path,
@@ -1148,9 +1111,7 @@ async def _assemble_output(job_id: str):
                     job_dirname=job_dirname,
                 )
                 os.unlink(metrics_csv_path)
-                job_logger.info(
-                    f"[Assembly] Wrote aggregated metrics to DB for {job_id}"
-                )
+                job_logger.info(f"[Assembly] Wrote aggregated metrics to DB for {job_id}")
 
                 # Save metrics.csv to the base experiment directory
                 local_metrics_path = base_dir / "metrics.csv"
@@ -1165,20 +1126,12 @@ async def _assemble_output(job_id: str):
 
                 # Upload aggregated metrics.csv to S3
                 metrics_s3 = f"{s3_output_base}/metrics.csv"
-                await storage_backend.upload_file(
-                    str(local_metrics_path), metrics_s3, user="system"
-                )
-                job_logger.info(
-                    f"[Assembly] Uploaded aggregated metrics.csv to {metrics_s3}"
-                )
+                await storage_backend.upload_file(str(local_metrics_path), metrics_s3, user="system")
+                job_logger.info(f"[Assembly] Uploaded aggregated metrics.csv to {metrics_s3}")
             else:
-                job_logger.info(
-                    f"[Assembly] No replica summaries found for {job_id}, skipping metrics aggregation"
-                )
+                job_logger.info(f"[Assembly] No replica summaries found for {job_id}, skipping metrics aggregation")
         except Exception as me:
-            job_logger.warning(
-                f"[Assembly] Metrics aggregation failed for {job_id}: {me}"
-            )
+            job_logger.warning(f"[Assembly] Metrics aggregation failed for {job_id}: {me}")
 
         # Export timeseries to the base experiment directory
         try:
@@ -1190,15 +1143,11 @@ async def _assemble_output(job_id: str):
                 # Use all keys from first sample as columns
                 all_keys = list(ts_data[0].keys())
                 with open(ts_path, "w", newline="") as tf:
-                    writer = _csv2.DictWriter(
-                        tf, fieldnames=all_keys, extrasaction="ignore"
-                    )
+                    writer = _csv2.DictWriter(tf, fieldnames=all_keys, extrasaction="ignore")
                     writer.writeheader()
                     for row in ts_data:
                         writer.writerow(row)
-                job_logger.info(
-                    f"[Assembly] Saved timeseries.csv ({len(ts_data)} samples) to {ts_path}"
-                )
+                job_logger.info(f"[Assembly] Saved timeseries.csv ({len(ts_data)} samples) to {ts_path}")
 
                 # Generate timeseries PDF
                 try:
@@ -1206,20 +1155,14 @@ async def _assemble_output(job_id: str):
 
                     pdf_path = base_dir / "timeseries.pdf"
                     _metrics_arg = (
-                        str(local_metrics_path)
-                        if local_metrics_path and local_metrics_path.exists()
-                        else None
+                        str(local_metrics_path) if local_metrics_path and local_metrics_path.exists() else None
                     )
                     _plot_ts(str(ts_path), str(pdf_path), metrics_csv_path=_metrics_arg)
-                    job_logger.info(
-                        f"[Assembly] Generated timeseries.pdf at {pdf_path}"
-                    )
+                    job_logger.info(f"[Assembly] Generated timeseries.pdf at {pdf_path}")
                 except Exception as pe:
                     job_logger.warning(f"[Assembly] Timeseries plot failed: {pe}")
         except Exception as te:
-            job_logger.warning(
-                f"[Assembly] Timeseries export failed for {job_id}: {te}"
-            )
+            job_logger.warning(f"[Assembly] Timeseries export failed for {job_id}: {te}")
 
         if assembly_failures:
             downloaded = expected_chunks - len(assembly_failures)
@@ -1266,20 +1209,14 @@ async def _assemble_output(job_id: str):
             "job-complete",
             dedup_key=f"job_complete:{job_id}",
         )
-        job_logger.info(
-            f"[Assembly] Enqueued job_complete: {job_id} ({final_status})"
-        )
+        job_logger.info(f"[Assembly] Enqueued job_complete: {job_id} ({final_status})")
 
         # Rename directory with success-/partial-/failed- prefix (after all writes are done)
-        status_prefix = (
-            "failed" if assembly_failures else ("partial" if failed_ids else "success")
-        )
+        status_prefix = "failed" if assembly_failures else ("partial" if failed_ids else "success")
         prefixed_dirname = prefix_job_dirname(job_dirname, status_prefix)
         target_dir = Path(f"outputs/{prefixed_dirname}")
         target_dir.parent.mkdir(parents=True, exist_ok=True)
-        job_logger.info(
-            f"[Assembly] {status_prefix.upper()}: outputs/{prefixed_dirname}"
-        )
+        job_logger.info(f"[Assembly] {status_prefix.upper()}: outputs/{prefixed_dirname}")
         close_job_logger(job_logger)
         base_dir.rename(target_dir)
 
@@ -1297,9 +1234,7 @@ async def _assemble_output(job_id: str):
             if _base.exists():
                 _failed = Path(f"outputs/{prefix_job_dirname(_dirname, 'failed')}")
                 _failed.parent.mkdir(parents=True, exist_ok=True)
-                job_logger.info(
-                    f"[Assembly] FAILED: outputs/{prefix_job_dirname(_dirname, 'failed')}"
-                )
+                job_logger.info(f"[Assembly] FAILED: outputs/{prefix_job_dirname(_dirname, 'failed')}")
                 close_job_logger(job_logger)
                 _base.rename(_failed)
         except Exception:
@@ -1334,11 +1269,11 @@ TERMINAL_PHASES = {"dead", "completed", "failed", "swapped_out", "killed"}
 
 def _resolve_requested_market(
     *,
-    planned_market: Optional[str] = None,
-    preferred_market: Optional[str] = None,
-    on_demand: Optional[bool] = None,
-    prefer_spot: Optional[bool] = None,
-) -> Optional[str]:
+    planned_market: str | None = None,
+    preferred_market: str | None = None,
+    on_demand: bool | None = None,
+    prefer_spot: bool | None = None,
+) -> str | None:
     """Resolve caller intent into an exact market when possible."""
     if planned_market in {"spot", "on_demand"}:
         return planned_market
@@ -1355,11 +1290,11 @@ class ScaleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     count: int
-    gpu_type: Optional[str] = None
-    tp_size: Optional[int] = None
-    pp_size: Optional[int] = None
-    planned_market: Optional[Literal["spot", "on_demand"]] = None
-    on_demand: Optional[bool] = None
+    gpu_type: str | None = None
+    tp_size: int | None = None
+    pp_size: int | None = None
+    planned_market: Literal["spot", "on_demand"] | None = None
+    on_demand: bool | None = None
     force: bool = False
 
 
@@ -1369,10 +1304,10 @@ class SwapRequest(BaseModel):
     gpu_type: str
     tp_size: int = 1
     pp_size: int = 1
-    num_replicas: Optional[int] = None
+    num_replicas: int | None = None
     ready_threshold: int = 1
-    planned_market: Optional[Literal["spot", "on_demand"]] = None
-    on_demand: Optional[bool] = None
+    planned_market: Literal["spot", "on_demand"] | None = None
+    on_demand: bool | None = None
     force: bool = False
 
 
@@ -1412,11 +1347,7 @@ def _infer_job_config(job_id: str) -> dict:
         spec = rec.state.spec
         state = rec.state
         inst_types = getattr(state, "instance_types", None)
-        inst = (
-            inst_types
-            if isinstance(inst_types, str)
-            else (inst_types[0] if inst_types else None)
-        )
+        inst = inst_types if isinstance(inst_types, str) else (inst_types[0] if inst_types else None)
         if inst:
             gpu = INSTANCE_TO_GPU.get(inst, getattr(state, "gpu_base", inst))
             return {
@@ -1427,9 +1358,7 @@ def _infer_job_config(job_id: str) -> dict:
                 "model_name": getattr(spec, "model_name", ""),
             }
 
-    raise HTTPException(
-        400, "Cannot infer GPU config from job — specify --gpu explicitly"
-    )
+    raise HTTPException(400, "Cannot infer GPU config from job — specify --gpu explicitly")
 
 
 def _do_scale(
@@ -1439,7 +1368,7 @@ def _do_scale(
     tp_size: int,
     pp_size: int,
     on_demand: bool = False,
-    planned_market: Optional[str] = None,
+    planned_market: str | None = None,
     instance_type: str = None,
 ) -> dict:
     """Launch N new replicas for an existing chunked job. Returns replica names + version.
@@ -1493,11 +1422,7 @@ def _do_scale(
     # Build BatchedRequest from job metadata
     meta = chunk_mgr._r.hgetall(f"chunk:job:{job_id}:meta")
     s3_base = meta.get("s3_output_base", f"s3://{S3_UPLOAD_BUCKET}/scale")
-    spec = (
-        rec.state.spec
-        if rec and hasattr(rec, "state") and hasattr(rec.state, "spec")
-        else None
-    )
+    spec = rec.state.spec if rec and hasattr(rec, "state") and hasattr(rec.state, "spec") else None
     original_request = BatchedRequest(
         user_id="scale",
         model_name=(spec.model_name if spec else meta.get("model_name", "unknown")),
@@ -1522,28 +1447,16 @@ def _do_scale(
     # Reconstruct koi_webhook_info from existing replicas so Koi gets notified
     existing_states = cm.get_replica_states(job_id)
     koi_info_source = next(
-        (
-            s.get("koi_webhook_info")
-            for s in existing_states.values()
-            if s.get("koi_webhook_info")
-        ),
+        (s.get("koi_webhook_info") for s in existing_states.values() if s.get("koi_webhook_info")),
         None,
     )
     scale_koi_info = (
         {
-            "decision_id": koi_info_source.get("decision_id")
-            if koi_info_source
-            else None,
+            "decision_id": koi_info_source.get("decision_id") if koi_info_source else None,
             "group_id": job_id,
-            "slo_deadline_hours": koi_info_source.get("slo_deadline_hours", 8.0)
-            if koi_info_source
-            else 8.0,
-            "total_tokens": koi_info_source.get("total_tokens", 0)
-            if koi_info_source
-            else 0,
-            "predicted_tps": koi_info_source.get("predicted_tps", 0)
-            if koi_info_source
-            else 0,
+            "slo_deadline_hours": koi_info_source.get("slo_deadline_hours", 8.0) if koi_info_source else 8.0,
+            "total_tokens": koi_info_source.get("total_tokens", 0) if koi_info_source else 0,
+            "predicted_tps": koi_info_source.get("predicted_tps", 0) if koi_info_source else 0,
             "deploy_timestamp": time.time(),
         }
         if koi_info_source
@@ -1587,9 +1500,7 @@ def _do_scale(
         )
         t.start()
 
-    logger.info(
-        "[Scale] Launched %d new replicas for %s: %s", count, job_id, new_replicas
-    )
+    logger.info("[Scale] Launched %d new replicas for %s: %s", count, job_id, new_replicas)
     return {"new_replicas": new_replicas, "version": version}
 
 
@@ -1652,7 +1563,7 @@ def _do_kill(job_id: str, replica_ids: list[str], phase: str = "killed") -> dict
 async def scale_replicas(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Add replicas to a running chunked job."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -1665,9 +1576,7 @@ async def scale_replicas(
     if rec is None and progress is None:
         raise HTTPException(404, "Job not found")
     if progress is None:
-        raise HTTPException(
-            400, "Not a chunked job — scale requires chunked deployment"
-        )
+        raise HTTPException(400, "Not a chunked job — scale requires chunked deployment")
     if rec and rec.status in ("succeeded", "failed", "cancelled"):
         raise HTTPException(409, f"Job status '{rec.status}' cannot be scaled")
 
@@ -1714,12 +1623,8 @@ async def scale_replicas(
                 gpu_count=tp_size * pp_size,
                 tp=tp_size,
                 pp=pp_size,
-                avg_input_tokens=getattr(spec, "avg_input_tokens", 2000)
-                if spec
-                else 2000,
-                avg_output_tokens=getattr(spec, "avg_output_tokens", 1024)
-                if spec
-                else 1024,
+                avg_input_tokens=getattr(spec, "avg_input_tokens", 2000) if spec else 2000,
+                avg_output_tokens=getattr(spec, "avg_output_tokens", 1024) if spec else 1024,
             )
             if not feasibility.get("feasible", True):
                 return {
@@ -1752,7 +1657,7 @@ async def scale_replicas(
 async def kill_replicas(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Kill specific replicas of a job — reclaim chunks, exclude metrics, tear down."""
     if ORCA_API_KEY and authorization != f"Bearer {ORCA_API_KEY}":
@@ -1783,7 +1688,7 @@ async def kill_replicas(
 async def swap_replicas(
     job_id: str,
     request: Request,
-    authorization: Optional[str] = Header(None),
+    authorization: str | None = Header(None),
 ):
     """Hot-swap replicas to a new GPU/TP/PP config mid-job.
 
@@ -1800,9 +1705,7 @@ async def swap_replicas(
     if rec is None and progress is None:
         raise HTTPException(404, "Job not found")
     if progress is None:
-        raise HTTPException(
-            400, "Job is not a chunked job — swap requires a chunked deployment"
-        )
+        raise HTTPException(400, "Job is not a chunked job — swap requires a chunked deployment")
     if rec and rec.status in ("succeeded", "failed", "cancelled"):
         raise HTTPException(409, f"Job status '{rec.status}' is not swappable")
 
@@ -1837,9 +1740,7 @@ async def swap_replicas(
             gpu_type=gpu_type,
             tp_size=tp_size,
             pp_size=pp_size,
-            model_name=getattr(rec.state, "spec", None)
-            and rec.state.spec.model_name
-            or "",
+            model_name=getattr(rec.state, "spec", None) and rec.state.spec.model_name or "",
         )
         if not feasibility.get("feasible", True):
             return {
@@ -1850,11 +1751,7 @@ async def swap_replicas(
 
     # Snapshot old replicas
     old_states = cm.get_replica_states(job_id)
-    old_replicas = [
-        rid
-        for rid, info in old_states.items()
-        if info.get("phase") not in TERMINAL_PHASES
-    ]
+    old_replicas = [rid for rid, info in old_states.items() if info.get("phase") not in TERMINAL_PHASES]
 
     if num_replicas is None:
         num_replicas = len(old_replicas) or 1
@@ -1877,11 +1774,7 @@ async def swap_replicas(
     )
 
     # Start monitor that kills old replicas when new ones are ready
-    asyncio.create_task(
-        _swap_monitor(
-            job_id, old_replicas, scale_result["new_replicas"], ready_threshold
-        )
-    )
+    asyncio.create_task(_swap_monitor(job_id, old_replicas, scale_result["new_replicas"], ready_threshold))
 
     return {
         "status": "swapping",
@@ -1892,9 +1785,7 @@ async def swap_replicas(
     }
 
 
-async def _swap_monitor(
-    job_id: str, old_replicas: list[str], new_replicas: list[str], ready_threshold: int
-):
+async def _swap_monitor(job_id: str, old_replicas: list[str], new_replicas: list[str], ready_threshold: int):
     """Wait for K new replicas to send first ingest POST, then kill old ones."""
     mc = app.state.metrics_collector
     cm = app.state.cluster_manager
@@ -1955,15 +1846,13 @@ async def _swap_monitor(
 
 @app.get("/analytics/runs")
 async def list_analytics_runs(
-    model: Optional[str] = None,
-    gpu: Optional[str] = None,
+    model: str | None = None,
+    gpu: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ):
     """List completed runs with optional model/gpu filters."""
-    runs = app.state.metrics_db.list_runs(
-        model=model, gpu=gpu, limit=min(limit, 200), offset=offset
-    )
+    runs = app.state.metrics_db.list_runs(model=model, gpu=gpu, limit=min(limit, 200), offset=offset)
     return {"status": "success", "count": len(runs), "runs": runs}
 
 
@@ -1979,8 +1868,8 @@ async def get_analytics_run(run_id: int):
 @app.get("/analytics/runs/{run_id}/timeseries")
 async def get_run_timeseries(
     run_id: int,
-    start: Optional[float] = None,
-    end: Optional[float] = None,
+    start: float | None = None,
+    end: float | None = None,
 ):
     """Full timeseries for a completed run. Supports optional unix timestamp range."""
     run = app.state.metrics_db.get_run(run_id)
@@ -2007,11 +1896,7 @@ async def submit_batch(request: BatchedRequest):
     - "user_specified": User provides GPU/TP/PP directly
     """
     # For chunked jobs the CLI already parsed stats and uploaded chunks — skip file download
-    if (
-        request.chunks
-        and request.num_lines is not None
-        and request.avg_input_tokens is not None
-    ):
+    if request.chunks and request.num_lines is not None and request.avg_input_tokens is not None:
         num_lines = request.num_lines
         avg_input_tokens = request.avg_input_tokens
         max_input_tokens = request.max_input_tokens
@@ -2082,13 +1967,9 @@ async def submit_batch(request: BatchedRequest):
         num_instances = math.ceil(pp / partitions_per_inst)
         instance_family = get_instance_family(instance_type)
         quotas = get_cached_quotas(instance_family)
-        requested_market = getattr(request, "planned_market", None) or getattr(
-            request, "preferred_market", None
-        )
+        requested_market = getattr(request, "planned_market", None) or getattr(request, "preferred_market", None)
         prefer_spot = (
-            requested_market == "spot"
-            if requested_market is not None
-            else getattr(request, "prefer_spot", True)
+            requested_market == "spot" if requested_market is not None else getattr(request, "prefer_spot", True)
         )
         viable_regions = get_ordered_regions(
             instance_type=instance_type,
@@ -2098,9 +1979,7 @@ async def submit_batch(request: BatchedRequest):
             target_market=requested_market,
         )
         if not viable_regions:
-            quota_warning = (
-                f"No quota for {instance_type} in any region. Launch will likely fail."
-            )
+            quota_warning = f"No quota for {instance_type} in any region. Launch will likely fail."
 
         if not result["feasible"] and not request.force:
             return {
@@ -2141,9 +2020,7 @@ async def submit_batch(request: BatchedRequest):
                 if not alt_gpu:
                     continue
                 try:
-                    alt_inst, alt_gpu_count = resolve_gpu_type_to_instance(
-                        alt_gpu, alt_tp
-                    )
+                    alt_inst, alt_gpu_count = resolve_gpu_type_to_instance(alt_gpu, alt_tp)
                 except ValueError:
                     continue
                 alt_num_inst = max(1, (alt_tp * alt_pp) // alt_gpu_count)
@@ -2161,9 +2038,7 @@ async def submit_batch(request: BatchedRequest):
                     )
                 )
             if len(configs) > 1:
-                logger.info(
-                    f"[Placement] {len(configs)} configs total (primary + {len(configs) - 1} Koi alternatives)"
-                )
+                logger.info(f"[Placement] {len(configs)} configs total (primary + {len(configs) - 1} Koi alternatives)")
 
         sol = result.get("solution") or {}
         msg = (
@@ -2256,18 +2131,14 @@ async def submit_batch(request: BatchedRequest):
         s3_base = "/".join(first_chunk_s3.split("/")[:3])
         from orca_server.job_manager import generate_job_dirname
 
-        job_dirname = generate_job_dirname(
-            request, use_solver, primary.tp_size, primary.pp_size, primary.instance_type
-        )
+        job_dirname = generate_job_dirname(request, use_solver, primary.tp_size, primary.pp_size, primary.instance_type)
         s3_output_base = f"{s3_base}/{job_dirname}"
 
         cm = get_chunk_manager()
         cm.create_job_queue(job_id, request.chunks, request.model_name, s3_output_base)
 
         # Mark job as chunked so watchdog monitors replica heartbeats
-        get_job_tracker().set_chunked_info(
-            job_id, len(request.chunks), effective_replicas
-        )
+        get_job_tracker().set_chunked_info(job_id, len(request.chunks), effective_replicas)
 
         msg = f"[Chunked] {len(request.chunks)} chunks, {effective_replicas} replicas"
         logger.info(msg)
@@ -2332,26 +2203,19 @@ async def submit_batch(request: BatchedRequest):
                 "job_id": used_config.decision_id,
                 "replica_id": used_config.decision_id,
                 "decision_id": request.koi_decision_id,
-                "gpu_type": INSTANCE_TO_GPU.get(
-                    used_config.instance_type, "unknown"
-                ),
+                "gpu_type": INSTANCE_TO_GPU.get(used_config.instance_type, "unknown"),
                 "instance_type": used_config.instance_type,
                 "tp": used_config.tp_size,
                 "pp": used_config.pp_size,
                 "dp": getattr(request, "replicas", 1) or 1,
                 "slo_deadline_hours": request.slo_deadline_hours or 8.0,
                 "total_tokens": (request.num_lines or 0)
-                * (
-                    (request.avg_input_tokens or 0)
-                    + (request.avg_output_tokens or 0)
-                ),
+                * ((request.avg_input_tokens or 0) + (request.avg_output_tokens or 0)),
             },
             "job-started",
             dedup_key=f"job_started:{used_config.decision_id}",
         )
-        logger.info(
-            f"[Launch] Enqueued job_started: {used_config.decision_id}"
-        )
+        logger.info(f"[Launch] Enqueued job_started: {used_config.decision_id}")
 
         resp = {
             "status": "launched",
@@ -2370,9 +2234,7 @@ async def submit_batch(request: BatchedRequest):
             "message": f"Job submitted. Check progress at GET /job/{used_config.decision_id}",
         }
         if used_config.estimated_runtime_hours is not None:
-            resp["estimated_runtime_hours"] = round(
-                used_config.estimated_runtime_hours, 2
-            )
+            resp["estimated_runtime_hours"] = round(used_config.estimated_runtime_hours, 2)
             resp["meets_slo"] = used_config.meets_slo
             resp["slo_deadline_hours"] = request.slo_deadline_hours
         return resp
@@ -2393,11 +2255,7 @@ async def test_placement(request: BatchedRequest):
     and returns the placement decision(s) with performance/cost estimates.
     """
     # If the client already sent parsed stats, skip the S3 download entirely
-    if (
-        request.num_lines is not None
-        and request.avg_input_tokens is not None
-        and request.max_input_tokens is not None
-    ):
+    if request.num_lines is not None and request.avg_input_tokens is not None and request.max_input_tokens is not None:
         num_lines = request.num_lines
         avg_input_tokens = request.avg_input_tokens
         max_input_tokens = request.max_input_tokens
@@ -2452,13 +2310,9 @@ async def test_placement(request: BatchedRequest):
         num_instances = math.ceil(pp / partitions_per_inst)
         instance_family = get_instance_family(instance_type)
         quotas = get_cached_quotas(instance_family)
-        requested_market = getattr(request, "planned_market", None) or getattr(
-            request, "preferred_market", None
-        )
+        requested_market = getattr(request, "planned_market", None) or getattr(request, "preferred_market", None)
         prefer_spot = (
-            requested_market == "spot"
-            if requested_market is not None
-            else getattr(request, "prefer_spot", True)
+            requested_market == "spot" if requested_market is not None else getattr(request, "prefer_spot", True)
         )
         viable_regions = get_ordered_regions(
             instance_type=instance_type,
@@ -2469,9 +2323,7 @@ async def test_placement(request: BatchedRequest):
         )
         quota_warning = None
         if not viable_regions:
-            quota_warning = (
-                f"No quota for {instance_type} in any region. Launch will likely fail."
-            )
+            quota_warning = f"No quota for {instance_type} in any region. Launch will likely fail."
 
         sol = result.get("solution") or {}
         configs = [
@@ -2648,9 +2500,7 @@ async def submit_online(request: OnlineServingRequest):
 
 ##### Storage stuff #####
 @app.post("/storage/presigned_upload")
-async def presign_upload(
-    remote_path: str = Form(...), user: str = Form(...), expires: int = Form(600)
-):
+async def presign_upload(remote_path: str = Form(...), user: str = Form(...), expires: int = Form(600)):
     payload = await storage_backend.presigned_upload(remote_path, user, expires)
     return {"status": "success", **payload}
 
@@ -2674,9 +2524,7 @@ async def upload_file_to_storage(
             filename = file.filename or f"upload_{int(time.time())}"
             remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{int(time.time())}_{filename}"
         elif not remote_path.startswith("s3://"):
-            remote_path = (
-                f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{remote_path}"
-            )
+            remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{remote_path}"
         logger.info(f"[Storage] Uploading file for user {user} to {remote_path}")
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             chunk_size = CHUNK_SIZE_BYTES
@@ -2777,9 +2625,7 @@ async def delete_file_from_storage(user: str, file_path: str):
                 "file_path": file_path,
             }
         else:
-            raise HTTPException(
-                status_code=500, detail=f"Failed to delete file {file_path}"
-            )
+            raise HTTPException(status_code=500, detail=f"Failed to delete file {file_path}")
     except HTTPException:
         raise
     except Exception as e:
@@ -2835,9 +2681,7 @@ async def multipart_sign_part(
     part_number: int = Form(...),
     expires: int = Form(600),
 ):
-    return await storage_backend.multipart_sign_part(
-        upload_id, user, remote_path, part_number, expires
-    )
+    return await storage_backend.multipart_sign_part(upload_id, user, remote_path, part_number, expires)
 
 
 @app.post("/storage/multipart/complete")
@@ -2850,13 +2694,12 @@ async def multipart_complete(
     parts_list = json.loads(parts)
     if not isinstance(parts_list, list):
         raise ValueError("parts is not a list")
-    return await storage_backend.multipart_complete(
-        remote_path, user, upload_id, parts_list
-    )
+    return await storage_backend.multipart_complete(remote_path, user, upload_id, parts_list)
 
 
 if __name__ == "__main__":
     import argparse as _ap
+
     import uvicorn
 
     _parser = _ap.ArgumentParser(description="Orca control plane server")
@@ -2873,16 +2716,13 @@ if __name__ == "__main__":
     _args = _parser.parse_args()
 
     if _args.tunnel:
-        import sys
-        import subprocess as _sp
         import re as _re
-        import signal as _sig
-
         import shutil as _sh
+        import signal as _sig
+        import subprocess as _sp
+        import sys
 
-        _cf_bin = _sh.which("cloudflared") or os.path.join(
-            os.path.dirname(__file__), "cloudflared"
-        )
+        _cf_bin = _sh.which("cloudflared") or os.path.join(os.path.dirname(__file__), "cloudflared")
         if not os.path.isfile(_cf_bin):
             print("[Server] ERROR: cloudflared not found on PATH or in repo root")
             sys.exit(1)
