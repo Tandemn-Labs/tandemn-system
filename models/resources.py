@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from orca_server.cloud.models import PlacementCandidate
+
 
 class MagicOutput(BaseModel):
     decision_id: str
@@ -21,6 +23,7 @@ class MagicOutput(BaseModel):
     estimated_runtime_hours: float | None = None
     meets_slo: bool | None = None
     is_fallback: bool = False  # True when solver returned a generic fallback (unsupported model)
+    placement_candidate: PlacementCandidate | None = None
 
     @property
     def num_nodes(self) -> int:

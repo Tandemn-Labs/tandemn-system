@@ -74,8 +74,7 @@ def load_prompts(dataset_name, model_name, input_len, num_prompts):
             break
 
     if len(prompts) < num_prompts:
-        print(f"⚠️  Only found {len(prompts)} prompts with >= {input_len} tokens, "
-              f"recycling to reach {num_prompts}")
+        print(f"⚠️  Only found {len(prompts)} prompts with >= {input_len} tokens, recycling to reach {num_prompts}")
         while len(prompts) < num_prompts:
             prompts.append(prompts[len(prompts) % max(1, len(prompts) - num_prompts + len(prompts))])
 
@@ -151,7 +150,7 @@ async def send_request(session, semaphore, base_url, model, prompt, output_len, 
                 "output_tokens": output_tokens,
             }
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"request_id": request_id, "status": "error", "error": "timeout"}
         except Exception as e:
             return {"request_id": request_id, "status": "error", "error": str(e)}
@@ -170,9 +169,16 @@ async def run_benchmark(args, prompts):
         if args.warmup_requests > 0:
             print(f"Running {args.warmup_requests} warmup requests...")
             warmup_tasks = [
-                send_request(session, semaphore, args.base_url, args.model,
-                             prompts[i % len(prompts)], args.output_len, f"warmup_{i}",
-                             args.request_timeout)
+                send_request(
+                    session,
+                    semaphore,
+                    args.base_url,
+                    args.model,
+                    prompts[i % len(prompts)],
+                    args.output_len,
+                    f"warmup_{i}",
+                    args.request_timeout,
+                )
                 for i in range(args.warmup_requests)
             ]
             await asyncio.gather(*warmup_tasks, return_exceptions=True)
@@ -183,19 +189,24 @@ async def run_benchmark(args, prompts):
         t_start = time.perf_counter()
 
         tasks = [
-            send_request(session, semaphore, args.base_url, args.model,
-                         prompts[i % len(prompts)], args.output_len, i,
-                         args.request_timeout)
+            send_request(
+                session,
+                semaphore,
+                args.base_url,
+                args.model,
+                prompts[i % len(prompts)],
+                args.output_len,
+                i,
+                args.request_timeout,
+            )
             for i in range(args.num_requests)
         ]
 
         # Track progress so long-running benchmarks don't trigger watchdog
-        completed = 0
         results = []
-        for coro in asyncio.as_completed(tasks):
+        for completed, coro in enumerate(asyncio.as_completed(tasks), start=1):
             result = await coro
             results.append(result)
-            completed += 1
             if completed % max(1, args.num_requests // 10) == 0 or completed == args.num_requests:
                 elapsed = time.perf_counter() - t_start
                 print(f"  Progress: {completed}/{args.num_requests} ({elapsed:.0f}s elapsed)")
@@ -263,8 +274,7 @@ def main(argv=None):
     args = parse_args(argv)
 
     # Load prompts
-    prompts = load_prompts(args.dataset, args.model, args.input_len,
-                           args.num_requests + args.warmup_requests)
+    prompts = load_prompts(args.dataset, args.model, args.input_len, args.num_requests + args.warmup_requests)
 
     # Run benchmark
     results, wall_clock = asyncio.run(run_benchmark(args, prompts))
@@ -275,7 +285,7 @@ def main(argv=None):
     with open(args.output, "w") as f:
         json.dump(output, f, indent=2)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Benchmark complete: {output['num_successful']}/{args.num_requests} successful")
     print(f"Wall clock: {wall_clock:.1f}s")
     print(f"Results saved to: {args.output}")

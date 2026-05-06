@@ -32,6 +32,7 @@ from orca_server.config import (
     PLACEMENT_SOLVER,
     S3_UPLOAD_BUCKET,
     S3_UPLOAD_PREFIX,
+    TD_STORAGE_UPLOAD_SCHEME,
 )
 from orca_server.input_parser import parse_input_file_stats
 from orca_server.job_manager import (
@@ -60,6 +61,7 @@ from quota.region_selector import (
 )
 from quota.tracker import VPCQuotaTracker
 from storage.storage_factory import get_storage_backend
+from storage.uri import is_storage_uri
 
 # ---------------------------------------------------------------------------
 # Replica log forwarding
@@ -2522,9 +2524,9 @@ async def upload_file_to_storage(
     try:
         if not remote_path:
             filename = file.filename or f"upload_{int(time.time())}"
-            remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{int(time.time())}_{filename}"
-        elif not remote_path.startswith("s3://"):
-            remote_path = f"s3://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{remote_path}"
+            remote_path = f"{TD_STORAGE_UPLOAD_SCHEME}://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{int(time.time())}_{filename}"
+        elif not is_storage_uri(remote_path):
+            remote_path = f"{TD_STORAGE_UPLOAD_SCHEME}://{S3_UPLOAD_BUCKET}/{S3_UPLOAD_PREFIX}/{user}/{remote_path}"
         logger.info(f"[Storage] Uploading file for user {user} to {remote_path}")
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             chunk_size = CHUNK_SIZE_BYTES
@@ -2611,6 +2613,29 @@ async def download_s3_file(path: str, user: str = "default"):
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 
+@app.get("/storage/download")
+async def download_storage_file(path: str, user: str = "default"):
+    """Download a file by full storage URI."""
+    if not is_storage_uri(path):
+        raise HTTPException(status_code=400, detail="path must be a full storage URI")
+    try:
+        logger.info(f"[Storage] download path={path} user={user}")
+        filename = path.split("/")[-1] or "download"
+
+        async def file_stream_iterator():
+            async for chunk in storage_backend.stream_file(path, user):
+                yield chunk
+
+        return StreamingResponse(
+            file_stream_iterator(),
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        logger.error(f"[Storage] Error downloading storage file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+
 @app.delete("/storage/delete/{user}/{file_path:path}")
 async def delete_file_from_storage(user: str, file_path: str):
     """Delete a file from storage backend."""
@@ -2649,6 +2674,24 @@ async def delete_s3_file(path: str, user: str = "default"):
         raise
     except Exception as e:
         logger.error(f"[Storage] Error deleting S3 file: {e}")
+        raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
+
+
+@app.delete("/storage/delete")
+async def delete_storage_file(path: str, user: str = "default"):
+    """Delete a file by full storage URI."""
+    if not is_storage_uri(path):
+        raise HTTPException(status_code=400, detail="path must be a full storage URI")
+    try:
+        logger.info(f"[Storage] delete path={path} user={user}")
+        success = await storage_backend.delete_file(path, user)
+        if success:
+            return {"status": "success", "path": path}
+        raise HTTPException(status_code=500, detail=f"Failed to delete {path}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Storage] Error deleting storage file: {e}")
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
 
 

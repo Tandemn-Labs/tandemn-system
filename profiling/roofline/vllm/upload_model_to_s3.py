@@ -19,6 +19,7 @@ Usage:
     # Custom disk size (for very large models)
     python upload_model_to_s3.py --disk-size 500 --run
 """
+
 import argparse
 import subprocess
 import sys
@@ -157,31 +158,39 @@ def main():
         """),
     )
     parser.add_argument(
-        "--model", default=DEFAULT_MODEL,
+        "--model",
+        default=DEFAULT_MODEL,
         help=f"HuggingFace model ID (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
-        "--bucket", default=DEFAULT_BUCKET,
+        "--bucket",
+        default=DEFAULT_BUCKET,
         help=f"S3 bucket name (default: {DEFAULT_BUCKET})",
     )
     parser.add_argument(
-        "--s3-prefix", default=DEFAULT_S3_PREFIX,
+        "--s3-prefix",
+        default=DEFAULT_S3_PREFIX,
         help=f"S3 key prefix within the bucket (default: {DEFAULT_S3_PREFIX})",
     )
     parser.add_argument(
-        "--disk-size", type=int, default=DEFAULT_DISK_SIZE,
+        "--disk-size",
+        type=int,
+        default=DEFAULT_DISK_SIZE,
         help=f"Disk size in GB for the worker instance (default: {DEFAULT_DISK_SIZE})",
     )
     parser.add_argument(
-        "--region", default=DEFAULT_REGION,
+        "--region",
+        default=DEFAULT_REGION,
         help=f"AWS region (should match your benchmark region) (default: {DEFAULT_REGION})",
     )
     parser.add_argument(
-        "--hf-token", default="",
+        "--hf-token",
+        default="",
         help="HuggingFace token for authenticated downloads (faster speeds, required for gated models)",
     )
     parser.add_argument(
-        "--run", action="store_true",
+        "--run",
+        action="store_true",
         help="Actually launch the instance (default: dry run)",
     )
 
@@ -193,7 +202,7 @@ def main():
     print(f"S3 path:    {s3_path}")
     print(f"Region:     {args.region}")
     print(f"Disk size:  {args.disk_size} GB")
-    print(f"Instance:   spot (cheapest with 8+ CPUs, 32+ GB RAM)")
+    print("Instance:   spot (cheapest with 8+ CPUs, 32+ GB RAM)")
     print()
 
     # Generate YAML

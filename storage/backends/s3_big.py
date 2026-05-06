@@ -8,7 +8,7 @@ from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from utils.utils import split_uri
+from storage.uri import parse_storage_uri
 
 from .base import StorageBackend
 
@@ -21,18 +21,26 @@ DEFAULT_MAX_CONCURRENCY = 16
 DEFAULT_STREAM_CHUNK_MB = 8
 
 
-class S3BigStorageBackend(StorageBackend):
+class S3CompatibleStorageBackend(StorageBackend):
     """
     Optimized S3 backend for large objects (multi-GB) and high concurrency.
     Uses boto3 TransferConfig to take advantage of multipart uploads/downloads
     and threaded concurrency without requiring changes to the FastAPI layer.
     """
 
+    allowed_schemes = {"s3", "minio"}
+
     def __init__(self):
         self.aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-2")
         boto_config = Config(signature_version="s3v4")
+        endpoint_url = os.getenv("TD_STORAGE_ENDPOINT_URL") or os.getenv("S3_ENDPOINT_URL")
         # print("running in region: ", self.aws_region)
-        self.s3_client = boto3.client("s3", region_name=self.aws_region, config=boto_config)
+        self.s3_client = boto3.client(
+            "s3",
+            region_name=self.aws_region,
+            config=boto_config,
+            endpoint_url=endpoint_url,
+        )
 
         multipart_threshold = int(os.getenv("S3_MULTIPART_THRESHOLD_MB", DEFAULT_MULTIPART_THRESHOLD_MB)) * 1024 * 1024
         multipart_chunksize = int(os.getenv("S3_MULTIPART_CHUNK_MB", DEFAULT_MULTIPART_CHUNK_MB)) * 1024 * 1024
@@ -47,22 +55,20 @@ class S3BigStorageBackend(StorageBackend):
 
         self.stream_chunk_size = int(os.getenv("S3_STREAM_CHUNK_MB", DEFAULT_STREAM_CHUNK_MB)) * 1024 * 1024
 
+    def _parse_remote_path(self, remote_path: str):
+        return parse_storage_uri(remote_path, allowed_schemes=self.allowed_schemes)
+
     def _get_bucket_and_key(self, remote_path: str) -> tuple[str, str]:
         """
         Extract bucket name and key from remote_path.
-        If remote_path is a full S3 URI (s3://bucket/key), extract both.
-        Otherwise, use the user prefix and remote_path as the key.
+        If remote_path is a full S3-compatible URI, extract both.
         Returns: (bucket_name, key)
         """
-        if remote_path.startswith("s3://"):
-            uri_bucket, key = split_uri(remote_path)
-            bucket_name = uri_bucket.split("://")[1]
-            return bucket_name, key
-        # For non-URI paths, we need a bucket name - this should come from remote_path
-        # If it's not a full URI, we can't determine the bucket, so raise an error
-        raise ValueError(
-            f"remote_path must be a full S3 URI (s3://bucket/key) or include bucket information. Got: {remote_path}"
-        )
+        uri = self._parse_remote_path(remote_path)
+        return uri.bucket, uri.key
+
+    def _remote_uri(self, remote_path: str) -> str:
+        return self._parse_remote_path(remote_path).uri
 
     def _get_key(self, remote_path: str, user: str) -> str:
         """Deprecated: Use _get_bucket_and_key instead. Kept for backward compatibility."""
@@ -79,7 +85,7 @@ class S3BigStorageBackend(StorageBackend):
                 key,
                 Config=self.transfer_config,
             )
-            s3_uri = f"s3://{bucket_name}/{key}"
+            s3_uri = self._remote_uri(remote_path)
             logger.info(f"Uploaded {local_path} to {s3_uri}")
             return s3_uri
         except ClientError as e:
@@ -115,7 +121,7 @@ class S3BigStorageBackend(StorageBackend):
                 Key=key,
                 Body=data,
             )
-            s3_uri = f"s3://{bucket_name}/{key}"
+            s3_uri = self._remote_uri(remote_path)
             logger.info(f"Uploaded data to {s3_uri}")
             return s3_uri
         except ClientError as e:
@@ -225,7 +231,8 @@ class S3BigStorageBackend(StorageBackend):
                 "method": "put",
                 "headers": {"Content-Type": "application/octet-stream"},
                 "key": key,
-                "s3_uri": f"s3://{bucket_name}/{key}",
+                "s3_uri": self._remote_uri(remote_path),
+                "storage_uri": self._remote_uri(remote_path),
             }
         except ClientError as e:
             logger.error(f"Error generating presigned upload URL: {e}")
@@ -265,7 +272,8 @@ class S3BigStorageBackend(StorageBackend):
             "upload_id": response["UploadId"],
             "key": key,
             "bucket": bucket_name,
-            "s3_uri": f"s3://{bucket_name}/{key}",
+            "s3_uri": self._remote_uri(remote_path),
+            "storage_uri": self._remote_uri(remote_path),
         }
 
     async def multipart_sign_part(
@@ -323,6 +331,12 @@ class S3BigStorageBackend(StorageBackend):
             UploadId=upload_id,
         )
         return True
+
+
+class S3BigStorageBackend(S3CompatibleStorageBackend):
+    """Backward-compatible name for the S3-compatible large object backend."""
+
+    pass
 
 
 async def _paginate_async(page_iterator):

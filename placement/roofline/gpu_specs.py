@@ -190,6 +190,7 @@ AWS_INSTANCE_GPU_MAP: dict[str, dict[str, Any]] = {
     "g6e.4xlarge": {"gpu_model": "L40S", "num_gpus": 1},
     "g6e.8xlarge": {"gpu_model": "L40S", "num_gpus": 1},
     "g6e.12xlarge": {"gpu_model": "L40S", "num_gpus": 4},
+    "g6e.16xlarge": {"gpu_model": "L40S", "num_gpus": 1},
     "g6e.24xlarge": {"gpu_model": "L40S", "num_gpus": 4},
     "g6e.48xlarge": {"gpu_model": "L40S", "num_gpus": 8},
     # G6 instances (L4)
@@ -197,7 +198,8 @@ AWS_INSTANCE_GPU_MAP: dict[str, dict[str, Any]] = {
     "g6.2xlarge": {"gpu_model": "L4", "num_gpus": 1},
     "g6.4xlarge": {"gpu_model": "L4", "num_gpus": 1},
     "g6.8xlarge": {"gpu_model": "L4", "num_gpus": 1},
-    "g6.12xlarge": {"gpu_model": "L4", "num_gpus": 2},
+    "g6.12xlarge": {"gpu_model": "L4", "num_gpus": 4},
+    "g6.16xlarge": {"gpu_model": "L4", "num_gpus": 1},
     "g6.24xlarge": {"gpu_model": "L4", "num_gpus": 4},
     "g6.48xlarge": {"gpu_model": "L4", "num_gpus": 8},
     # G5 instances (A10G)
@@ -206,6 +208,7 @@ AWS_INSTANCE_GPU_MAP: dict[str, dict[str, Any]] = {
     "g5.4xlarge": {"gpu_model": "A10G", "num_gpus": 1},
     "g5.8xlarge": {"gpu_model": "A10G", "num_gpus": 1},
     "g5.12xlarge": {"gpu_model": "A10G", "num_gpus": 4},
+    "g5.16xlarge": {"gpu_model": "A10G", "num_gpus": 1},
     "g5.24xlarge": {"gpu_model": "A10G", "num_gpus": 4},
     "g5.48xlarge": {"gpu_model": "A10G", "num_gpus": 8},
 }

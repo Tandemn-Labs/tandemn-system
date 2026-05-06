@@ -68,7 +68,7 @@ def load_results(results_dir: Path) -> pd.DataFrame:
         try:
             with open(rfile) as f:
                 entries = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
+        except (OSError, json.JSONDecodeError) as e:
             print(f"  WARN: skipping {rfile}: {e}")
             continue
 
@@ -117,8 +117,9 @@ def deduplicate(df: pd.DataFrame) -> pd.DataFrame:
 
 def sort_output(df: pd.DataFrame) -> pd.DataFrame:
     """Sort by model, gpu_model, tp, pp, max_input_length, max_output_length."""
-    sort_cols = [c for c in ["model", "gpu_model", "tp", "pp", "max_input_length", "max_output_length"]
-                 if c in df.columns]
+    sort_cols = [
+        c for c in ["model", "gpu_model", "tp", "pp", "max_input_length", "max_output_length"] if c in df.columns
+    ]
     return df.sort_values(sort_cols, ascending=True).reset_index(drop=True)
 
 
@@ -206,12 +207,11 @@ def build_perfdb(results_dir: Path, output_path: Path, dry_run: bool = False):
 
 def main():
     parser = argparse.ArgumentParser(description="Build unified performance database CSV")
-    parser.add_argument("--results-dir", default="results/",
-                        help="Root directory containing result subdirectories (default: results/)")
-    parser.add_argument("--output", default="perfdb_all.csv",
-                        help="Output CSV path (default: perfdb_all.csv)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Preview what would be written without actually writing")
+    parser.add_argument(
+        "--results-dir", default="results/", help="Root directory containing result subdirectories (default: results/)"
+    )
+    parser.add_argument("--output", default="perfdb_all.csv", help="Output CSV path (default: perfdb_all.csv)")
+    parser.add_argument("--dry-run", action="store_true", help="Preview what would be written without actually writing")
     args = parser.parse_args()
 
     # Resolve paths relative to the script's parent directory (roofline/vllm/)
