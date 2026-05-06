@@ -16,6 +16,13 @@ import logging
 import subprocess
 from dataclasses import dataclass
 
+from orca_server.cloud.models import (
+    QuotaRequest,
+)
+from orca_server.cloud.models import (
+    RegionCandidate as CloudRegionCandidate,
+)
+from orca_server.cloud.quota import QuotaProvider
 from orca_server.config import INSTANCE_VCPUS, VLLM_PORT
 
 logger = logging.getLogger(__name__)
@@ -260,6 +267,28 @@ def build_skypilot_any_of(
         any_of.append(c.to_skypilot_resources(instance_type, disk_size, ports))
 
     return any_of
+
+
+class AWSQuotaProvider(QuotaProvider):
+    """AWS quota adapter backed by the existing region selector implementation."""
+
+    def get_region_candidates(self, request: QuotaRequest) -> list[CloudRegionCandidate]:
+        if request.cloud.lower() != "aws":
+            return []
+        candidates = get_ordered_regions(
+            instance_type=request.instance_type,
+            num_nodes=request.num_nodes,
+            prefer_spot=request.prefer_spot,
+            target_market=request.target_market,
+        )
+        return [
+            CloudRegionCandidate(
+                region=c.region,
+                market="spot" if c.use_spot else "on_demand",
+                available_quota=c.available_quota,
+            )
+            for c in candidates
+        ]
 
 
 # Cache for quota queries (refresh every 5 minutes)

@@ -43,7 +43,7 @@ def parse_prometheus_text(text):
 
         # Parse: name{labels} value [timestamp]
         # Handle _bucket{le="..."}, _sum, _count suffixes for histograms
-        m = re.match(r'^(\S+?)\s+([\d.eE+\-NnAaIiFf]+)', line)
+        m = re.match(r"^(\S+?)\s+([\d.eE+\-NnAaIiFf]+)", line)
         if not m:
             continue
         full_name = m.group(1)
@@ -61,7 +61,7 @@ def parse_prometheus_text(text):
         if bucket_match:
             base = bucket_match.group(1)
             le_str = bucket_match.group(2)
-            le_val = float('inf') if le_str == '+Inf' else float(le_str)
+            le_val = float("inf") if le_str == "+Inf" else float(le_str)
             hist_buckets[base].append((le_val, value))
             # Ensure histogram entry exists
             if base not in result["histograms"]:
@@ -69,7 +69,7 @@ def parse_prometheus_text(text):
             continue
 
         # Check histogram _sum / _count
-        sum_match = re.match(r'^(.+)_sum(?:\{.*\})?$', full_name)
+        sum_match = re.match(r"^(.+)_sum(?:\{.*\})?$", full_name)
         if sum_match:
             base = sum_match.group(1)
             if base in types and types[base] == "histogram" or base in hist_buckets:
@@ -78,7 +78,7 @@ def parse_prometheus_text(text):
                 result["histograms"][base]["sum"] = value
                 continue
 
-        count_match = re.match(r'^(.+)_count(?:\{.*\})?$', full_name)
+        count_match = re.match(r"^(.+)_count(?:\{.*\})?$", full_name)
         if count_match:
             base = count_match.group(1)
             if base in types and types[base] == "histogram" or base in hist_buckets:
@@ -88,21 +88,21 @@ def parse_prometheus_text(text):
                 continue
 
         # Strip labels for plain metrics
-        plain_name = re.sub(r'\{[^}]*\}', '', full_name)
+        plain_name = re.sub(r"\{[^}]*\}", "", full_name)
 
         # Determine type
         mtype = types.get(plain_name, "untyped")
         if mtype == "counter":
             # Use full_name to distinguish label variants, but for simplicity use plain_name
             # If there are labels, use full_name; otherwise plain_name
-            key = full_name if '{' in full_name else plain_name
+            key = full_name if "{" in full_name else plain_name
             result["counters"][key] = value
         elif mtype == "gauge":
-            key = full_name if '{' in full_name else plain_name
+            key = full_name if "{" in full_name else plain_name
             result["gauges"][key] = value
         else:
             # Untyped or summary — treat as gauge
-            key = full_name if '{' in full_name else plain_name
+            key = full_name if "{" in full_name else plain_name
             result["gauges"][key] = value
 
     # Attach sorted buckets to histograms
@@ -135,7 +135,7 @@ def histogram_quantile(buckets, quantile):
     prev_bound = 0.0
     prev_count = 0.0
     for bound, count in buckets:
-        if bound == float('inf'):
+        if bound == float("inf"):
             if count >= target and prev_count < target:
                 return prev_bound
             continue
@@ -194,8 +194,8 @@ def compute_deltas(warmup_parsed, final_parsed):
 
 def _find_metric(deltas, base_name, default=0.0):
     """Find a metric value by base name, ignoring label suffixes.
-    
-    Handles both 'vllm:prompt_tokens_total' and 
+
+    Handles both 'vllm:prompt_tokens_total' and
     'vllm:prompt_tokens_total{model_name="..."}' style keys.
     """
     # Exact match first

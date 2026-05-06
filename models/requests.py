@@ -25,7 +25,7 @@ class BatchedRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: str
-    input_file: str  # S3/local path to the file
+    input_file: str  # storage URI or local path to the file
     output_file: str  # local path to where the output will be saved
     # Input stats - extracted from input_file by server, but can be overridden
     num_lines: int | None = None  # number of prompt lines in the file (parsed from input_file)
@@ -69,7 +69,7 @@ class BatchedRequest(BaseModel):
     preferred_market: Literal["spot", "on_demand"] | None = None
     planned_market: Literal["spot", "on_demand"] | None = None
 
-    # S3 URI to model weights — if set, loads from S3 instead of HuggingFace
+    # Storage URI to model weights — if set, loads from object storage instead of HuggingFace
     s3_model_path: str | None = None
     # HuggingFace token for gated models (Llama, etc.)
     hf_token: str | None = None
@@ -80,7 +80,7 @@ class BatchedRequest(BaseModel):
     # Chunked distributed batch inference
     replicas: int | None = None  # Replica count (from CLI --replicas or solver)
     chunk_size: int | None = None  # Lines per chunk (default: 1000)
-    chunks: list[dict] | None = None  # [{chunk_id, s3_input_path, num_lines}, ...] — CLI uploads
+    chunks: list[dict] | None = None  # [{chunk_id, input_uri, output_uri, num_lines}, ...] — CLI uploads
     koi_alternatives: list[KoiPlacementAlternative] | None = None  # Koi placement alternatives for fallback retry
     koi_decision_id: str | None = None  # Koi decision ID — passed back via /job/started webhook
     koi_predicted_tps: float | None = None  # Koi top-level TPS prediction for webhook propagation

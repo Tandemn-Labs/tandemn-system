@@ -22,19 +22,19 @@ Usage:
     python automatic_benchmark_1.py --gpu A10G --csv-only
 """
 
+import argparse
 import csv
 import sys
-import argparse
-from pathlib import Path
-from itertools import product
 from datetime import datetime
+from itertools import product
+from pathlib import Path
 
 from automatic_launch_1 import (
     GPU_CONFIGS,
-    load_experiments,
-    group_by_cluster_then_io,
-    run_cluster_benchmarks,
     check_orphaned_cluster,
+    group_by_cluster_then_io,
+    load_experiments,
+    run_cluster_benchmarks,
     save_results_csv,
 )
 
@@ -49,18 +49,22 @@ MODELS = [
 
 TP_PP_CONFIGS = [
     (2, 4),
-    (4, 2), (4, 3), (4, 4),
-    (8, 1), (8, 2), (8, 3),
+    (4, 2),
+    (4, 3),
+    (4, 4),
+    (8, 1),
+    (8, 2),
+    (8, 3),
 ]
 
 IO_LENGTHS = [
-    (128, 128),      # ratio 1.0  — baseline, max concurrency
-    (128, 2048),     # ratio 0.06 — extreme decode (chatbot-like)
-    (512, 1024),     # ratio 0.5  — medium decode-heavy
-    (1024, 512),     # ratio 2.0  — medium balanced
-    (4096, 1024),    # ratio 4.0  — long context, prefill-leaning
-    (8192, 256),     # ratio 32.0 — extreme prefill (RAG/summarization)
-    (16384, 2048),   # ratio 8.0  — maximum context stress test
+    (128, 128),  # ratio 1.0  — baseline, max concurrency
+    (128, 2048),  # ratio 0.06 — extreme decode (chatbot-like)
+    (512, 1024),  # ratio 0.5  — medium decode-heavy
+    (1024, 512),  # ratio 2.0  — medium balanced
+    (4096, 1024),  # ratio 4.0  — long context, prefill-leaning
+    (8192, 256),  # ratio 32.0 — extreme prefill (RAG/summarization)
+    (16384, 2048),  # ratio 8.0  — maximum context stress test
 ]
 
 GPU_TYPES = ["A10G", "L40S", "L4", "A100_40gb", "A100_80gb", "H100"]
@@ -79,13 +83,15 @@ def generate_experiment_csv(output_path, models, tp_pp_configs, io_lengths):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for model, (tp, pp), (in_len, out_len) in product(models, tp_pp_configs, io_lengths):
-            writer.writerow({
-                "model": model,
-                "tensor_degree": tp,
-                "pipeline_degree": pp,
-                "max_input_length": in_len,
-                "max_output_length": out_len,
-            })
+            writer.writerow(
+                {
+                    "model": model,
+                    "tensor_degree": tp,
+                    "pipeline_degree": pp,
+                    "max_input_length": in_len,
+                    "max_output_length": out_len,
+                }
+            )
             count += 1
     return count
 
@@ -93,6 +99,7 @@ def generate_experiment_csv(output_path, models, tp_pp_configs, io_lengths):
 def get_cluster_info(tp, pp, gpu_type):
     """Get cluster sizing for a TP/PP config (uses same logic as automatic_launch_1)."""
     from automatic_launch_1 import get_cluster_config
+
     gpu_config = GPU_CONFIGS[gpu_type]
     gpus_per_node, num_nodes = get_cluster_config(tp, pp, gpu_type)
     total_gpus = gpus_per_node * num_nodes
@@ -140,7 +147,9 @@ def render_sweep_plan(models, tp_pp_configs, io_lengths, gpu_types, cloud="aws")
     print(f"\n  GPU types ({len(gpu_types)}):")
     for gpu_type in gpu_types:
         gpu_config = GPU_CONFIGS[gpu_type]
-        print(f"\n    {gpu_type} ({gpu_config['gpu_generation']}, {gpu_config['gpu_mem_gb']}GB, {gpu_config['interconnect']}):")
+        print(
+            f"\n    {gpu_type} ({gpu_config['gpu_generation']}, {gpu_config['gpu_mem_gb']}GB, {gpu_config['interconnect']}):"
+        )
 
         # Group experiments by cluster config to show how many clusters are needed
         clusters = {}
@@ -159,8 +168,7 @@ def render_sweep_plan(models, tp_pp_configs, io_lengths, gpu_types, cloud="aws")
             est_hours = n_exp * 5 / 60
             est_cost = price * est_hours
             total_cost_estimate += est_cost
-            print(f"      {desc:>25s}  ({gpus} GPU/node × {nodes} node)  "
-                  f"{n_exp:>3} experiments  ~${est_cost:.0f} est.")
+            print(f"      {desc:>25s}  ({gpus} GPU/node × {nodes} node)  {n_exp:>3} experiments  ~${est_cost:.0f} est.")
 
         print(f"      {'':>25s}  Total: ~${total_cost_estimate:.0f} estimated cost")
 
@@ -179,7 +187,7 @@ def render_sweep_plan(models, tp_pp_configs, io_lengths, gpu_types, cloud="aws")
 
     print(f"\n  {'=' * 60}")
     print(f"  GRAND TOTAL: ~${grand_total:.0f} estimated cost (all GPU types)")
-    print(f"  (Assumes ~5 min per experiment — actual time depends on model size)")
+    print("  (Assumes ~5 min per experiment — actual time depends on model size)")
     print("=" * 80 + "\n")
 
 
@@ -197,46 +205,64 @@ Examples:
         """,
     )
     parser.add_argument(
-        "--gpu", "--gpu-type", dest="gpu_types",
-        nargs="+", choices=GPU_TYPES, default=None,
+        "--gpu",
+        "--gpu-type",
+        dest="gpu_types",
+        nargs="+",
+        choices=GPU_TYPES,
+        default=None,
         help=f"GPU type(s) to run. Default: all ({', '.join(GPU_TYPES)})",
     )
     parser.add_argument(
-        "--run", action="store_true",
+        "--run",
+        action="store_true",
         help="Actually launch clusters (default: dry-run plan only)",
     )
     parser.add_argument(
-        "--csv-only", action="store_true",
+        "--csv-only",
+        action="store_true",
         help="Generate experiment CSV(s) and exit without launching",
     )
     parser.add_argument(
-        "--s3-models", action="store_true", default=False,
+        "--s3-models",
+        action="store_true",
+        default=False,
         help="Load models from S3 instead of HuggingFace",
     )
     parser.add_argument(
-        "--hf-models", action="store_true", default=False,
+        "--hf-models",
+        action="store_true",
+        default=False,
         help="Load models from HuggingFace Hub (default when --s3-models not set)",
     )
     parser.add_argument(
-        "--models", nargs="+", default=None,
+        "--models",
+        nargs="+",
+        default=None,
         help=f"Override model list (default: {', '.join(MODELS)})",
     )
     parser.add_argument(
-        "--tp-pp", nargs="+", default=None,
+        "--tp-pp",
+        nargs="+",
+        default=None,
         help="Override TP/PP configs as 'TP,PP' pairs (e.g., --tp-pp 4,2 8,1)",
     )
     parser.add_argument(
-        "--io", nargs="+", default=None,
+        "--io",
+        nargs="+",
+        default=None,
         help="Override IO lengths as 'IN,OUT' pairs (e.g., --io 512,128 2048,512)",
     )
     parser.add_argument(
-        "--cloud", dest="cloud",
+        "--cloud",
+        dest="cloud",
         choices=["aws", "gcp", "azure"],
         default="aws",
         help="Cloud provider to launch on (default: aws). Ensures all instances stay on one cloud.",
     )
     parser.add_argument(
-        "--spot", action="store_true",
+        "--spot",
+        action="store_true",
         help="Use spot/preemptible instances (cheaper but may be interrupted)",
     )
 
@@ -295,7 +321,8 @@ Examples:
                 parent_dir = "results"
                 cluster_config = (gpus, nodes)
                 results = run_cluster_benchmarks(
-                    cluster_config, exps,
+                    cluster_config,
+                    exps,
                     parent_dir=parent_dir,
                     dry_run=False,
                     gpu_type=gpu_type,
@@ -308,6 +335,7 @@ Examples:
         except Exception as e:
             print(f"\n❌ Error during {gpu_type} sweep: {e}")
             import traceback
+
             traceback.print_exc()
 
     if all_results:

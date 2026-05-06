@@ -6,6 +6,7 @@ from orca_server.config import (
     INSTANCE_VRAM,
     VLLM_PORT,
 )
+from placement.roofline.gpu_specs import AWS_INSTANCE_GPU_MAP
 
 
 def test_derived_dicts_cover_all_instances():
@@ -43,6 +44,15 @@ def test_instance_vram_values():
     for inst, vram in INSTANCE_VRAM.items():
         assert vram == AWS_INSTANCES[inst][3]
         assert vram > 0
+
+
+def test_roofline_instance_gpu_map_matches_config():
+    """Roofline's duplicate instance map stays aligned with canonical config."""
+    for inst, (gpu_name, gpu_count, *_rest) in AWS_INSTANCES.items():
+        assert AWS_INSTANCE_GPU_MAP[inst] == {
+            "gpu_model": gpu_name,
+            "num_gpus": gpu_count,
+        }
 
 
 def test_a100_vram_differentiated():

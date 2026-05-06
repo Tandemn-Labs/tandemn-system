@@ -1,19 +1,20 @@
+import argparse
+import atexit
 import csv
 import json
-import os
-import time
-import select
-from dataclasses import dataclass
-import subprocess
-from collections import defaultdict
-import sys
-import argparse
-from pathlib import Path
-import requests
-import signal
-import atexit
 import logging
+import os
+import select
+import signal
+import subprocess
+import sys
+import time
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+
+import requests
 
 # GPU type configurations
 # Each GPU type maps to: available GPU counts per instance, instance family, and pricing
@@ -128,6 +129,7 @@ VM_SELECTION_STRATEGIES = {
 # Global logger instance
 logger = logging.getLogger("benchmark")
 
+
 def setup_logger(log_file_path: Path):
     """Set up logger to write to both console and file."""
     logger.setLevel(logging.DEBUG)
@@ -138,13 +140,13 @@ def setup_logger(log_file_path: Path):
     # Console handler - prints to stdout
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter('%(message)s')
+    console_format = logging.Formatter("%(message)s")
     console_handler.setFormatter(console_format)
 
     # File handler - writes to log file
-    file_handler = logging.FileHandler(log_file_path, mode='w')
+    file_handler = logging.FileHandler(log_file_path, mode="w")
     file_handler.setLevel(logging.DEBUG)
-    file_format = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_format = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     file_handler.setFormatter(file_format)
 
     logger.addHandler(console_handler)
@@ -152,12 +154,14 @@ def setup_logger(log_file_path: Path):
 
     return logger
 
+
 # Track active cluster for cleanup on unexpected exit
 # Uses PID-based files so parallel processes don't stomp each other
 _active_cluster = None
 _active_cluster_dir = Path("/tmp/.benchmark_clusters")
 _active_cluster_dir.mkdir(exist_ok=True)
 _active_cluster_file = _active_cluster_dir / f"cluster_pid{os.getpid()}"
+
 
 def set_active_cluster(cluster_name):
     """Set active cluster and persist to PID-specific file for crash recovery."""
@@ -168,6 +172,7 @@ def set_active_cluster(cluster_name):
     elif _active_cluster_file.exists():
         _active_cluster_file.unlink()
 
+
 def get_active_cluster():
     """Get active cluster from memory or file."""
     global _active_cluster
@@ -176,6 +181,7 @@ def get_active_cluster():
     if _active_cluster_file.exists():
         return _active_cluster_file.read_text().strip()
     return None
+
 
 def cleanup_on_exit():
     """Cleanup handler for unexpected exits."""
@@ -192,11 +198,13 @@ def cleanup_on_exit():
             if _active_cluster_file.exists():
                 _active_cluster_file.unlink()
 
+
 def signal_handler(signum, frame):
     """Handle Ctrl+C and other signals."""
     print(f"\n🛑 Received signal {signum}. Cleaning up...")
     cleanup_on_exit()
     sys.exit(1)
+
 
 def check_orphaned_cluster():
     """Check for orphaned clusters from crashed runs (dead PIDs only).
@@ -218,7 +226,7 @@ def check_orphaned_cluster():
             # Process is dead — this is truly orphaned
             cluster = f.read_text().strip()
             print(f"⚠️  Found orphaned cluster {cluster} (owner pid {pid} is dead)")
-            print(f"   Terminating...")
+            print("   Terminating...")
             try:
                 subprocess.run(["sky", "down", "-y", cluster], timeout=300)
                 print(f"   ✅ Terminated {cluster}")
@@ -229,10 +237,12 @@ def check_orphaned_cluster():
             # Bad file or permission issue — clean up
             f.unlink()
 
+
 # Register cleanup handlers
 atexit.register(cleanup_on_exit)
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
+
 
 def get_cluster_config(tp, pp, gpu_type=DEFAULT_GPU_TYPE, vm_strategy="prefer_single_node"):
     """
@@ -304,76 +314,80 @@ def load_experiments(csv_path):
     with open(csv_path) as f:
         reader = csv.DictReader(f)
         for row in reader:
-            experiments.append({
-                'tp': int(row['tensor_degree']),
-                'pp': int(row['pipeline_degree']),
-                'max_input_length': int(row['max_input_length']),
-                'max_output_length': int(row['max_output_length']),
-                'model': row['model']
-            })
+            experiments.append(
+                {
+                    "tp": int(row["tensor_degree"]),
+                    "pp": int(row["pipeline_degree"]),
+                    "max_input_length": int(row["max_input_length"]),
+                    "max_output_length": int(row["max_output_length"]),
+                    "model": row["model"],
+                }
+            )
     return experiments
+
 
 def group_by_cluster_then_io(experiments, gpu_type=DEFAULT_GPU_TYPE, vm_strategy="prefer_single_node"):
     """Group experiments: same cluster config runs multiple I/O shapes.
-    
+
     Groups by (gpus_per_node, num_nodes, tp, pp, model) so that a single
     server instance can serve all I/O shapes for the same model/parallelism config.
-    
+
     Returns: {(gpus_per_node, num_nodes, tp, pp, model): [experiments]}
     """
     groups = defaultdict(list)
     for exp in experiments:
-        gpus_per_node, num_nodes = get_cluster_config(exp['tp'], exp['pp'], gpu_type, vm_strategy=vm_strategy)
-        key = (gpus_per_node, num_nodes, exp['tp'], exp['pp'], exp['model'])
+        gpus_per_node, num_nodes = get_cluster_config(exp["tp"], exp["pp"], gpu_type, vm_strategy=vm_strategy)
+        key = (gpus_per_node, num_nodes, exp["tp"], exp["pp"], exp["model"])
         groups[key].append(exp)
     return dict(groups)
+
 
 def cleanup_old_benchmark_files(work_dir=None):
     """
     Remove old benchmark files that don't have GPU type in their names.
     These files are from the old naming scheme and are now obsolete.
-    
+
     Old naming pattern: roofline-tp{TP}-pp{PP}[-{input}in-{output}out].yaml
     New naming pattern: roofline-tp{TP}-pp{PP}-{input}in-{output}out-{GPU_TYPE}.yaml
-    
+
     This function identifies old files by checking if they don't end with any known GPU type.
     """
     if work_dir is None:
         work_dir = Path("roofline_benchmarks")
-    
+
     if not work_dir.exists():
         print("ℹ️  roofline_benchmarks directory doesn't exist")
         return 0
-    
+
     # List of known GPU types to check against
     known_gpu_types = list(GPU_CONFIGS.keys())
     gpu_type_suffixes = [gpu.replace("_", "-").replace("/", "-") for gpu in known_gpu_types]
-    
+
     removed_count = 0
     removed_files = []
-    
+
     # Check YAML files
     for file_path in work_dir.glob("roofline-*.yaml"):
         # Check if filename doesn't end with any GPU type suffix
         filename = file_path.stem  # without .yaml extension
         has_gpu_type = any(filename.endswith(f"-{suffix}") for suffix in gpu_type_suffixes)
-        
+
         if not has_gpu_type:
             removed_files.append(file_path.name)
             file_path.unlink()
             removed_count += 1
-    
+
     # Check Python benchmark scripts
     for file_path in work_dir.glob("benchmark_roofline-*.py"):
         # Check if filename doesn't end with any GPU type suffix
         filename = file_path.stem.replace("benchmark_roofline-", "")  # remove prefix
         has_gpu_type = any(filename.endswith(f"-{suffix}") for suffix in gpu_type_suffixes)
-        
+
         if not has_gpu_type:
             removed_files.append(file_path.name)
             file_path.unlink()
             removed_count += 1
-    
+
     if removed_count > 0:
         print(f"🗑️  Removed {removed_count} old benchmark files:")
         for fname in sorted(removed_files):
@@ -381,10 +395,20 @@ def cleanup_old_benchmark_files(work_dir=None):
         print(f"✅ Cleaned up {removed_count} old benchmark files")
     else:
         print("ℹ️  No old benchmark files to clean up")
-    
+
     return removed_count
 
-def generate_yaml(gpus_per_node, num_nodes, cluster_name, experiments, gpu_type=DEFAULT_GPU_TYPE, s3_models=False, cloud="aws", use_spot=False):
+
+def generate_yaml(
+    gpus_per_node,
+    num_nodes,
+    cluster_name,
+    experiments,
+    gpu_type=DEFAULT_GPU_TYPE,
+    s3_models=False,
+    cloud="aws",
+    use_spot=False,
+):
     # Determine if this GPU type uses EFA-capable instances (A100/H100 on AWS)
     is_efa_capable = gpu_type.upper().startswith("A100") or gpu_type.upper() == "H100"
 
@@ -412,7 +436,7 @@ def generate_yaml(gpus_per_node, num_nodes, cluster_name, experiments, gpu_type=
 """
 
     # Check if any experiment needs Ray (PP > 1)
-    needs_ray = any(exp['pp'] > 1 for exp in experiments)
+    needs_ray = any(exp["pp"] > 1 for exp in experiments)
 
     ray_run = f"""{env_exports}
   python roofline_benchmarks/benchmark_{cluster_name}.py
@@ -491,14 +515,16 @@ def generate_yaml(gpus_per_node, num_nodes, cluster_name, experiments, gpu_type=
     # Build file_mounts block for S3 model loading
     file_mounts_block = ""
     if s3_models:
-        unique_models = list(dict.fromkeys(exp['model'] for exp in experiments))
+        unique_models = list(dict.fromkeys(exp["model"] for exp in experiments))
         mounts = []
         for model_name in unique_models:
-            mounts.append(f"  /models/{model_name}:\n    source: s3://{DEFAULT_S3_BUCKET}/{DEFAULT_S3_PREFIX}/{model_name}\n    mode: COPY")
+            mounts.append(
+                f"  /models/{model_name}:\n    source: s3://{DEFAULT_S3_BUCKET}/{DEFAULT_S3_PREFIX}/{model_name}\n    mode: COPY"
+            )
         file_mounts_block = "\nfile_mounts:\n" + "\n".join(mounts) + "\n"
 
     # Scale disk for large models (MoE models like 235B need ~470GB for weights alone)
-    model_names = [exp['model'] for exp in experiments]
+    model_names = [exp["model"] for exp in experiments]
     disk_size_gb = 500
     for mn in model_names:
         mn_lower = mn.lower()
@@ -674,7 +700,9 @@ run: |
   echo "Cluster ready for benchmarking"
 """
 
+
 DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1453154642706960485/iFXIAaDTLxNO7_GHKHhXnXwFFnXziniP4TUwLUDUnXHtT9kNo08eQBjGQ4CiBr6AazY6"
+
 
 def send_discord_message(message):
     try:
@@ -683,9 +711,12 @@ def send_discord_message(message):
     except Exception:
         pass
 
-def generate_benchmark_script(experiments, gpus_per_node, num_nodes, gpu_type=DEFAULT_GPU_TYPE, s3_models=False, cloud="aws"):
+
+def generate_benchmark_script(
+    experiments, gpus_per_node, num_nodes, gpu_type=DEFAULT_GPU_TYPE, s3_models=False, cloud="aws"
+):
     """Generate Python benchmark script for a set of experiments.
-    
+
     Generates a server-mode orchestrator that:
     1. Starts vLLM OpenAI-compatible server as subprocess
     2. Runs benchmark_client.py for each I/O shape
@@ -702,11 +733,11 @@ def generate_benchmark_script(experiments, gpus_per_node, num_nodes, gpu_type=DE
         cluster_instance_type = f"{num_nodes}x {instance_type}"
     else:
         cluster_instance_type = instance_type
-    
+
     # Model path expressions for the generated script
     if s3_models:
-        model_path_line = 'model_path = f"/models/" + exp[\'model\']'
-        global_model_path_line = 'MODEL_PATH = f"/models/" + EXPERIMENTS[0][\'model\']'
+        model_path_line = "model_path = f\"/models/\" + exp['model']"
+        global_model_path_line = "MODEL_PATH = f\"/models/\" + EXPERIMENTS[0]['model']"
     else:
         model_path_line = "model_path = exp['model']"
         global_model_path_line = "MODEL_PATH = EXPERIMENTS[0]['model']"
@@ -1965,12 +1996,22 @@ finally:
     print("✅ Server stopped")
 '''
 
-def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run=True, gpu_type=DEFAULT_GPU_TYPE, s3_models=False, cloud="aws", use_spot=False):
+
+def run_cluster_benchmarks(
+    cluster_config,
+    experiments,
+    parent_dir=None,
+    dry_run=True,
+    gpu_type=DEFAULT_GPU_TYPE,
+    s3_models=False,
+    cloud="aws",
+    use_spot=False,
+):
     gpus_per_node, num_nodes = cluster_config
     # Use TP/PP from the first experiment for naming (all experiments in a group have compatible TP/PP)
-    tp = experiments[0]['tp']
-    pp = experiments[0]['pp']
-    model = experiments[0]['model']
+    tp = experiments[0]["tp"]
+    pp = experiments[0]["pp"]
+    model = experiments[0]["model"]
     # Short model slug for cluster name (e.g., "Qwen/Qwen3-32B" → "qwen3-32b")
     model_slug = model.split("/")[-1].lower().replace("_", "-").replace(".", "-")[:20]
     # Normalize GPU type for use in filenames (replace special chars)
@@ -2013,32 +2054,36 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
                 with open(results_file) as f:
                     prior = json.load(f)
                 # Check model matches AND all experiment IDs are present
-                prior_models = {r.get('model') for r in prior if r.get('status') == 'success'}
+                prior_models = {r.get("model") for r in prior if r.get("status") == "success"}
                 if model in prior_models:
-                    prior_success = {r['exp_id'] for r in prior if r.get('status') == 'success' and r.get('model') == model}
-                    needed = {f"tp{e['tp']}_pp{e['pp']}_in{e['max_input_length']}_out{e['max_output_length']}" for e in experiments}
+                    prior_success = {
+                        r["exp_id"] for r in prior if r.get("status") == "success" and r.get("model") == model
+                    }
+                    needed = {
+                        f"tp{e['tp']}_pp{e['pp']}_in{e['max_input_length']}_out{e['max_output_length']}"
+                        for e in experiments
+                    }
                     if needed.issubset(prior_success):
                         print(f"\n⏭️  Skipping {cluster_name} — already completed in {latest.name}")
-                        return [r for r in prior if r.get('model') == model]
+                        return [r for r in prior if r.get("model") == model]
             except Exception:
                 pass  # corrupted results, re-run
 
     instance_path.mkdir(parents=True, exist_ok=True)
     result_dir = instance_path / subdir_name
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Cluster: {cluster_name}")
     print(f"Config: {gpus_per_node} GPUs/node × {num_nodes} nodes")
     print(f"Experiments: {len(experiments)}")
-    print("="*70)
+    print("=" * 70)
 
     if dry_run:
         print("[DRY RUN] Would launch and run:")
         for exp in experiments:
-            print(f"  - TP={exp['tp']}, PP={exp['pp']}, "
-                  f"in={exp['max_input_length']}, out={exp['max_output_length']}")
+            print(f"  - TP={exp['tp']}, PP={exp['pp']}, in={exp['max_input_length']}, out={exp['max_output_length']}")
         if len(experiments) > 3:
-            print(f"  ... and {len(experiments)-3} more")
+            print(f"  ... and {len(experiments) - 3} more")
         return []
 
     # Create result directory and set up logging
@@ -2056,16 +2101,28 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
     work_dir.mkdir(exist_ok=True)
     yaml_path = work_dir / f"{cluster_name}.yaml"
     script_path = work_dir / f"benchmark_{cluster_name}.py"
-    
-    yaml_content = generate_yaml(gpus_per_node, num_nodes, cluster_name, experiments, gpu_type, s3_models=s3_models, cloud=cloud, use_spot=use_spot)
+
+    yaml_content = generate_yaml(
+        gpus_per_node,
+        num_nodes,
+        cluster_name,
+        experiments,
+        gpu_type,
+        s3_models=s3_models,
+        cloud=cloud,
+        use_spot=use_spot,
+    )
     yaml_path.write_text(yaml_content)
 
     # 2. Write benchmark script
-    script_content = generate_benchmark_script(experiments, gpus_per_node, num_nodes, gpu_type, s3_models=s3_models, cloud=cloud)
+    script_content = generate_benchmark_script(
+        experiments, gpus_per_node, num_nodes, gpu_type, s3_models=s3_models, cloud=cloud
+    )
     script_path.write_text(script_content)
 
     # 3. Copy static helper files into workdir (uploaded to cluster with sky launch)
     import shutil
+
     src_dir = Path(__file__).parent
     for helper_file in ["benchmark_client.py", "prometheus_parser.py"]:
         src = src_dir / helper_file
@@ -2091,7 +2148,7 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
         )
 
         # Stream output with watchdog: kill if no output for 30 minutes
@@ -2124,29 +2181,28 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
             raise subprocess.CalledProcessError(process.returncode, "sky launch")
 
         # 5. Fetch results
-        logger.info(f"📥 Fetching results...")
-        subprocess.run([
-            "scp",
-            f"{cluster_name}:/tmp/benchmark_results.json",
-            str(local_results)
-        ], check=True)
+        logger.info("📥 Fetching results...")
+        subprocess.run(["scp", f"{cluster_name}:/tmp/benchmark_results.json", str(local_results)], check=True)
 
         # Fetch timeseries files directly into result directory
-        logger.info(f"📈 Fetching timeseries data...")
-        subprocess.run([
-            "scp",
-            f"{cluster_name}:/tmp/timeseries_*.json",
-            str(result_dir)  # Path object converts to string correctly
-        ], check=False)  # Don't fail if no timeseries files
+        logger.info("📈 Fetching timeseries data...")
+        subprocess.run(
+            [
+                "scp",
+                f"{cluster_name}:/tmp/timeseries_*.json",
+                str(result_dir),  # Path object converts to string correctly
+            ],
+            check=False,
+        )  # Don't fail if no timeseries files
 
         # Update results with local timeseries paths
         with open(local_results) as f:
             results = json.load(f)
 
         # Check if all experiments succeeded or any failed
-        all_succeeded = all(r.get('status') == 'success' for r in results)
-        status_suffix = 'success' if all_succeeded else 'fail'
-        
+        all_succeeded = all(r.get("status") == "success" for r in results)
+        status_suffix = "success" if all_succeeded else "fail"
+
         # Rename directory to include status suffix
         new_subdir_name = f"tp{tp}-pp{pp}-{instance_name_safe}-{timestamp}-{status_suffix}"
         new_result_dir = instance_path / new_subdir_name
@@ -2159,16 +2215,16 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
             local_results = result_dir / "results.json"
 
         for result in results:
-            if 'timeseries_file' in result and result.get('status') == 'success':
+            if "timeseries_file" in result and result.get("status") == "success":
                 # Update path to local location
-                remote_filename = Path(result['timeseries_file']).name
+                remote_filename = Path(result["timeseries_file"]).name
                 local_ts_path = result_dir / remote_filename
-                result['timeseries_file'] = str(local_ts_path)
+                result["timeseries_file"] = str(local_ts_path)
 
         # Save updated results
-        with open(local_results, 'w') as f:
+        with open(local_results, "w") as f:
             json.dump(results, f, indent=2)
-        
+
         # Save CSV in the same result directory with timestamp
         csv_filename = f"benchmark_results-{timestamp}.csv"
         csv_path = result_dir / csv_filename
@@ -2177,9 +2233,7 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
         # Automatically plot timeseries for successful experiments
         try:
             successful_ts_files = [
-                Path(r['timeseries_file'])
-                for r in results
-                if r.get('status') == 'success' and r.get('timeseries_file')
+                Path(r["timeseries_file"]) for r in results if r.get("status") == "success" and r.get("timeseries_file")
             ]
             if successful_ts_files:
                 logger.info(f"📈 Plotting timeseries for {len(successful_ts_files)} successful experiment(s)...")
@@ -2197,7 +2251,7 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
                 )
         except Exception as plot_err:
             logger.warning(f"⚠️  Failed to generate timeseries plots: {plot_err}")
-        
+
         logger.info(f"✅ Results saved to {result_dir}/")
         send_discord_message(f"✅ Results saved to {result_dir}")
         return results
@@ -2205,52 +2259,50 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
     except Exception as e:
         # Cluster error occurred, but benchmark might have completed successfully
         logger.error(f"❌ Cluster error: {e}")
-        logger.info(f"📥 Attempting to fetch results (benchmark may have completed)...")
-        
+        logger.info("📥 Attempting to fetch results (benchmark may have completed)...")
+
         fetched_results = None
         try:
-            logger.info(f"📥 Fetching results.json from cluster...")
-            subprocess.run([
-                "scp",
-                f"{cluster_name}:/tmp/benchmark_results.json",
-                str(local_results)
-            ], check=True)
-            
+            logger.info("📥 Fetching results.json from cluster...")
+            subprocess.run(["scp", f"{cluster_name}:/tmp/benchmark_results.json", str(local_results)], check=True)
+
             # Best-effort fetch of timeseries files even when sky launch failed
-            logger.info(f"📈 Attempting to fetch timeseries data from cluster (best-effort)...")
-            subprocess.run([
-                "scp",
-                f"{cluster_name}:/tmp/timeseries_*.json",
-                str(result_dir)
-            ], check=False)  # Don't fail the cleanup path if timeseries are missing
-            
+            logger.info("📈 Attempting to fetch timeseries data from cluster (best-effort)...")
+            subprocess.run(
+                ["scp", f"{cluster_name}:/tmp/timeseries_*.json", str(result_dir)], check=False
+            )  # Don't fail the cleanup path if timeseries are missing
+
             # Check if we successfully fetched valid results
             if local_results.exists():
                 with open(local_results) as f:
                     fetched_results = json.load(f)
                     # Check if any results have 'success' status
-                    has_success = any(r.get('status') == 'success' for r in fetched_results)
+                    has_success = any(r.get("status") == "success" for r in fetched_results)
                     if has_success:
-                        logger.info(f"✅ Found successful benchmark results despite cluster error!")
-                        logger.info(f"   This is likely a cleanup error, not a benchmark failure.")
-                        send_discord_message(f"✅ Cluster {cluster_name} completed benchmarks but had a cleanup error: {str(e)[:80]}")
+                        logger.info("✅ Found successful benchmark results despite cluster error!")
+                        logger.info("   This is likely a cleanup error, not a benchmark failure.")
+                        send_discord_message(
+                            f"✅ Cluster {cluster_name} completed benchmarks but had a cleanup error: {str(e)[:80]}"
+                        )
                     else:
                         send_discord_message(f"❌ Cluster {cluster_name} FAILED: {str(e)[:100]}")
         except Exception as fetch_error:
             logger.warning(f"⚠️  Could not fetch results: {fetch_error}")
-            send_discord_message(f"❌ Cluster {cluster_name} FAILED and results could not be fetched: {str(e)[:60]} | fetch error: {str(fetch_error)[:60]}")
-        
+            send_discord_message(
+                f"❌ Cluster {cluster_name} FAILED and results could not be fetched: {str(e)[:60]} | fetch error: {str(fetch_error)[:60]}"
+            )
+
         # Use fetched results if they contain successful benchmarks, otherwise mark as failed
-        if fetched_results and any(r.get('status') == 'success' for r in fetched_results):
+        if fetched_results and any(r.get("status") == "success" for r in fetched_results):
             results = fetched_results
             # Determine status suffix based on whether all succeeded
-            all_succeeded = all(r.get('status') == 'success' for r in results)
-            status_suffix = 'success' if all_succeeded else 'fail'
+            all_succeeded = all(r.get("status") == "success" for r in results)
+            status_suffix = "success" if all_succeeded else "fail"
         else:
             # No valid results fetched, mark all as failed
-            results = [{**exp, 'status': 'cluster_error', 'error': str(e)} for exp in experiments]
-            status_suffix = 'fail'
-        
+            results = [{**exp, "status": "cluster_error", "error": str(e)} for exp in experiments]
+            status_suffix = "fail"
+
         # Rename directory to include status suffix
         new_subdir_name = f"tp{tp}-pp{pp}-{instance_name_safe}-{timestamp}-{status_suffix}"
         new_result_dir = instance_path / new_subdir_name
@@ -2261,28 +2313,28 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
             result_dir = new_result_dir
             # Update local_results path
             local_results = result_dir / "results.json"
-        
+
         # If we have successful results and timeseries files, rewrite their paths
-        if results and any(r.get('status') == 'success' for r in results):
+        if results and any(r.get("status") == "success" for r in results):
             for result in results:
-                if 'timeseries_file' in result and result.get('status') == 'success':
-                    remote_filename = Path(result['timeseries_file']).name
+                if "timeseries_file" in result and result.get("status") == "success":
+                    remote_filename = Path(result["timeseries_file"]).name
                     local_ts_path = result_dir / remote_filename
-                    result['timeseries_file'] = str(local_ts_path)
-        
+                    result["timeseries_file"] = str(local_ts_path)
+
         # Save results (either fetched successful ones or failed markers)
-        with open(local_results, 'w') as f:
+        with open(local_results, "w") as f:
             json.dump(results, f, indent=2)
-        
+
         # Save CSV in the same result directory
         csv_filename = f"benchmark_results-{timestamp}.csv"
         csv_path = result_dir / csv_filename
         save_results_csv(results, str(csv_path))
 
         # If we have successful results, also attempt to plot timeseries
-        if results and any(r.get('status') == 'success' for r in results):
+        if results and any(r.get("status") == "success" for r in results):
             try:
-                logger.info(f"📈 Plotting timeseries for successful experiment(s) after cluster error...")
+                logger.info("📈 Plotting timeseries for successful experiment(s) after cluster error...")
                 subprocess.run(
                     [
                         "python",
@@ -2295,7 +2347,7 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
                 )
             except Exception as plot_err:
                 logger.warning(f"⚠️  Failed to generate timeseries plots after cluster error: {plot_err}")
-        
+
         return results
 
     finally:
@@ -2305,8 +2357,6 @@ def run_cluster_benchmarks(cluster_config, experiments, parent_dir=None, dry_run
 
         # Clear active cluster after successful teardown
         set_active_cluster(None)
-
-
 
 
 def save_results_csv(all_results, output_path="benchmark_results.csv"):
@@ -2319,7 +2369,7 @@ def save_results_csv(all_results, output_path="benchmark_results.csv"):
         for key in result.keys():
             if key not in fieldnames:
                 fieldnames.append(key)
-    with open(output_path, 'w', newline='') as f:
+    with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(all_results)
@@ -2332,51 +2382,69 @@ def main():
 
     # Parse arguments
     parser = argparse.ArgumentParser(
-        description='Run benchmark experiments on AWS GPU instances',
+        description="Run benchmark experiments on AWS GPU instances",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f'''
-Available GPU types: {', '.join(GPU_CONFIGS.keys())}
+        epilog=f"""
+Available GPU types: {", ".join(GPU_CONFIGS.keys())}
 Default: {DEFAULT_GPU_TYPE}
 
 Examples:
   python automatic_launch_1.py --gpu L40S
   python automatic_launch_1.py experiment.csv --gpu A100 --run
   python automatic_launch_1.py --gpu H100 --run
-        '''
+        """,
     )
-    parser.add_argument('csv_file', nargs='?', default='experiment_L40_llama.csv',
-                       help='CSV file with experiment configurations (default: experiment_L40_llama.csv)')
-    parser.add_argument('--gpu', '--gpu-type', dest='gpu_type', 
-                       choices=list(GPU_CONFIGS.keys()),
-                       default=DEFAULT_GPU_TYPE,
-                       help=f'GPU type to use (default: {DEFAULT_GPU_TYPE})')
-    parser.add_argument('--vm-strategy', dest='vm_strategy',
-                       choices=list(VM_SELECTION_STRATEGIES.keys()),
-                       default='fit_tp_then_scale',
-                       help='VM selection strategy for TP/PP -> cluster sizing')
-    parser.add_argument('--run', action='store_true',
-                       help='Actually launch clusters (default: dry run)')
-    parser.add_argument('--s3-models', action='store_true',
-                       help='Load models from S3 instead of HuggingFace (faster, requires prior upload via upload_model_to_s3.py)')
-    parser.add_argument('--cloud', dest='cloud',
-                       choices=['aws', 'gcp', 'azure'],
-                       default='aws',
-                       help='Cloud provider to launch on (default: aws)')
-    parser.add_argument('--spot', action='store_true',
-                       help='Use spot/preemptible instances (cheaper but may be interrupted)')
-    parser.add_argument('--cleanup', action='store_true',
-                       help='Clean up old benchmark files without GPU type in their names')
-    
+    parser.add_argument(
+        "csv_file",
+        nargs="?",
+        default="experiment_L40_llama.csv",
+        help="CSV file with experiment configurations (default: experiment_L40_llama.csv)",
+    )
+    parser.add_argument(
+        "--gpu",
+        "--gpu-type",
+        dest="gpu_type",
+        choices=list(GPU_CONFIGS.keys()),
+        default=DEFAULT_GPU_TYPE,
+        help=f"GPU type to use (default: {DEFAULT_GPU_TYPE})",
+    )
+    parser.add_argument(
+        "--vm-strategy",
+        dest="vm_strategy",
+        choices=list(VM_SELECTION_STRATEGIES.keys()),
+        default="fit_tp_then_scale",
+        help="VM selection strategy for TP/PP -> cluster sizing",
+    )
+    parser.add_argument("--run", action="store_true", help="Actually launch clusters (default: dry run)")
+    parser.add_argument(
+        "--s3-models",
+        action="store_true",
+        help="Load models from S3 instead of HuggingFace (faster, requires prior upload via upload_model_to_s3.py)",
+    )
+    parser.add_argument(
+        "--cloud",
+        dest="cloud",
+        choices=["aws", "gcp", "azure"],
+        default="aws",
+        help="Cloud provider to launch on (default: aws)",
+    )
+    parser.add_argument(
+        "--spot", action="store_true", help="Use spot/preemptible instances (cheaper but may be interrupted)"
+    )
+    parser.add_argument(
+        "--cleanup", action="store_true", help="Clean up old benchmark files without GPU type in their names"
+    )
+
     args = parser.parse_args()
-    
+
     # Handle cleanup option
     if args.cleanup:
         print("🧹 Cleaning up old benchmark files...")
         cleanup_old_benchmark_files()
-        if not args.run and args.csv_file == parser.get_default('csv_file'):
+        if not args.run and args.csv_file == parser.get_default("csv_file"):
             # If only cleanup was requested (no other args), exit after cleanup
             return
-    
+
     csv_path = args.csv_file
     gpu_type = args.gpu_type
     vm_strategy = args.vm_strategy
@@ -2391,10 +2459,12 @@ Examples:
     cluster_groups = group_by_cluster_then_io(experiments, gpu_type, vm_strategy=vm_strategy)
 
     print(f"📊 Loaded {len(experiments)} experiments")
-    print(f"📦 Grouped by cluster config (server reuse across I/O shapes):")
+    print("📦 Grouped by cluster config (server reuse across I/O shapes):")
     for (gpus, nodes, tp, pp, model), exps in sorted(cluster_groups.items()):
-        io_shapes = set((e['max_input_length'], e['max_output_length']) for e in exps)
-        print(f"   TP={tp}, PP={pp}, {gpus} GPU/node × {nodes} nodes: {len(exps)} experiments ({len(io_shapes)} I/O shapes)")
+        io_shapes = set((e["max_input_length"], e["max_output_length"]) for e in exps)
+        print(
+            f"   TP={tp}, PP={pp}, {gpus} GPU/node × {nodes} nodes: {len(exps)} experiments ({len(io_shapes)} I/O shapes)"
+        )
         for il, ol in sorted(io_shapes):
             print(f"      {il}in/{ol}out")
 
@@ -2408,12 +2478,16 @@ Examples:
         for (gpus, nodes, tp, pp, model), exps in sorted(cluster_groups.items()):
             # Parent directory: use results/ with all I/O shapes in one cluster
             parent_dir = "results"
-            
+
             cluster_config = (gpus, nodes)
             results = run_cluster_benchmarks(
-                cluster_config, exps, parent_dir=parent_dir,
-                dry_run=dry_run, gpu_type=gpu_type,
-                s3_models=args.s3_models, cloud=args.cloud,
+                cluster_config,
+                exps,
+                parent_dir=parent_dir,
+                dry_run=dry_run,
+                gpu_type=gpu_type,
+                s3_models=args.s3_models,
+                cloud=args.cloud,
                 use_spot=args.spot,
             )
             if results:

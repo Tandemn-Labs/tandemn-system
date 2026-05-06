@@ -9,6 +9,8 @@ import os
 
 from dotenv import load_dotenv
 
+from orca_server.cloud.catalog import AWSInstanceCatalog
+
 load_dotenv()
 
 # --------------------------------------------------------------------------- #
@@ -23,8 +25,13 @@ YAML_OUTPUT = "temp/output.yaml"
 S3_MODEL_BUCKET = "tandemn-model-shards"
 S3_MODEL_PREFIX = "hf-models"
 
-S3_UPLOAD_BUCKET = os.getenv("S3_UPLOAD_BUCKET", "tandemn-orca")
-S3_UPLOAD_PREFIX = os.getenv("S3_UPLOAD_PREFIX", "uploads")
+TD_STORAGE_UPLOAD_SCHEME = os.getenv("TD_STORAGE_UPLOAD_SCHEME", "s3")
+TD_STORAGE_UPLOAD_BUCKET = os.getenv("TD_STORAGE_UPLOAD_BUCKET", os.getenv("S3_UPLOAD_BUCKET", "tandemn-orca"))
+TD_STORAGE_UPLOAD_PREFIX = os.getenv("TD_STORAGE_UPLOAD_PREFIX", os.getenv("S3_UPLOAD_PREFIX", "uploads"))
+
+# Backward-compatible names for current callers. New code should use TD_STORAGE_*.
+S3_UPLOAD_BUCKET = TD_STORAGE_UPLOAD_BUCKET
+S3_UPLOAD_PREFIX = TD_STORAGE_UPLOAD_PREFIX
 
 # Solver selection: "roofline" (deterministic) or "user_specified"
 PLACEMENT_SOLVER = os.environ.get("TD_PLACEMENT_SOLVER", "roofline").lower()
@@ -105,21 +112,25 @@ AWS_INSTANCES = {
     "g5.48xlarge": ("A10G", 8, 192, 24),
 }
 
+AWS_INSTANCE_CATALOG = AWSInstanceCatalog(AWS_INSTANCES)
+
 # --------------------------------------------------------------------------- #
 # Derived mappings (all generated from AWS_INSTANCES)
 # --------------------------------------------------------------------------- #
 
 # instance_type -> gpu_name
-INSTANCE_TO_GPU = {inst: gpu for inst, (gpu, *_) in AWS_INSTANCES.items()}
+INSTANCE_TO_GPU = {spec.instance_type: spec.gpu_name for spec in AWS_INSTANCE_CATALOG.list_instances(cloud="aws")}
 
 # instance_type -> vcpus
-INSTANCE_VCPUS = {inst: vals[2] for inst, vals in AWS_INSTANCES.items()}
+INSTANCE_VCPUS = {spec.instance_type: spec.vcpus for spec in AWS_INSTANCE_CATALOG.list_instances(cloud="aws")}
 
 # instance_type -> vram_per_gpu_gb
-INSTANCE_VRAM = {inst: vals[3] for inst, vals in AWS_INSTANCES.items()}
+INSTANCE_VRAM = {spec.instance_type: spec.vram_gb for spec in AWS_INSTANCE_CATALOG.list_instances(cloud="aws")}
 
 # instance_type -> (gpu_name, gpu_count)  [used by roofline solver]
-AWS_INSTANCE_TO_GPU = {inst: (gpu, count) for inst, (gpu, count, *_) in AWS_INSTANCES.items()}
+AWS_INSTANCE_TO_GPU = {
+    spec.instance_type: (spec.gpu_name, spec.gpu_count) for spec in AWS_INSTANCE_CATALOG.list_instances(cloud="aws")
+}
 
 # GPUs with compute capability < 8.0 — vLLM V1 engine is not supported
 _V1_UNSUPPORTED_GPUS = {"V100", "T4"}
@@ -127,5 +138,7 @@ _V1_UNSUPPORTED_GPUS = {"V100", "T4"}
 
 def supports_vllm_v1(instance_type: str) -> bool:
     """Check if an instance type's GPU supports vLLM V1 engine (CC >= 8.0)."""
-    gpu = INSTANCE_TO_GPU.get(instance_type, "")
-    return gpu not in _V1_UNSUPPORTED_GPUS
+    try:
+        return AWS_INSTANCE_CATALOG.get_instance("aws", instance_type).supports_vllm_v1
+    except KeyError:
+        return "" not in _V1_UNSUPPORTED_GPUS

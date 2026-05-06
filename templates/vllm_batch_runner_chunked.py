@@ -1253,13 +1253,13 @@ def report_chunk_complete(chunk_id: str) -> dict:
         return {}
 
 
-def download_chunk(s3_input_path: str, local_path: str) -> bool:
-    """Download a chunk via the control plane's S3 download endpoint (with retries)."""
+def download_chunk(input_uri: str, local_path: str) -> bool:
+    """Download a chunk via the control plane's storage endpoint (with retries)."""
 
     def _download():
         resp = requests.get(
-            f"{ORCA_URL}/storage/download_s3",
-            params={"path": s3_input_path, "user": "chunk-runner"},
+            f"{ORCA_URL}/storage/download",
+            params={"path": input_uri, "user": "chunk-runner"},
             timeout=120,
             stream=True,
         )
@@ -1269,13 +1269,13 @@ def download_chunk(s3_input_path: str, local_path: str) -> bool:
                 f.write(data)
 
     try:
-        _retry(_download, f"Download {s3_input_path}", max_attempts=3, base_delay=3.0)
+        _retry(_download, f"Download {input_uri}", max_attempts=3, base_delay=3.0)
         return True
     except RuntimeError:
         return False
 
 
-def upload_chunk_output(local_path: str, s3_output_path: str) -> bool:
+def upload_chunk_output(local_path: str, output_uri: str) -> bool:
     """Upload chunk output via the control plane's storage endpoint (with retries)."""
 
     def _upload():
@@ -1283,13 +1283,13 @@ def upload_chunk_output(local_path: str, s3_output_path: str) -> bool:
             resp = requests.post(
                 f"{ORCA_URL}/storage/upload",
                 files={"file": (os.path.basename(local_path), f)},
-                data={"user": "chunk-runner", "remote_path": s3_output_path},
+                data={"user": "chunk-runner", "remote_path": output_uri},
                 timeout=120,
             )
         resp.raise_for_status()
 
     try:
-        _retry(_upload, f"Upload {s3_output_path}", max_attempts=3, base_delay=3.0)
+        _retry(_upload, f"Upload {output_uri}", max_attempts=3, base_delay=3.0)
         return True
     except RuntimeError:
         return False
@@ -1372,11 +1372,11 @@ def pull_and_download_chunk() -> tuple:
     renewal_thread.start()
     renewal_ctx = (renewal_stop, lease_stolen, renewal_thread)
 
-    s3_path = chunk_info.get("s3_input_path", "")
+    input_uri = chunk_info.get("input_uri") or chunk_info.get("s3_input_path", "")
     local_path = f"/tmp/chunk_{JOB_ID}_{cid}.jsonl"
 
-    print(f"[Runner] Downloading chunk {cid} from {s3_path}")
-    if not download_chunk(s3_path, local_path):
+    print(f"[Runner] Downloading chunk {cid} from {input_uri}")
+    if not download_chunk(input_uri, local_path):
         print(f"[Runner] Failed to download chunk {cid} after retries")
         return chunk_info, [], renewal_ctx
 
@@ -1735,12 +1735,12 @@ def main():
                 _signaled_idle = False
                 _idle_since = None
             cid = chunk_info.get("chunk_id", "unknown")
-            s3_output_path = chunk_info.get("s3_output_path", "")
+            output_uri = chunk_info.get("output_uri") or chunk_info.get("s3_output_path", "")
 
-            # Extract s3_output_base from first chunk's output path
-            if not s3_output_base and s3_output_path:
+            # Extract output base from first chunk's output path
+            if not s3_output_base and output_uri:
                 # e.g. "s3://bucket/prefix/chunks/c0001.jsonl" → "s3://bucket/prefix"
-                parts = s3_output_path.rsplit("/chunks/", 1)
+                parts = output_uri.rsplit("/chunks/", 1)
                 if len(parts) == 2:
                     s3_output_base = parts[0]
 
@@ -1778,9 +1778,9 @@ def main():
             local_output = f"/tmp/chunk_output_{JOB_ID}_{cid}.jsonl"
             write_output_jsonl(results, local_output, args.model)
 
-            upload_ok = upload_chunk_output(local_output, s3_output_path)
+            upload_ok = upload_chunk_output(local_output, output_uri)
             if upload_ok:
-                print(f"[Runner] Uploaded chunk {cid} output to {s3_output_path}")
+                print(f"[Runner] Uploaded chunk {cid} output to {output_uri}")
             else:
                 print(f"[Runner] FAILED to upload chunk {cid} — will NOT report complete")
             try:

@@ -23,6 +23,7 @@ import pandas as pd
 
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
+from orca_server.cloud.models import PlacementCandidate
 from orca_server.config import AWS_INSTANCE_TO_GPU
 from orca_server.utils import make_job_id as _make_job_id
 from placement.magic import VPCMagic
@@ -83,6 +84,30 @@ def resolve_gpu_type_to_instance(gpu_type: str, min_gpus: int) -> tuple:
     max_count = instances[-1][1]
     raise ValueError(
         f"No AWS instance with >= {min_gpus} {gpu_type} GPUs. Max available: {max_count} GPUs on {instances[-1][0]}"
+    )
+
+
+def _aws_placement_candidate(
+    *,
+    instance_type: str,
+    tp_size: int,
+    pp_size: int,
+    num_nodes: int,
+    market: str | None = None,
+    estimated_cost_per_hour: float | None = None,
+) -> PlacementCandidate:
+    gpu_model, gpus_per_node = AWS_INSTANCE_TO_GPU[instance_type]
+    return PlacementCandidate(
+        cloud="aws",
+        region=None,
+        instance_type=instance_type,
+        gpu_type=gpu_model,
+        gpus_per_node=gpus_per_node,
+        num_nodes=num_nodes,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        market=market,
+        estimated_cost_per_hour=estimated_cost_per_hour,
     )
 
 
@@ -483,6 +508,14 @@ class RooflineAWSAllocation(VPCMagic):
             cost_per_million_tokens=result.cost_per_million_tokens,
             estimated_runtime_hours=result.estimated_runtime_hours or None,
             meets_slo=result.meets_slo,
+            placement_candidate=_aws_placement_candidate(
+                instance_type=result.instance_family,
+                tp_size=result.tp_degree,
+                pp_size=result.pp_stages,
+                num_nodes=result.num_instances,
+                market=req.planned_market or req.preferred_market,
+                estimated_cost_per_hour=result.cost_per_hour,
+            ),
         )
 
     def _fallback_config(self, req: BatchedRequest) -> MagicOutput:
@@ -504,6 +537,12 @@ class RooflineAWSAllocation(VPCMagic):
             pp_size=1,
             max_model_len=8192,
             is_fallback=True,
+            placement_candidate=_aws_placement_candidate(
+                instance_type="g6e.12xlarge",
+                tp_size=4,
+                pp_size=1,
+                num_nodes=1,
+            ),
         )
 
     def _default_online_config(self, req: OnlineServingRequest) -> MagicOutput:
@@ -524,6 +563,12 @@ class RooflineAWSAllocation(VPCMagic):
             tp_size=4,
             pp_size=1,
             max_model_len=8192,  # Conservative default
+            placement_candidate=_aws_placement_candidate(
+                instance_type="g6e.12xlarge",
+                tp_size=4,
+                pp_size=1,
+                num_nodes=1,
+            ),
         )
 
     def process_batch_multi(
@@ -622,6 +667,14 @@ class RooflineAWSAllocation(VPCMagic):
                 cost_per_million_tokens=result.cost_per_million_tokens,
                 estimated_runtime_hours=result.estimated_runtime_hours or None,
                 meets_slo=result.meets_slo,
+                placement_candidate=_aws_placement_candidate(
+                    instance_type=result.instance_family,
+                    tp_size=result.tp_degree,
+                    pp_size=result.pp_stages,
+                    num_nodes=result.num_instances,
+                    market=req.planned_market or req.preferred_market,
+                    estimated_cost_per_hour=result.cost_per_hour,
+                ),
             )
             outputs.append(output)
             logger.info(
