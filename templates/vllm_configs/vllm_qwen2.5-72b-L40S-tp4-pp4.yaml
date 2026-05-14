@@ -10,6 +10,9 @@ resources:
 
 envs:
   HF_TOKEN: null
+  # vLLM/transformers pin — see orca_server/config.py (DEFAULT_VLLM_VERSION).
+  VLLM_VERSION: "{vllm_version}"
+  TRANSFORMERS_VERSION: "{transformers_version}"
   VLLM_USE_V1: "1"
   VLLM_NO_USAGE_STATS: "1"
   VLLM_LOG_STATS_INTERVAL: "1"
@@ -37,12 +40,12 @@ setup: |
   uv pip install "ray[default]>=2.48.0"
 
   # ========================================================================
-  # L40S has newer drivers (550+) that support CUDA 12.4
-  # Can use vLLM 0.10.0 with default PyTorch
+  # vLLM 0.19.1 on DLAMI (driver 580 / CUDA 13.0) — multi-node PP validated.
+  # Versions controlled by orca_server/config.py (DEFAULT_VLLM_VERSION).
   # ========================================================================
-  echo "=== Installing vLLM 0.10.0 ==="
-  uv pip install "transformers==4.57.6"  # transformers > 5.0.0 breaks vLLM 0.10.0
-  uv pip install "vllm==0.10.0"
+  echo "=== Installing vLLM $VLLM_VERSION ==="
+  uv pip install "transformers==$TRANSFORMERS_VERSION"  # transformers > 5.0.0 breaks vLLM
+  uv pip install "vllm==$VLLM_VERSION"
 
   # Apply vLLM 0.10.x patches
   SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")

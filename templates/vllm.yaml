@@ -10,7 +10,11 @@ resources:
 
 envs:
   HF_TOKEN: null  # Will be replaced at runtime
-  # VLLM_USE_V1: "0"  # Disabled — use V1 engine (default in vLLM 0.10.0)
+  # vLLM/transformers pin — set by orca_server.config (DEFAULT_VLLM_VERSION /
+  # DEFAULT_TRANSFORMERS_VERSION). Default 0.19.1 + 4.57.6; override via
+  # ORCA_VLLM_VERSION / ORCA_TRANSFORMERS_VERSION env on the control plane.
+  VLLM_VERSION: "0.19.1"
+  TRANSFORMERS_VERSION: "4.57.6"
   VLLM_USE_V1: "1"
   VLLM_NO_USAGE_STATS: "1"
   VLLM_LOG_STATS_INTERVAL: "1"  # 1-second Prometheus counter flush for live throughput
@@ -36,14 +40,16 @@ setup: |
   uv pip install "ray[default]>=2.48.0"
 
   # ========================================================================
-  # Install vLLM 0.10.0
+  # Install vLLM $VLLM_VERSION
   # ========================================================================
-  # Note: A100 has a dedicated per-config template with custom AMI
-  # This generic template is for L40S and other GPUs that work with vLLM 0.10.0
+  # Versions set via envs (VLLM_VERSION, TRANSFORMERS_VERSION). vLLM 0.19.1
+  # requires CUDA 13.0 / driver 580+, which is only on the DLAMI selected
+  # via launcher.py (image_id resolved from orca_server.config.GPU_AMI_MAP).
+  # The default SkyPilot AMI ships driver 535 / CUDA 12.2 → 0.19.1 fails.
   # ========================================================================
-  echo "=== Installing vLLM 0.10.0 ==="
-  uv pip install "transformers==4.57.6"  # transformers > 5.0.0 breaks vLLM 0.10.0
-  uv pip install "vllm==0.10.0" aiohttp pynvml
+  echo "=== Installing vLLM $VLLM_VERSION ==="
+  uv pip install "transformers==$TRANSFORMERS_VERSION"  # transformers > 5.0.0 breaks vLLM
+  uv pip install "vllm==$VLLM_VERSION" aiohttp pynvml
 
   # Verify PyTorch CUDA
   python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Available:', torch.cuda.is_available())"
