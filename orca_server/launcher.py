@@ -22,6 +22,7 @@ from orca_server.config import (
     HF_TOKEN,
     VLLM_PORT,
     YAML_OUTPUT,
+    ami_for_region,
 )
 from orca_server.koi_contract import ReasonCode, TERMINAL_PHASES
 from orca_server.job_manager import (
@@ -61,12 +62,7 @@ def _classify_attempt_failure(reason: str) -> str:
     carries a structured failure_category per attempted config. Keep the
     pattern set in sync with koi/koi/server.py:_FAILURE_PATTERNS."""
     lc = (reason or "").lower()
-    if (
-        "out of memory" in lc
-        or "outofmemory" in lc
-        or "cuda oom" in lc
-        or "oom" in lc
-    ):
+    if "out of memory" in lc or "outofmemory" in lc or "cuda oom" in lc or "oom" in lc:
         return "oom"
     if "insufficient" in lc and "capacity" in lc:
         return "no_capacity"
@@ -495,32 +491,70 @@ async def sp_launch_vllm_batch(
         prefer_spot=getattr(request, "prefer_spot", True),
     )
 
-    # Build resources with any_of for fallback regions
+    # Build resources with any_of for fallback regions.
+    # AMI per region is resolved from GPU_AMI_MAP — required for vLLM 0.19.1
+    # (driver 580 / CUDA 13.0). Regions without an entry are dropped from
+    # the failover list because the default SkyPilot AMI ships driver 535,
+    # which 0.19.1 rejects with "NVIDIA driver too old".
     use_efa = _needs_efa(config.instance_type)
     if ordered_regions:
         any_of_resources = []
+        skipped_regions = []
         for candidate in ordered_regions[:5]:
+            ami = ami_for_region(candidate.region)
+            if ami is None:
+                skipped_regions.append(candidate.region)
+                continue
             res = {
+                "cloud": "aws",
                 "region": candidate.region,
                 "instance_type": config.instance_type,
                 "use_spot": candidate.use_spot,
                 "disk_size": "300GB",
                 "ports": VLLM_PORT,
+                "image_id": ami,
             }
             if use_efa:
                 res["network_tier"] = "best"
             any_of_resources.append(res)
+        if skipped_regions:
+            job_logger.warning(
+                f"[RegionSelector] Skipped regions without GPU_AMI_MAP entry: {skipped_regions}"
+            )
         job_logger.info(
-            f"[RegionSelector] Trying regions: {[(c.region, 'spot' if c.use_spot else 'on-demand') for c in ordered_regions[:5]]}"
+            f"[RegionSelector] Trying regions: {[(r['region'], 'spot' if r['use_spot'] else 'on-demand') for r in any_of_resources]}"
         )
-        resources_config = {"any_of": any_of_resources}
+        if any_of_resources:
+            resources_config = {"any_of": any_of_resources}
+        else:
+            # All ordered regions lacked an AMI mapping; fall back to a single
+            # us-east-1 entry so the launch isn't silently broken.
+            fallback_ami = ami_for_region("us-east-1")
+            resources_config = {
+                "cloud": "aws",
+                "region": "us-east-1",
+                "instance_type": config.instance_type,
+                "disk_size": "300GB",
+                "ports": VLLM_PORT,
+            }
+            if fallback_ami:
+                resources_config["image_id"] = fallback_ami
+            if use_efa:
+                resources_config["network_tier"] = "best"
+            job_logger.warning(
+                "[RegionSelector] No mapped regions in failover list; falling back to us-east-1"
+            )
     else:
+        fallback_ami = ami_for_region("us-east-1")
         resources_config = {
-            "infra": "aws",
+            "cloud": "aws",
+            "region": "us-east-1",
             "instance_type": config.instance_type,
             "disk_size": "300GB",
             "ports": VLLM_PORT,
         }
+        if fallback_ami:
+            resources_config["image_id"] = fallback_ami
         if use_efa:
             resources_config["network_tier"] = "best"
 
@@ -536,23 +570,31 @@ async def sp_launch_vllm_batch(
         # Write to temp file and parse as yaml
         yaml_data = yaml.safe_load(template_content)
 
-        # Preserve image_id from template if specified (e.g., custom AMI for A100)
-        template_image_id = yaml_data.get("resources", {}).get("image_id")
-        template_region = yaml_data.get("resources", {}).get("region")
-
-        # If template has a specific image_id, use its region and don't do quota-based fallback
-        if template_image_id:
-            job_logger.info(
-                f"[Template] Using custom AMI: {template_image_id} in {template_region}"
-            )
-            resources_config = {
-                "cloud": "aws",
-                "accelerators": yaml_data["resources"].get("accelerators", "A100:8"),
-                "disk_size": yaml_data["resources"].get("disk_size", "300GB"),
-                "ports": yaml_data["resources"].get("ports", VLLM_PORT),
-                "image_id": template_image_id,
-                "region": template_region,
-            }
+        # Merge template's static resource preferences (accelerators, disk, ports)
+        # into the dynamic resources_config we already built (which has AMI +
+        # region + spot policy). If template specifies accelerators, that wins
+        # over the dynamic instance_type because the template is per-config.
+        template_resources = yaml_data.get("resources") or {}
+        template_accelerators = template_resources.get("accelerators")
+        if template_accelerators:
+            # Per-config template specifies accelerators (e.g., "A100:8"); use
+            # them and drop instance_type from each any_of entry to avoid a
+            # conflict between the two.
+            if "any_of" in resources_config:
+                for entry in resources_config["any_of"]:
+                    entry.pop("instance_type", None)
+                    entry["accelerators"] = template_accelerators
+            else:
+                resources_config.pop("instance_type", None)
+                resources_config["accelerators"] = template_accelerators
+        # Honor template disk_size override if larger than default
+        template_disk = template_resources.get("disk_size")
+        if template_disk:
+            if "any_of" in resources_config:
+                for entry in resources_config["any_of"]:
+                    entry["disk_size"] = template_disk
+            else:
+                resources_config["disk_size"] = template_disk
 
         # Update dynamic fields
         yaml_data["name"] = config.decision_id
@@ -1095,32 +1137,66 @@ async def _launch_chunked_replica(
         target_market=requested_market,
     )
 
+    # AMI per region from GPU_AMI_MAP — required for vLLM 0.19.1.
     use_efa = _needs_efa(config.instance_type)
     if ordered_regions:
         any_of_resources = []
+        skipped_regions = []
         for candidate in ordered_regions[:5]:
+            ami = ami_for_region(candidate.region)
+            if ami is None:
+                skipped_regions.append(candidate.region)
+                continue
             res = {
+                "cloud": "aws",
                 "region": candidate.region,
                 "instance_type": config.instance_type,
                 "use_spot": candidate.use_spot,
                 "disk_size": "300GB",
                 "ports": VLLM_PORT,
+                "image_id": ami,
             }
             if use_efa:
                 res["network_tier"] = "best"
             any_of_resources.append(res)
-        resources_config = {"any_of": any_of_resources}
+        if skipped_regions and job_logger:
+            job_logger.warning(
+                f"[RegionSelector] Skipped regions without GPU_AMI_MAP entry: {skipped_regions}"
+            )
+        if any_of_resources:
+            resources_config = {"any_of": any_of_resources}
+        else:
+            if requested_market is not None:
+                raise RuntimeError(
+                    f"No {requested_market} quota candidates with mapped AMI for {config.instance_type}"
+                )
+            fallback_ami = ami_for_region("us-east-1")
+            resources_config = {
+                "cloud": "aws",
+                "region": "us-east-1",
+                "instance_type": config.instance_type,
+                "disk_size": "300GB",
+                "ports": VLLM_PORT,
+            }
+            if fallback_ami:
+                resources_config["image_id"] = fallback_ami
+            if use_efa:
+                resources_config["network_tier"] = "best"
     else:
         if requested_market is not None:
             raise RuntimeError(
                 f"No {requested_market} quota candidates for {config.instance_type}"
             )
+        fallback_ami = ami_for_region("us-east-1")
         resources_config = {
-            "infra": "aws",
+            "cloud": "aws",
+            "region": "us-east-1",
             "instance_type": config.instance_type,
             "disk_size": "300GB",
             "ports": VLLM_PORT,
         }
+        if fallback_ami:
+            resources_config["image_id"] = fallback_ami
         if use_efa:
             resources_config["network_tier"] = "best"
 
@@ -1453,6 +1529,10 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
     replace_run_dict = replace_run_vllm_online(request, config)
     run_string = update_template("templates/vllm_run_online", replace_run_dict)
 
+    # Online serving currently pins to us-east-1 (matches the template's
+    # `infra: aws/us-east-1`). Inject the DLAMI for that region so vLLM 0.19.1
+    # has the right CUDA driver.
+    online_ami = ami_for_region("us-east-1")
     replace_yaml = {
         "name": config.decision_id,
         "num_nodes": config.num_nodes,
@@ -1460,6 +1540,8 @@ async def sp_launch_vllm_online(request: OnlineServingRequest, config: MagicOutp
         "resources.ports": str(VLLM_PORT),
         "run": run_string,
     }
+    if online_ami:
+        replace_yaml["resources.image_id"] = online_ami
     update_yaml_file("templates/vllm_online.yaml", replace_yaml, YAML_OUTPUT)
     task = sky.Task.from_yaml(YAML_OUTPUT)
     result_id = sky.launch(

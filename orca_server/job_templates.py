@@ -6,7 +6,12 @@ import os
 import uuid
 from typing import Union
 
-from orca_server.config import INSTANCE_TO_GPU, VLLM_PORT
+from orca_server.config import (
+    DEFAULT_TRANSFORMERS_VERSION,
+    DEFAULT_VLLM_VERSION,
+    INSTANCE_TO_GPU,
+    VLLM_PORT,
+)
 from models.requests import BatchedRequest, OnlineServingRequest
 from models.resources import MagicOutput
 from utils.utils import split_uri
@@ -138,6 +143,11 @@ def replace_run_vllm(
     else:
         replace["additional_params"] = ""
 
+    # vLLM and transformers version pins (used by per-config template
+    # substitution; generic templates pick these up from envs via launcher).
+    replace["vllm_version"] = DEFAULT_VLLM_VERSION
+    replace["transformers_version"] = DEFAULT_TRANSFORMERS_VERSION
+
     return replace
 
 
@@ -148,6 +158,8 @@ def replace_run_vllm_online(request: OnlineServingRequest, config: MagicOutput):
     replace["pp"] = config.pp_size
     replace["host"] = "0.0.0.0"  # Bind to all interfaces (allows external access)
     replace["port"] = str(VLLM_PORT)
+    replace["vllm_version"] = DEFAULT_VLLM_VERSION
+    replace["transformers_version"] = DEFAULT_TRANSFORMERS_VERSION
 
     if (
         request.vllm_specific_config is not None

@@ -7,12 +7,15 @@ resources:
   accelerators: A100:8
   disk_size: 300GB
   ports: 8001
-  # Custom AMI with Driver 580.105.08 | CUDA 12.8 | PyTorch 2.7.1+cu128
-  image_id: ami-04f8546cd7cc1dcd9
-  region: us-east-1
+  # image_id and region are injected by launcher.py from
+  # orca_server.config.GPU_AMI_MAP (DLAMI with driver 580 / CUDA 13.0).
+  # If you need a custom AMI for this config, add it to GPU_AMI_MAP, not here.
 
 envs:
   HF_TOKEN: null
+  # vLLM/transformers pin — see orca_server/config.py (DEFAULT_VLLM_VERSION).
+  VLLM_VERSION: "{vllm_version}"
+  TRANSFORMERS_VERSION: "{transformers_version}"
   VLLM_USE_V1: "1"
   VLLM_NO_USAGE_STATS: "1"
   VLLM_LOG_STATS_INTERVAL: "1"
@@ -40,11 +43,12 @@ setup: |
   uv pip install "ray[default]>=2.48.0"
 
   # ========================================================================
-  # Custom AMI with driver 580 - vLLM 0.10.0 works perfectly
+  # vLLM 0.19.1 on DLAMI (driver 580 / CUDA 13.0) — multi-node PP validated.
+  # Versions controlled by orca_server/config.py (DEFAULT_VLLM_VERSION).
   # ========================================================================
-  echo "=== Installing vLLM 0.10.0 ==="
-  uv pip install "transformers==4.57.6"  # transformers > 5.0.0 breaks vLLM 0.10.0
-  uv pip install "vllm==0.10.0"
+  echo "=== Installing vLLM $VLLM_VERSION ==="
+  uv pip install "transformers==$TRANSFORMERS_VERSION"  # transformers > 5.0.0 breaks vLLM
+  uv pip install "vllm==$VLLM_VERSION"
 
   # Verify PyTorch CUDA
   python3 -c "import torch; print('PyTorch:', torch.__version__, 'CUDA:', torch.version.cuda, 'Available:', torch.cuda.is_available())"
