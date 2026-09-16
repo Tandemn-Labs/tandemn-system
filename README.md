@@ -16,6 +16,17 @@ uv sync
 
 `tandemn-store` is wired as a local editable dependency (`../tandemn-store`).
 
+Set `TANDEMN_POSTGRES_URL` and `TANDEMN_USER_ID`, then run:
+
+```bash
+uv run tandemn-orca
+```
+
+Orca compiles online ranks to NVIDIA `DynamoGraphDeployment` resources and
+batch ranks to Kubernetes `Job` or `LeaderWorkerSet` resources. The target
+clusters must have the corresponding CRDs, model storage, and worker secrets
+configured before Orca starts.
+
 Initialize a batch job in chunk-manager before starting an experiment:
 
 ```bash
@@ -36,4 +47,5 @@ tandemn-init-chunk-job \
 2. For each action: `place` / `preempt` / `swap` / `keep` / `defer`
 3. `PlanStore.mark_applied(plan_id)` — CAS so a plan applies once
 
-The launcher seam (ladder -> running workers) is currently stubbed.
+The launcher reconciles the desired ranks across configured Kubernetes
+contexts and records rank health and lifecycle events in the canonical store.

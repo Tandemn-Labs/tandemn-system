@@ -491,7 +491,7 @@ def validate_rank_identity(workers_by_pod: dict[str, WorkerInfo], ranks: list[Ra
         worker.node_count = node_count
         worker.gpus_per_node = gpu_count // node_count
         target = rank.shape_json.get("target_p99_ttft_ms")
-        if isinstance(target, (int, float)):
+        if isinstance(target, int | float):
             worker.ttft_target_ms = float(target)
 
 

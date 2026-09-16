@@ -12,9 +12,9 @@ This file is for coding agents working on Orca inside `tandemn-system`. Keep it 
 
 - Prefer small, direct changes over broad abstractions. Avoid Transformer-style over-abstraction when a clear function or small module is enough.
 - Keep code understandable for systems engineers operating production infrastructure: explicit control flow beats clever generalization.
-- Follow the existing local patterns before inventing a new one. Search for similar launch, storage, quota, placement, webhook, and monitoring code before adding new shapes.
+- Follow the existing local patterns before inventing a new one. Search for similar launch, reconciliation, health, compiler, and monitoring code before adding new shapes.
 - Use comments only for non-obvious operational logic, failure modes, or cross-service contracts. Do not comment what the code already says.
-- Good style references: vLLM, SGLang, Ray, NVIDIA Dynamo, SkyPilot. Transformers has strong quality but is often more abstract than Orca should be.
+- Good style references: vLLM, SGLang, Ray, NVIDIA Dynamo, and Kubernetes controllers. Transformers has strong quality but is often more abstract than Orca should be.
 
 ## Linting, Formatting, and Type Checking
 
@@ -27,37 +27,34 @@ This file is for coding agents working on Orca inside `tandemn-system`. Keep it 
 ## CI/CD Expectations
 
 - GitHub Actions is the source of truth for PR checks.
-- The CI workflow runs lint, advisory typecheck, pre-commit hooks, pytest, the profiling parser unit test, and a Docker build.
+- The CI workflow runs lint, advisory typecheck, pre-commit hooks, pytest, and a Docker build.
 - Release tags matching `v*.*.*` build and publish the Orca image to GHCR.
 - Do not add CI steps that require AWS, GPUs, paid cloud resources, Hugging Face gated-model downloads, or Anthropic keys to normal PR CI. Those belong in manual workflows only.
-- If a test needs external data or a heavy solver dependency, make that dependency explicit with a marker, skip guard, fixture, or separate workflow.
+- If a test needs external data or a cluster dependency, make that dependency explicit with a marker, skip guard, fixture, or separate workflow.
 
 ## Dependency Policy
 
-- Do not pin to the latest vLLM just because it exists. Upgrade only when it passes Orca's correctness, launch, monitoring, placement, compatibility, and cost constraints.
+- Do not pin to the latest vLLM just because it exists. Upgrade only when it passes Orca's correctness, launch, monitoring, compatibility, and cost constraints.
 - Prefer stable, boring dependencies for the control plane. Experimental serving-stack upgrades need focused validation and clear rollback paths.
-- Keep dependency changes narrow. If bumping vLLM, SkyPilot, torch, pydantic, FastAPI, or Redis clients, call out the operational impact and test coverage.
+- Keep dependency changes narrow. If bumping vLLM, Dynamo, Kubernetes, torch, pydantic, or PostgreSQL clients, call out the operational impact and test coverage.
 
-## Cloud, Storage, and Abstraction Boundaries
+## Cloud and Cluster Boundaries
 
-- Follow SkyPilot's abstraction style for cloud/deployment behavior. Avoid scattered direct AWS boto calls for launch/deployment paths.
-- If direct provider APIs are unavoidable, wrap them behind a factory/interface so other clouds can implement the same primitives.
-- Storage should use shared primitives. Do not hardcode local SSD paths or AWS-only assumptions in code that should work for other clouds or on-prem.
-- For on-prem flows, prefer MinIO-compatible storage behind the same storage abstraction instead of special-casing filesystem paths.
-- Keep provider-specific code isolated and searchable. Cross-cloud behavior should be expressed through Orca/SkyPilot/storage interfaces.
+- Keep per-cloud selectors and catalog behavior isolated. Cross-cloud workload behavior belongs in the Kubernetes compilers and launcher boundaries.
+- Use shared storage and model-volume primitives. Do not hardcode local SSD paths or provider-specific assumptions into cross-cloud code.
+- Direct provider APIs belong in catalog/resource-map scripts, not workload reconciliation.
 
 ## Testing Philosophy
 
-- Use tests to protect business and systems behavior: placement decisions, launch lifecycle, callbacks, retries, failure classification, storage semantics, and observability.
+- Use tests to protect business and systems behavior: plan application, launch lifecycle, retries, failure classification, storage semantics, and observability.
 - Code -> test -> code is fine. Business-function contract -> test -> code is often better for Orca because regressions are usually operational.
 - Avoid overfitting tests to implementation details when the user-visible or Koi-visible contract is what matters.
 - For bug fixes, prefer a focused regression test unless the setup would require paid cloud/GPU resources.
 
 ## Repository Boundaries
 
-- Keep profiling research code separate from production Orca code unless intentionally promoting a feature into the runtime path.
 - Do not commit generated profiling results, sweep CSVs, caches, credentials, local `.env` files, or large artifacts unless explicitly requested.
-- Respect submodules. Do not assume `LLM_placement_solver` internals are editable from this repo unless the task explicitly spans that repo.
+- `tandemn-store` owns canonical models and persistence contracts; update that repository rather than duplicating them here.
 
 ## Editing Agent Instruction Files
 
