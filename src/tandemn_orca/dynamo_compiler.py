@@ -74,7 +74,7 @@ def render_router_config(
     for rank in sorted(ranks, key=lambda item: item.rank_id):
         shape = rank.shape_json
         env = shape.get("env")
-        if not isinstance(env, (list, tuple)) or len(env) != 5 or not all(env):
+        if not isinstance(env, list | tuple) or len(env) != 5 or not all(env):
             raise ValueError(f"rank {rank.rank_id}: router config requires a five-part env")
         max_num_seq = max_num_seq_by_rank.get(rank.rank_id)
         if not max_num_seq:
@@ -156,7 +156,7 @@ def render_rank_dgd(
     worker_command = ["python3", "-m", "dynamo.vllm"]
     worker_arguments = worker_args(shape)
     env = shape.get("env")
-    if isinstance(env, (list, tuple)) and len(env) > 1 and env[1] == "gcp":
+    if isinstance(env, list | tuple) and len(env) > 1 and env[1] == "gcp":
         worker_command = ["sh", "-c"]
         worker_arguments = [
             "\n".join(
@@ -275,7 +275,7 @@ def render_rank_dgd(
 def node_selector(shape: dict[str, Any]) -> dict[str, str]:
     instance_type = required(shape, "instance_type")
     env = shape.get("env")
-    cloud = env[1] if isinstance(env, (list, tuple)) and len(env) > 1 else "aws"
+    cloud = env[1] if isinstance(env, list | tuple) and len(env) > 1 else "aws"
     if cloud == "gcp":
         return {
             "cloud.google.com/gke-nodepool": instance_type,
@@ -383,7 +383,7 @@ def planner_config(rank: Rank) -> str:
 
 def capacity_type_for(shape: dict[str, Any]) -> str:
     env = shape.get("env")
-    market = env[0] if isinstance(env, (list, tuple)) and env else "reserved"
+    market = env[0] if isinstance(env, list | tuple) and env else "reserved"
     return {"reserved": "reserved", "on_demand": "on-demand"}.get(str(market), str(market))
 
 
@@ -393,6 +393,6 @@ def max_gpu_budget(rank: Rank) -> int:
 
 def required_float(shape: dict[str, Any], key: str) -> float:
     value = shape.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
         raise ValueError(f"shape missing positive number {key!r}")
     return float(value)

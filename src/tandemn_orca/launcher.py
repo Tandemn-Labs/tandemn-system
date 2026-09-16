@@ -309,7 +309,7 @@ def _max_num_seq_by_rank(
 
 def _rank_cluster_key(rank: Rank) -> str:
     env = rank.shape_json.get("env")
-    if not isinstance(env, (list, tuple)) or len(env) != 5 or not env[1] or not env[2]:
+    if not isinstance(env, list | tuple) or len(env) != 5 or not env[1] or not env[2]:
         raise ValueError(f"rank {rank.rank_id} requires a five-part env for cluster selection")
     return f"{env[1]}|{env[2]}"
 

@@ -137,7 +137,7 @@ def normalize_job_spec(spec: dict[str, Any], kind: JobKind) -> dict[str, Any]:
         _derive_online_traffic(features, provided_request_rate, provided_concurrency)
     else:
         deadline = features.get("deadline_hrs")
-        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or deadline <= 0:
+        if isinstance(deadline, bool) or not isinstance(deadline, int | float) or deadline <= 0:
             raise SystemExit("--spec field deadline_hrs must be a positive number")
 
     features["pd_ratio"] = float(features["isl_token_avg"]) / float(features["osl_token_avg"])
@@ -191,7 +191,7 @@ def _target_service_time_seconds(features: dict[str, Any]) -> float:
 
 def _positive_float(features: dict[str, Any], key: str) -> float:
     value = features.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
         raise SystemExit(f"--spec field {key} must be a positive number")
     return float(value)
 

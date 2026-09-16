@@ -142,7 +142,7 @@ def ladder_to_ranks(
         seen_rank_ids.add(rank_id)
         env = entry.get("env")
         if env is not None:
-            shape_json["env"] = list(env) if isinstance(env, (list, tuple)) else env
+            shape_json["env"] = list(env) if isinstance(env, list | tuple) else env
         if entry.get("mechanism_id") is not None:
             shape_json["mechanism_id"] = entry["mechanism_id"]
         for key in ("predicted_y", "predicted_v"):
@@ -154,7 +154,7 @@ def ladder_to_ranks(
             shape_json["target_p99_tpot_ms"] = target_p99_tpot_ms
 
         # Backfill launch fields the compiler requires but Koi keeps elsewhere.
-        if not shape_json.get("gpu_type") and isinstance(env, (list, tuple)) and len(env) >= 5:
+        if not shape_json.get("gpu_type") and isinstance(env, list | tuple) and len(env) >= 5:
             shape_json["gpu_type"] = str(env[4])  # env = (market, cloud, region, zone, gpu_type)
         if not shape_json.get("model_id") and job_spec.get("model_id"):
             shape_json["model_id"] = str(job_spec["model_id"])
